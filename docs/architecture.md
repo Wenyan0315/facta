@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.9（2026-09-06）｜随着里程碑推进持续迭代此文档
+> 版本：v0.10（2026-09-06）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块/决策）时，同步更新本文件并提升版本号
 
 ## 设计原则
@@ -59,7 +59,8 @@
 ┌──────▼───────────────────────────────────────────────────────┐
 │  memory/  记忆层                                               │
 │   短期: ✅ messages 列表（会话内）                              │
-│   长期: M6 摘要压缩 + 本地持久化（跨会话记得你）                  │
+│   跨会话: ✅ JSON 持久化（M6.1，data/memory/session.json）      │
+│   演进: M6.2 摘要压缩 → M6.3 分层记忆（旧摘要+近原文）           │
 └──────────────────────────────────────────────────────────────┘
        │
 ┌──────▼───────────────────────────────────────────────────────┐
@@ -89,10 +90,10 @@
 | core 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb | 并行工具调用 / 更复杂的规划策略 |
 | LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/siliconflow) | 更多供应商 + 多模型路由 |
 | knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) | 向量库持久化(Chroma) + 知识图谱 |
-| memory | ✅ 会话内记忆 | 跨会话长期记忆 |
+| memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1：store.py 读写，quit 退出保存/启动恢复，往返无损已验证） | 摘要压缩(M6.2) + 分层记忆(M6.3) |
 | tools | ✅ Tool+ToolRegistry+6内置工具(时间/清单/读/写/检索/检索+摘要)；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型) | 更多工具 + MCP + skills |
 | evals | ✅ 检索评估(P/R@k, MRR, 双实现对比) | 回答质量度量(LLM-as-judge) |
-| data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证) | 长文档、多来源、对话记忆入库(M6) |
+| data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据) | 长文档、多来源 |
 
 ## 三、两条演进主线
 
@@ -110,7 +111,7 @@
 | M4 | 接入 DeepSeek 真模型 | API调用、key管理、校验重试 |
 | M5 | 工具调用 Function Calling ⭐ | agent 从"会说话"到"会做事" |
 | M5.5 ✅ | Agentic RAG：检索包成工具(search_notes)，查不查/查什么/查几次由模型决定；MCP 顺延待排期 | 放权设计、复杂度塌缩(121→87行) |
-| M6 | 记忆持久化（摘要+本地存储） | 上下文管理、成本控制 |
+| M6 | 记忆持久化（摘要+本地存储）——M6.1 ✅ store.py+运行时接线(暗号跨重启验收)；M6.2 摘要压缩；M6.3 分层记忆 | 上下文管理、成本控制 |
 | M7 | 向量库持久化(Chroma)——embedding 已在 M4 完成 | 工业 RAG（增量+持久化） |
 | M7.5 | **生产化加固**：超时/显式重试/熔断/降级链(deepseek→siliconflow)/请求度量 | 企业级容错四件套 |
 | M8 | 知识图谱（实体关系+可视化） | 结构化知识 |
@@ -139,6 +140,7 @@
 - **工具写入与知识库治理（2026-09-05 M5 尾声）**：write_note 工具（agent 第一次能改文件系统）带双重防线——①安全栅栏：路径穿越(resolve+is_relative_to)/.md后缀/禁子目录/覆盖保护；②查重闸门：写入前 kb.search(content, min_score=0.85)，高度重复拒绝并提示先读后合并（知识库治理第1层=写入时把关；第2层维护工具、第3层元数据血缘留 M6/M8）。依赖注入新姿势：kb 通过闭包注入 write_note（register_builtin(registry, kb)）——工具层开始依赖知识层。溯源缺口：KB 只存文本块不记"块来自哪个文件"，查重只能返回相似片段而非文件名，M8 图谱补元数据。自我进化闭环已端到端验证：agent 读旧笔记→综合→write_note 新笔记→重启后可检索。已知边界：0.85 只拦"几乎照抄"级重复，"同主题不同措辞"的语义重复需 LLM-as-judge（M6 候选）。
 - **Agentic RAG（2026-09-06 M5.5）**：kb.search 包成 search_notes 工具，检索权从程序移交模型——主循环删掉自动检索段（121→87 行，复杂度塌缩：代码更少能力更强），run_chat 不再依赖 kb，知识层完全经工具层介入对话。连带修订：①三级信息政策从"每轮拼进消息"升级进 SYSTEM_PROMPT（提示词即政策，一次设定全程生效）②M5 意图守卫（len>=3 粗筛）随之废除——短输入误中由模型自主决策天然解决，粗筛本就是 Agentic RAG 落地前的临时占位 ③schema description 承担新职责：教模型何时该查、查询词要提炼、指代性话语要改写。search_and_summarize 复合工具（检索+内部再调 LLM 摘要）= Sub-agent 原型；内部调用绝不传 tools，防"工具调工具"无限递归。遗留：write_note 查重 0.85 只拦照抄级，语义查重留 M6 LLM-as-judge。
 - **MCP**：M5 工具层做成 ToolRegistry（内置 Python 工具 + MCP 客户端动态发现），MCP 顺延待排期（M5.5 已被 Agentic RAG 占用）
+- **记忆持久化（2026-09-06 M6.1）**：memory/store.py（asdict→JSON 存，Message(**d) 读回，往返无损已验证）。窄 except 原则：只捕 FileNotFoundError（「文件不存在=新会话」是正常场景，返回 [] 静默降级）；文件损坏(JSONDecodeError)必须大声崩——静默吞掉会让历史蒸发而无感知。接线架构（控制反转再应用）：**落盘策略归组装层**——__main__ 启动时 load 注入、quit 退出时 save；run_chat 只管内存（messages 进参 + return 归还，不碰文件 IO），换存储介质主循环零改动。关键细节：条件种人设用 `if not messages` 而非 `is None`——load 首跑返回 []，空列表也要种 system prompt，否则第一次运行的 agent 无人设。已知 tradeoff（简单优先，接受不处理）：①system prompt 入盘，改 SYSTEM_PROMPT 后旧会话仍用旧人设 ②Ctrl+C 不保存（input() 直接抛异常）③全量记忆零筛选——「记住暗号」不是智能行为是全量录像，token 随轮数线性增长，正是 M6.2 摘要压缩的动机。session.json 是运行时数据（非资产），进 .gitignore——与 data/notes（语料资产，进库）的判定同「数据与代码分离」条款。
 - **Skill**：本质是 prompt 模板 + 资源包，后续做 `skills/` 目录按需加载，不提前设计
 - **多智能体**：阶段二做（Orchestrator 编排 + 子 agent 实例化组合），依赖 M5 扎实后才做
 - **校验 guardrails**：不单独分层，横切在 core 循环和工具层——M4 结构化输出校验+重试；M5 工具参数校验+自我纠错

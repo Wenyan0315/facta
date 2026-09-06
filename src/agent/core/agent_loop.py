@@ -36,10 +36,14 @@ _MAX_TOOL_ROUNDS = 5
 def run_chat(
     llm: LLM,
     registry: ToolRegistry | None = None,
-) -> None:
-    # 历史列表：先放一条 system 消息，给模型定"人设"
+    messages: list[Message] | None = None,
+) -> list[Message]:
+    # 历史列表：M6 起可从外部注入（__main__ 从 session.json 载入后传入）
+    # 必须写 if not messages 而不是 is None——load_messages 首跑返回的是 []
+    # 不是 None：空列表也要种人设，否则第一次运行的 agent 会没有 system prompt
     # （M5.5 起：三级信息政策也从"每轮拼进消息"升级为写进人设，一次设定全程生效）
-    messages: list[Message] = [Message(role="system", content=SYSTEM_PROMPT)]
+    if not messages:
+        messages = [Message(role="system", content=SYSTEM_PROMPT)]
     # 菜单只生成一次，整个会话复用
     tools = registry.schemas() if registry else None
     print("输入 quit / exit / 退出 可结束对话。")
@@ -83,3 +87,6 @@ def run_chat(
         messages.append(reply)
 
         print(f"agent：{reply.content}")
+
+    # M6：历史交还给调用方。本函数不碰文件——落盘策略归 __main__（组装层）管
+    return messages

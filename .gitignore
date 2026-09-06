@@ -15,5 +15,8 @@ venv/
 .env
 .env.*
 
+# 运行时数据（对话记忆；data/notes 是语料资产，仍进库）
+data/memory/
+
 # 系统文件
 .DS_Store

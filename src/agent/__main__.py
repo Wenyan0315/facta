@@ -7,6 +7,7 @@
 """
 
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -14,10 +15,12 @@ from agent.core.agent_loop import run_chat
 from agent.core.llm import get_llm
 from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.loader import load_notes
+from agent.memory.store import load_messages, save_messages
 from agent.tools.builtin import register_builtin
 from agent.tools.registry import ToolRegistry
 
 VERSION = "0.8.0"
+MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置
 
 
 def main() -> None:
@@ -47,10 +50,20 @@ def main() -> None:
     register_builtin(registry, kb, llm)
     print(f"已装载工具：{', '.join(registry.names())}")
 
-    # 4) 进入多轮对话主循环
+    # 4) 会话记忆（M6）：启动时载入历史——agent 重启不失忆
+    history = load_messages(MEMORY_PATH)
+    if history:
+        print(f"已恢复 {len(history)} 条历史消息（{MEMORY_PATH}）")
+
+    # 5) 进入多轮对话主循环
     #    M5.5 起检索权在模型手里（Agentic RAG）：run_chat 不再需要 kb，
     #    知识库完全通过工具层（search_notes）介入对话
-    run_chat(llm, registry)
+    #    M6 起：历史注入 → 跑完归还，本层负责落盘（组装层管策略）
+    messages = run_chat(llm, registry, history)
+
+    # 6) 退出落盘（M6）：历史存回 JSON，下次启动恢复
+    save_messages(messages, MEMORY_PATH)
+    print(f"对话历史已保存：{len(messages)} 条 → {MEMORY_PATH}")
 
 
 if __name__ == "__main__":
