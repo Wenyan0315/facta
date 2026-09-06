@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -15,13 +16,24 @@ class Message:
     """一条对话消息。
 
     role: "system"(人设/规则) / "user"(用户) / "assistant"(模型回复)
+          / "tool"(工具执行结果，M5 新增)
     content: 消息正文
+    tool_calls: assistant 消息专属——模型"点菜"的请求列表（M5 新增）
+    tool_call_id: tool 消息专属——标记这条结果对应哪次调用（M5 新增）
+
+    新字段都带默认值 None：老代码只写 (role, content) 照样合法——
+    接口演进的标准手法：只加可选字段，不破坏既有使用者。
     """
 
     role: str
     content: str
+    tool_calls: list[dict] | None = None
+    tool_call_id: str | None = None
 
     def __repr__(self) -> str:
+        if self.tool_calls:
+            calls = ", ".join(f"{tc['name']}({tc['arguments']})" for tc in self.tool_calls)
+            return f"{self.role}: [请求调用工具] {calls}"
         return f"{self.role}: {self.content}"
 
 
@@ -29,11 +41,20 @@ class LLM(ABC):
     """所有大模型实现的统一接口。
 
     任何模型（模拟的、DeepSeek、OpenAI…）都要实现 generate 方法。
+
+    tools（M5 新增）: OpenAI 格式的工具清单（菜单）。
+    模型可以选择"点菜"——回复里带 tool_calls；也可以不点，正常说话。
+    假模型可以无视这个参数。
+
+    tool_calls 里每个元素的结构约定（我们自己定的简化格式）：
+        {"id": "调用编号", "name": "工具名", "arguments": "参数JSON字符串"}
     """
 
     @abstractmethod
-    def generate(self, messages: list[Message]) -> Message:
-        """给定一段对话历史，返回模型的回复。"""
+    def generate(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Message:
+        """给定对话历史（和可选的工具清单），返回模型的回复。"""
 
 
 class MockLLM(LLM):
@@ -45,7 +66,9 @@ class MockLLM(LLM):
 
     name = "mock"
 
-    def generate(self, messages: list[Message]) -> Message:
+    def generate(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Message:
         last = messages[-1].content
         reply = (
             f"[mock] 本轮共收到 {len(messages)} 条历史，最新一句：「{last}」"
@@ -62,7 +85,9 @@ class EchoLLM(LLM):
 
     name = "echo"
 
-    def generate(self, messages: list[Message]) -> Message:
+    def generate(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Message:
         last = messages[-1].content
         reply = f"[echo] 你的话：「{last}」"
         return Message(role="assistant", content=reply)
@@ -76,22 +101,128 @@ class RepeatLLM(LLM):
 
     name = "repeat"
 
-    def generate(self, messages: list[Message]) -> Message:
+    def generate(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Message:
         # 关键：遍历【整个历史列表】，而不是只看最后一句
         lines = [f"  {m.role}: {m.content}" for m in messages]
         reply = "[repeat] 我收到的完整历史是：\n" + "\n".join(lines)
         return Message(role="assistant", content=reply)
 
-def get_llm(provider: str = "mock") -> LLM:
-    """工厂函数：按名字返回对应的模型实现，方便以后切换。
 
-    以后接 DeepSeek 时，在这里加一个 "deepseek": DeepSeekLLM() 即可。
+class OpenAICompatibleLLM(LLM):
+    """真模型的统一实现：一切 OpenAI 兼容供应商都能用这一个类。
+
+    业界主流（DeepSeek、硅基流动、各家中转商）都兼容 OpenAI 接口，
+    区别只有三样：key、base_url、模型名。
+    所以不做"每家一个类"，而是【一个类 + 一张配置表】：
+
+        {"key环境变量", "base_url默认值", "默认模型"}
+
+    三个值都可被环境变量 {PREFIX}_API_KEY / _BASE_URL / _MODEL 覆盖。
     """
-    providers: dict[str, LLM] = {
+
+    def __init__(self, prefix: str, base_url: str, model: str) -> None:
+        # 延迟导入：只有真正用到真模型时才需要 openai 库
+        from openai import OpenAI
+
+        api_key = os.environ.get(f"{prefix}_API_KEY", "")
+        if not api_key:
+            raise RuntimeError(
+                f"缺少 {prefix}_API_KEY：请先在项目根目录 .env 文件里配置它"
+            )
+        # base_url / model 也允许环境变量覆盖
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=os.environ.get(f"{prefix}_BASE_URL", base_url),
+        )
+        self._model = os.environ.get(f"{prefix}_MODEL", model)
+
+    @staticmethod
+    def _to_openai(m: Message) -> dict:
+        """我们的 Message -> OpenAI 消息格式的转换（三种情况）。"""
+        # ① 工具结果消息：带 tool_call_id，和 assistant 的请求配对
+        if m.role == "tool":
+            return {
+                "role": "tool",
+                "tool_call_id": m.tool_call_id or "",
+                "content": m.content,
+            }
+        # ② 模型的"点菜"消息：assistant + tool_calls
+        if m.tool_calls:
+            return {
+                "role": "assistant",
+                "content": m.content or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
+                        },
+                    }
+                    for tc in m.tool_calls
+                ],
+            }
+        # ③ 普通消息
+        return {"role": m.role, "content": m.content}
+
+    def generate(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Message:
+        payload = [self._to_openai(m) for m in messages]
+        kwargs: dict = {"model": self._model, "messages": payload}
+        # 有菜单才递菜单；tools=None 时不传这个字段（假菜单会干扰模型）
+        if tools:
+            kwargs["tools"] = tools
+
+        resp = self._client.chat.completions.create(**kwargs)
+        msg = resp.choices[0].message
+
+        # 模型"点菜"了：把 OpenAI 的对象结构转成我们的简化 dict 结构
+        tool_calls = None
+        if msg.tool_calls:
+            tool_calls = [
+                {
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                }
+                for tc in msg.tool_calls
+            ]
+        return Message(
+            role="assistant", content=msg.content or "", tool_calls=tool_calls
+        )
+
+
+# 供应商配置表：加一家 = 加一行。
+# prefix 约定：环境变量 {PREFIX}_API_KEY / {PREFIX}_BASE_URL / {PREFIX}_MODEL
+PROVIDERS: dict[str, dict[str, str]] = {
+    "deepseek": {
+        "prefix": "DEEPSEEK",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-chat",
+    },
+    "siliconflow": {
+        "prefix": "SILICONFLOW",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "model": "deepseek-ai/DeepSeek-V3",
+    },
+}
+
+
+def get_llm(provider: str = "mock") -> LLM:
+    """工厂函数：按名字返回对应的模型实现，方便以后切换。"""
+    if provider in PROVIDERS:
+        cfg = PROVIDERS[provider]
+        return OpenAICompatibleLLM(cfg["prefix"], cfg["base_url"], cfg["model"])
+
+    fakes: dict[str, LLM] = {
         "mock": MockLLM(),
         "echo": EchoLLM(),
         "repeat": RepeatLLM(),
     }
-    if provider not in providers:
-        raise ValueError(f"未知的模型提供方: {provider}")
-    return providers[provider]
+    if provider in fakes:
+        return fakes[provider]
+    raise ValueError(f"未知的模型提供方: {provider}")
