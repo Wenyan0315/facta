@@ -44,16 +44,18 @@ def main() -> None:
         kb.add_document(note)
     print(f"知识库已装载 {len(notes)} 条笔记（BGE-M3 语义检索）。")
 
-    # 3) 工具（M5）：登记内置工具，交给主循环
-    #    kb 给 search/write 查重检索、llm 给 search_and_summarize 做内部摘要（闭包注入）
-    registry = ToolRegistry()
-    register_builtin(registry, kb, llm)
-    print(f"已装载工具：{', '.join(registry.names())}")
-
-    # 4) 会话记忆（M6）：启动时载入历史——agent 重启不失忆
+    # 3) 会话记忆（M6）：启动时载入历史——agent 重启不失忆
+    #    必须在登记工具之前：search_history 的闭包要抓这个列表对象
     history = load_messages(MEMORY_PATH)
     if history:
         print(f"已恢复 {len(history)} 条历史消息（{MEMORY_PATH}）")
+
+    # 4) 工具（M5）：登记内置工具，交给主循环
+    #    kb 给 search/write 查重检索、llm 给 search_and_summarize 做内部摘要、
+    #    history 给 search_history 做会话内检索（第三个闭包注入依赖）
+    registry = ToolRegistry()
+    register_builtin(registry, kb, llm, history)
+    print(f"已装载工具：{', '.join(registry.names())}")
 
     # 5) 进入多轮对话主循环
     #    M5.5 起检索权在模型手里（Agentic RAG）：run_chat 不再需要 kb，

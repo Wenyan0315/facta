@@ -25,8 +25,11 @@ SYSTEM_PROMPT = (
     "③以上都没有时，用你自己的知识回答，"
     "但必须标注「以下来自我的通用知识，非笔记内容」。"
     "需要事实信息（比如当前时间）时，主动使用工具获取。"
-    "你的历史对话由系统自动保存，过长时自动压缩为摘要；"
+    "你的历史对话由系统自动保存、跨重启恢复——恢复的历史与当前对话属于"
+    "同一个持续会话；用户说'这轮对话''这轮对话''我们聊过的'时，指含恢复历史的"
+    "整个会话，而非最近一次问答。历史过长时自动压缩为摘要；"
     "摘要中的信息等同于你的亲历记忆，可直接引用，不要声称自己记不住。"
+    "需要早前对话的逐字原话时，用 search_history 检索完整历史。"
 )
 
 # 用户输入这些词就结束对话
@@ -42,11 +45,15 @@ def run_chat(
     messages: list[Message] | None = None,
 ) -> list[Message]:
     # 历史列表：M6 起可从外部注入（__main__ 从 session.json 载入后传入）
-    # 必须写 if not messages 而不是 is None——load_messages 首跑返回的是 []
-    # 不是 None：空列表也要种人设，否则第一次运行的 agent 会没有 system prompt
-    # （M5.5 起：三级信息政策也从"每轮拼进消息"升级为写进人设，一次设定全程生效）
+    # 两段式：None → 建新列表；空列表 → 原地种人设。
+    # 第二段绝不 rebind（重新赋值）——search_history 工具的闭包抓的是
+    # __main__ 传入的那个列表对象本身；一旦 rebind 成新列表，工具看到
+    # 的永远是旧空列表，首次运行的新会话会静默失明（列表身份陷阱）
+    if messages is None:
+        messages = []
     if not messages:
-        messages = [Message(role="system", content=SYSTEM_PROMPT)]
+        messages.append(Message(role="system", content=SYSTEM_PROMPT))
+    # （M5.5 起：三级信息政策写进人设，一次设定全程生效）
     # 菜单只生成一次，整个会话复用
     tools = registry.schemas() if registry else None
     print("输入 quit / exit / 退出 可结束对话。")

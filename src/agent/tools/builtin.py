@@ -46,6 +46,13 @@ _SEARCH_AND_SUMMARIZE_PARAMS = {
     },
     "required": ["query"],
 }
+_SEARCH_HISTORY_PARAMS = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "description": "检索关键词：必须是消息正文里会出现的词（名字、数字、话题词，如'小温''幸运数字''PHP'），不能是'第一句''开头说了什么'这类抽象概念（谁嘴里都不会说这些词，搜了必落空）。问'一开始说了什么'时，用摘要里的特征词搜索，再取位置编号最小的命中。"}
+    },
+    "required": ["query"],
+}
 
 NOTES_DIR = Path("data/notes")
 
@@ -69,11 +76,13 @@ def read_notes(filename: str) -> str:
     except FileNotFoundError:
         return f"知识库里没有 {filename} 这个笔记。"
 
-def register_builtin(registry: ToolRegistry, kb=None, llm=None) -> None:
+def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Message] | None = None) -> None:
     """把内置工具登记进注册表。description 认真写——模型靠它决定何时用工具。
 
-    kb / llm 通过闭包注入给需要它们的工具（工具函数签名必须与 schema 一致，
-    不能加参数，所以让它们生在 register_builtin 里，直接引用外层变量）。
+    kb / llm / history 通过闭包注入给需要它们的工具（工具函数签名必须与
+    schema 一致，不能加参数，所以让它们生在 register_builtin 里，直接引用
+    外层变量）。history 特别注意：传的是列表对象本身（不是副本）——
+    run_chat 在这个列表上原地 append，工具才能实时看到全部历史。
     """
     def write_note(filename: str, content: str) -> str:
         """把一篇笔记写入知识库 data/notes/，带安全检查 + 查重闸门。"""
@@ -138,6 +147,32 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None) -> None:
             ))],
         )   # ← 不传第二个参数 tools，默认 None
         return f"摘要：{reply.content}\n\n原始片段：\n{context}"
+
+    def search_history(query: str) -> str:
+        """在当前会话的完整底片（含已被摘要压缩的旧消息）中检索对话原话。
+
+        关键词子串匹配，不是语义检索：历史每轮都在长，语义检索要每轮
+        重新 embedding（贵且慢）；提炼关键词的智能活交给调用方模型。
+        只搜 user/assistant——system 是人设（非历史），tool 结果是
+        检索产物（可重新生成），都不是"对话原话"的靶子。
+        """
+        q = query.strip().lower()
+        if not q:
+            return "检索词为空，请提供关键词。"
+        hits = [
+            (i, m) for i, m in enumerate(history)
+            if m.role in ("user", "assistant") and m.content and q in m.content.lower()
+        ]   # m.content 为 None 的工具轮点菜消息被 and m.content 自然滤掉
+        if not hits:
+            return "历史中没有检索到包含该关键词的原话。"
+        # 给分母：模型只看到 #30 不知道早晚，加上"共 N 条"才能做位置核验
+        # （问"第一句"却命中 #30/34 → 自曝关键词搜偏了，应换词重搜）
+        lines = [f"命中 {len(hits)} 条（历史共 {len(history)} 条；#编号越小消息越早）："]
+        for i, m in hits[:10]:
+            lines.append(f"#{i} [{m.role}] {m.content}")
+        if len(hits) > 10:
+            lines.append("（命中较多，仅显示前 10 条，可换更具体的关键词缩小范围）")
+        return "\n".join(lines)
 
 
 
@@ -211,3 +246,26 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None) -> None:
                     func=search_and_summarize,
                 )
             )
+    if history is not None:   # 条件注册：会话记忆是核心依赖（无 history 此工具无意义）
+        registry.register(
+            Tool(
+                name="search_history",
+                description=(
+                    "在当前会话的完整对话历史中按关键词检索【逐字原话】。"
+                    "历史过长时旧消息会被压缩为摘要，摘要只保留要点、会丢失原始措辞——"
+                    "当用户询问早前对话的确切原话、具体数字、'当时怎么说的'时使用。"
+                    "匹配规则：关键词子串精确匹配——搜的必须是消息正文里实际出现的词"
+                    "（名字、数字、话题词），不能是'第一句''开头'这类抽象概念，搜概念必落空。"
+                    "检索策略：从摘要和用户问题中提取特征词做关键词（是提取词，"
+                    "不是照抄问题原句）；一次未命中就换词重试，不要轻易放弃。"
+                    "命中结果带位置编号和历史总数，编号越小消息越早——"
+                    "问'第一句''一开始说了什么'时，取编号最小的命中；"
+                    "拿到结果先核验位置与问题是否自洽：若问'第一句'却命中的编号偏大"
+                    "（如 #30/共34），说明关键词搜偏了，应换摘要里更早内容的特征词重搜。"
+                    "确实检索不到时应如实告知——既不要凭印象编造原话，"
+                    "也不要把'这轮对话'偷换概念成'这一回合'来回避问题。"
+                ),
+                parameters=_SEARCH_HISTORY_PARAMS,
+                func=search_history,
+            )
+        )
