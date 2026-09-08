@@ -92,7 +92,7 @@
 | core 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb | 并行工具调用 / 更复杂的规划策略 |
 | LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/siliconflow) | 更多供应商 + 多模型路由 |
 | knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) | 向量库持久化(Chroma) + 知识图谱 |
-| memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2：滚动摘要/触发式缓存/覆盖不变量，暗号跨压缩存活已验收） | 多会话 + search_history(M6.3) |
+| memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压） | 多会话隔离（另排期） |
 | tools | ✅ Tool+ToolRegistry+6内置工具(时间/清单/读/写/检索/检索+摘要)；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型) | 更多工具 + MCP + skills |
 | evals | ✅ 检索评估(P/R@k, MRR, 双实现对比) | 回答质量度量(LLM-as-judge) |
 | data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据) | 长文档、多来源 |
@@ -113,13 +113,13 @@
 | M4 | 接入 DeepSeek 真模型 | API调用、key管理、校验重试 |
 | M5 | 工具调用 Function Calling ⭐ | agent 从"会说话"到"会做事" |
 | M5.5 ✅ | Agentic RAG：检索包成工具(search_notes)，查不查/查什么/查几次由模型决定；MCP 顺延待排期 | 放权设计、复杂度塌缩(121→87行) |
-| M6 | 记忆持久化——M6.1 ✅ store+接线；M6.2 ✅ 摘要压缩（滚动摘要/死区修复/中断保存）；M6.3a ✅ search_history（温层检索）；M6.3b 多会话管理+read_history | 上下文管理、成本控制 |
-| M6.4 | streaming 流式输出（首字延迟 + 用户取消的使能器）＋安静模式（日志/对话双通道分离） | 增量协议、tool_calls 分片重组 |
-| M7 | 向量库持久化(Chroma)——embedding 已在 M4 完成 | 工业 RAG（增量+持久化） |
-| M7.5 | **生产化加固**：超时/显式重试/熔断/降级链(deepseek→siliconflow)/请求度量 | 企业级容错四件套 |
-| M8 | 知识图谱（实体关系+可视化） | 结构化知识 |
-| M9 | 论文推送——cron 系统触发 + headless 任务入口 + arXiv 接入 + 知识库语义过滤（RAG 反向应用） | 外部API、无头任务模式、信息流过滤 |
-| 阶段二 | coding agent：内置文件/shell工具 → 多 agent 编排 | 综合实战项目 |
+| M6 记忆持久化——.1M ✅ s✅ tore+接线；MM6.2 ✅ ✅ 摘要（滚动摘要/死区修复/中断保存）压M缩（滚a动✅ 修复/中断保存）；M6.3a（温层检索）；M6.3b 多会话管理 ✅ search_his）tory | 上成本控制 |
+| M6.4 | streaming 流式输出（首字延迟 + 用户取消的使能器）＋安静模式（日志/对话双通道分离） | 增量协议、tool_calls控分片重组 制 |
+| M6.4 | streaming 流式——取道分离） | 增量已在a 4完成
+| M7 | 向量库持久化(Ch—em超时/显式重试/bedding 已在 M4 完成 | 工业 RAG（增量+持久化）四件套
+w)/8（实体知识图谱视实体关系结可视化结构化知识
+| — +|  hea——cron 系统触发 + less 任务入口 +入口 + arXiv 接入 + 语义库语义过滤（RAG 反向应用）过|（外部API、RAG 模式、信息流过滤反向应用） | 外部API、无头任务模式、信息流过滤 |
+| 阶段二 | coding agent：内置实战项目 |工具
 
 ## 四点五、企业级考量（贯穿性约定，2026-09-05 起）
 
@@ -158,3 +158,6 @@
 - **多智能体**：阶段二做（Orchestrator 编排 + 子 agent 实例化组合），依赖 M5 扎实后才做
 - **校验 guardrails**：不单独分层，横切在 core 循环和工具层——M4 结构化输出校验+重试；M5 工具参数校验+自我纠错
 - **评估 evals**：独立 `evals/` 目录不进运行链路；检索用 precision@k/recall@k/MRR；M4 后加 LLM-as-judge
+- **会话状态持久化（2026-09-08，修复 P0-1）**：M6.1 只落盘底片 messages，M6.2 的 summary/summarized_upto 是 run_chat 局部变量，重启即清零——滚动摘要退化成「启动首轮一次性全量大压缩」（档案越长越接近悬崖式压缩，且暗号跨压缩存活不可复现）。修法：抽 `Session` dataclass（messages + summary + summarized_upto）整体落盘，store 出 `save_session/load_session`（version 预留演进 + 旧列表格式自动迁移 + 游标钳到 [1,len] 防越界）；run_chat 改为注入 Session 原地变异、归还 Session——落盘策略仍归 __main__（控制反转不打折）。连带收口 __main__ 接线（此前半段还是旧 load_messages/save_messages，直接 NameError）。
+- **回归测试落地（2026-09-08）**：两份独立评审共同点名「1244 行源码 0 单测、不变量写进散文靠人肉验收」。补 `ScriptedLLM`（按脚本吐 tool_calls，工具链路首次可离线验证；每次 generate 记录收到的 messages 供断言）+ `pytest` dev 依赖 + `tests/` 13 用例，把验收五轮 saga 踩过的坑固化成断言：覆盖不变量（死区防御）、窗口边界（左边界落 user/孤儿 tool）、孤儿清理（trim_incomplete_round）、触发缓存（阈值前零调用）、跨工具编号一致性（search_history/read_history 共享 #坐标系）。铁律：不变量写成断言，不写成注释。此后每个里程碑必带测试。
+- **路线重排（2026-09-08，采纳两份评审）**：①MCP 提前——三次顺延的集结号，作为通往 coding agent 最直接的积木提到 M7.5 之后 ②M8 知识图谱 / M9 论文推送降为「兴趣支线，可跳」（对 coding agent 几乎零复用；headless 任务模式挪阶段二复用，不浪费既有设计）③streaming 从 M6 摘出、独立成交互层里程碑（增量协议+UX，与记忆无关）④P1 重构（Message→types.py、ToolContext 收敛、路径注入）排队 M7 开工前置。多会话管理（原 M6.3b）属「会话隔离+状态管理」，另排期，不塞回记忆层。
