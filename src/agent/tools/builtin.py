@@ -53,6 +53,14 @@ _SEARCH_HISTORY_PARAMS = {
     },
     "required": ["query"],
 }
+_READ_HISTORY_PARAMS = {
+    "type": "object",
+    "properties": {
+        "start": {"type": "integer", "description": "起始位置编号（从 0 开始：#0 是 system 人设，#1 通常是用户的第一句话）。从该条开始（含）向后读。"},
+        "count": {"type": "integer", "description": "读取条数，默认 5，最多 20（防止一次灌爆上下文）。"},
+    },
+    "required": ["start"],
+}
 
 NOTES_DIR = Path("data/notes")
 
@@ -174,6 +182,37 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
             lines.append("（命中较多，仅显示前 10 条，可换更具体的关键词缩小范围）")
         return "\n".join(lines)
 
+    def read_history(start: int, count: int = 5) -> str:
+        """按位置编号读取当前会话的对话原文（与 search_history 互补）。
+
+        search_history 回答"谁说过 X"（内容→位置，LIKE）；本工具回答
+        "第 N 条是什么"（位置→内容，ORDER BY id LIMIT）——问"第一句"
+        直接读 start=1，不必猜关键词，五轮验收翻车的三跳推理就此拆除。
+        编号 0-based，与 search_history 完全一致（#0=system 人设），
+        两工具编号体系若不一致，模型交叉对照必然错位。
+        """
+        # 入参校验：错参返回"教模型怎么改"的提示，而不是崩
+        if start < 0:
+            return "起始编号从 0 开始（#0 是 system 人设，#1 通常是用户的第一句话）。"
+        if not 1 <= count <= 20:
+            return "count 需在 1~20 之间（默认 5）。"
+        if start >= len(history):
+            return f"起始编号超出范围：历史共 {len(history)} 条（编号 0~{len(history)-1}）。"
+
+        lines = [f"历史共 {len(history)} 条（编号与 search_history 一致，越小越早），读取 #{start} 起的 {count} 条："]
+        for i in range(start, min(start + count, len(history))):
+            m = history[i]
+            tag = ""
+            if m.tool_calls:   # 工具轮点菜消息：content 常为 None，标注它点了什么菜
+                tag = f"（点菜：{'、'.join(t['name'] for t in m.tool_calls)}）"
+            content = m.content or "（无文字内容）"
+            # 按角色分配上下文预算：user/assistant 是逐字原话（本工具的使命），全量给；
+            # tool 结果是可重生的检索产物，截断 300 字防止一次读 20 条灌爆上下文
+            if m.role == "tool" and len(content) > 300:
+                content = content[:300] + "…（已截断）"
+            lines.append(f"#{i} [{m.role}]{tag} {content}")
+        return "\n".join(lines)
+
 
 
     registry.register(
@@ -267,5 +306,22 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
                 ),
                 parameters=_SEARCH_HISTORY_PARAMS,
                 func=search_history,
+            )
+        )
+        registry.register(
+            Tool(
+                name="read_history",
+                description=(
+                    "按位置编号读取当前会话的对话原文，与 search_history 互补："
+                    "那个按【内容】搜（'谁说过 X'），这个按【位置】读（'第 N 条是什么'）。"
+                    "当用户问'第一句话说了什么''最早的对话''开头聊了什么'这类位置问题时"
+                    "直接使用——读 start=1 即用户最早的原话，不需要猜关键词、"
+                    "也不需要先经过 search_history。"
+                    "编号从 0 开始且与 search_history 的编号完全一致"
+                    "（#0 是 system 人设，#1 通常是用户的第一句话，编号越小越早），"
+                    "历史总数见返回头。想看某条命中的上下文时也可用它读前后几条。"
+                ),
+                parameters=_READ_HISTORY_PARAMS,
+                func=read_history,
             )
         )
