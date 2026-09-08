@@ -15,6 +15,7 @@ M5 起：工具调用循环（ReAct 雏形）——
 
 from agent.core.llm import LLM, Message
 from agent.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
+from agent.memory.store import Session
 from agent.tools.registry import ToolRegistry
 
 SYSTEM_PROMPT = (
@@ -42,25 +43,22 @@ _MAX_TOOL_ROUNDS = 5
 def run_chat(
     llm: LLM,
     registry: ToolRegistry | None = None,
-    messages: list[Message] | None = None,
-) -> list[Message]:
-    # 历史列表：M6 起可从外部注入（__main__ 从 session.json 载入后传入）
-    # 两段式：None → 建新列表；空列表 → 原地种人设。
-    # 第二段绝不 rebind（重新赋值）——search_history 工具的闭包抓的是
-    # __main__ 传入的那个列表对象本身；一旦 rebind 成新列表，工具看到
-    # 的永远是旧空列表，首次运行的新会话会静默失明（列表身份陷阱）
-    if messages is None:
-        messages = []
-    if not messages:
-        messages.append(Message(role="system", content=SYSTEM_PROMPT))
+    session: Session | None = None,
+) -> Session:
+    # 会话状态：从外部注入（__main__ 从 session.json 载入 Session 后传入），
+    # 底片（messages）+ 压缩缓存（summary/summarized_upto）整体进出。
+    # 人设两段式：Session.messages 永远是个列表（可能是空），空则原地种人设。
+    # 绝不 rebind（重新赋值）session.messages——search_history 工具的闭包抓的
+    # 是 __main__ 传入的那个列表对象本身；一旦 rebind 成新列表，工具看到的
+    # 永远是旧空列表，首次运行的新会话会静默失明（列表身份陷阱）
+    if session is None:
+        session = Session()
+    if not session.messages:
+        session.messages.append(Message(role="system", content=SYSTEM_PROMPT))
     # （M5.5 起：三级信息政策写进人设，一次设定全程生效）
     # 菜单只生成一次，整个会话复用
     tools = registry.schemas() if registry else None
     print("输入 quit / exit / 退出 可结束对话。")
-
-    # M6.2 压缩状态：滚动摘要 + 覆盖进度（第 0 条 system 人设永不入摘要，从 1 起算）
-    summary: str | None = None
-    summarized_upto = 1
 
     try:
         while True:
@@ -72,13 +70,14 @@ def run_chat(
                 continue
 
             # 1) 用户这句话存进历史（底片照常全量生长，append-only 不变）
-            messages.append(Message(role="user", content=user_input))
+            session.messages.append(Message(role="user", content=user_input))
 
             # 2) M6.2 发送前投影：触发式摘要（内部调用）→ 切 payload
-            summary, summarized_upto = maybe_compress(
-                llm, messages, summary, summarized_upto
+            #    压缩缓存记在 Session 上——随底片一起落盘，重启不从头再压
+            session.summary, session.summarized_upto = maybe_compress(
+                llm, session.messages, session.summary, session.summarized_upto
             )
-            payload = build_payload(messages, summary, summarized_upto)
+            payload = build_payload(session.messages, session.summary, session.summarized_upto)
 
             # 3) 工具循环：决策 → 执行 → 观察 → 再决策（M5 心脏）
             for _round in range(_MAX_TOOL_ROUNDS):
@@ -88,7 +87,7 @@ def run_chat(
                     break
 
                 # 双写：底片入史（落盘用）+ 投影同步（本轮内模型必须看得见）
-                messages.append(reply)
+                session.messages.append(reply)
                 payload.append(reply)
 
                 for tc in reply.tool_calls:   # 模型一次可能点多个菜
@@ -97,7 +96,7 @@ def run_chat(
                     print(f"  [工具结果] {result}")
                     # 结果以 role="tool" 回填，tool_call_id 对应是哪次调用
                     tool_msg = Message(role="tool", tool_call_id=tc["id"], content=result)
-                    messages.append(tool_msg)
+                    session.messages.append(tool_msg)
                     payload.append(tool_msg)
             else:
                 # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
@@ -105,7 +104,7 @@ def run_chat(
                 reply = llm.generate(payload, None)  # 最后一问不递菜单，逼它说话
 
             # 4) 收尾：最终回答只入底片（投影本轮作废，下轮重切）
-            messages.append(reply)
+            session.messages.append(reply)
 
             print(f"agent：{reply.content}")
     except (KeyboardInterrupt, EOFError):
@@ -113,8 +112,8 @@ def run_chat(
         # 先掐掉可能不完整的工具轮（孤儿 tool 消息落盘 = 下次启动 API 400），
         # 再把干净的历史交还给 __main__ 落盘
         print("\n[中断] 丢弃未完成的一轮，保存历史后退出。")
-        trim_incomplete_round(messages)
-        summarized_upto = min(summarized_upto, len(messages))   # 覆盖进度不越界
+        trim_incomplete_round(session.messages)
+        session.summarized_upto = min(session.summarized_upto, len(session.messages))   # 覆盖进度不越界
 
-    # 历史交还给调用方。本函数不碰文件——落盘策略归 __main__（组装层）管
-    return messages
+    # 会话状态交还给调用方。本函数不碰文件——落盘策略归 __main__（组装层）管
+    return session

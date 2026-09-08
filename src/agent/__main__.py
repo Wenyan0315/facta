@@ -15,7 +15,7 @@ from agent.core.agent_loop import run_chat
 from agent.core.llm import get_llm
 from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.loader import load_notes
-from agent.memory.store import load_messages, save_messages
+from agent.memory.store import load_session, save_session
 from agent.tools.builtin import register_builtin
 from agent.tools.registry import ToolRegistry
 
@@ -44,28 +44,29 @@ def main() -> None:
         kb.add_document(note)
     print(f"知识库已装载 {len(notes)} 条笔记（BGE-M3 语义检索）。")
 
-    # 3) 会话记忆（M6）：启动时载入历史——agent 重启不失忆
-    #    必须在登记工具之前：search_history 的闭包要抓这个列表对象
-    history = load_messages(MEMORY_PATH)
-    if history:
-        print(f"已恢复 {len(history)} 条历史消息（{MEMORY_PATH}）")
+    # 3) 会话记忆（M6）：启动时载入【完整会话状态】——底片(消息) + 压缩缓存(摘要游标)
+    #    关键细节：必须在登记工具之前载入——search_history 的闭包要抓这个列表对象
+    session = load_session(MEMORY_PATH)
+    if session.messages:
+        print(f"已恢复 {len(session.messages)} 条历史消息（{MEMORY_PATH}）")
 
     # 4) 工具（M5）：登记内置工具，交给主循环
     #    kb 给 search/write 查重检索、llm 给 search_and_summarize 做内部摘要、
-    #    history 给 search_history 做会话内检索（第三个闭包注入依赖）
+    #    session.messages 给 search_history/read_history 做会话内检索（闭包注入依赖，
+    #    传列表对象本身而非副本——run_chat 原地 append，工具才能实时看到全部历史）
     registry = ToolRegistry()
-    register_builtin(registry, kb, llm, history)
+    register_builtin(registry, kb, llm, session.messages)
     print(f"已装载工具：{', '.join(registry.names())}")
 
     # 5) 进入多轮对话主循环
     #    M5.5 起检索权在模型手里（Agentic RAG）：run_chat 不再需要 kb，
     #    知识库完全通过工具层（search_notes）介入对话
-    #    M6 起：历史注入 → 跑完归还，本层负责落盘（组装层管策略）
-    messages = run_chat(llm, registry, history)
+    #    M6 起：会话状态注入 → 跑完归还，本层负责落盘（组装层管策略）
+    session = run_chat(llm, registry, session)
 
-    # 6) 退出落盘（M6）：历史存回 JSON，下次启动恢复
-    save_messages(messages, MEMORY_PATH)
-    print(f"对话历史已保存：{len(messages)} 条 → {MEMORY_PATH}")
+    # 6) 退出落盘（M6）：完整会话状态（消息 + 压缩缓存）存回 JSON，下次启动恢复
+    save_session(session, MEMORY_PATH)
+    print(f"对话历史已保存：{len(session.messages)} 条 → {MEMORY_PATH}")
 
 
 if __name__ == "__main__":

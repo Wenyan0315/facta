@@ -110,6 +110,38 @@ class RepeatLLM(LLM):
         return Message(role="assistant", content=reply)
 
 
+class ScriptedLLM(LLM):
+    """脚本假模型：按预设回复依次吐，用于离线测工具链路。
+
+    MockLLM / EchoLLM / RepeatLLM 都只回纯文本，测不了 tool_calls——
+    而工具循环、tool 消息与 tool_calls 配对、窗口孤儿检测，全都依赖
+    「模型会点菜」。这一直是本地全绿、真模型间歇炸的根因（compressor.py
+    自己写下的那句「mock 模型不校验」）。
+
+    用法：script 是一串 Message，想怎么编怎么编——纯文本回复、带
+    tool_calls 的点菜消息都在这里指定。每次 generate 都把收到的 messages
+    存进 self.calls，供断言「这一轮模型到底看到了什么」。脚本弹完后再被叫，
+    回一句兜底文本，防止工具循环空转。"""
+
+    name = "scripted"
+
+    def __init__(self, script: list[Message]) -> None:
+        self._script = list(script)
+        self._index = 0
+        # 每次 generate 收到的 messages 快照（断言投影/配对用）
+        self.calls: list[list[Message]] = []
+
+    def generate(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Message:
+        self.calls.append(list(messages))   # 浅拷贝快照，而非引用——否则断言时已经变了
+        if self._index < len(self._script):
+            reply = self._script[self._index]
+            self._index += 1
+            return reply
+        return Message(role="assistant", content="[script exhausted]")
+
+
 class OpenAICompatibleLLM(LLM):
     """真模型的统一实现：一切 OpenAI 兼容供应商都能用这一个类。
 
