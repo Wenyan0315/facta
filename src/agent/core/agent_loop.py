@@ -13,7 +13,8 @@ M5 起：工具调用循环（ReAct 雏形）——
 回填 → 模型看到结果再决策。循环直到模型给出最终文本回复。
 """
 
-from agent.core.llm import LLM, Message
+from agent.core.llm import LLM
+from agent.core.types import Message
 from agent.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
 from agent.memory.store import Session
 from agent.tools.registry import ToolRegistry

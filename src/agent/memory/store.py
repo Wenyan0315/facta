@@ -17,7 +17,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from agent.core.llm import Message
+from agent.core.types import Message
 
 SESSION_VERSION = 1
 

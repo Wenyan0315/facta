@@ -2,7 +2,7 @@
 
 import json
 
-from agent.core.llm import Message
+from agent.core.types import Message
 from agent.memory.store import Session, load_session, save_session
 
 

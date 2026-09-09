@@ -4,7 +4,8 @@
 修过一次就再也不踩。（devix 评审：问题 2「测试节奏完全缺位」）
 """
 
-from agent.core.llm import Message, ScriptedLLM
+from agent.core.llm import ScriptedLLM
+from agent.core.types import Message
 from agent.memory.compressor import (
     build_payload,
     maybe_compress,

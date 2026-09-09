@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from agent.core.llm import Message
+from agent.core.types import Message
 from agent.tools.registry import Tool, ToolRegistry
 
 # 空参数工具的 JSON Schema：类型是 object、没有属性

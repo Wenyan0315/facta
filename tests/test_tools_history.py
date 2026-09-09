@@ -1,6 +1,6 @@
 """跨工具编号一致性：search_history 与 read_history 必须共享同一套 #编号坐标系。"""
 
-from agent.core.llm import Message
+from agent.core.types import Message
 from agent.tools.builtin import register_builtin
 from agent.tools.registry import ToolRegistry
 

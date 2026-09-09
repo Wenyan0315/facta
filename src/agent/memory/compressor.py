@@ -13,7 +13,8 @@
    回答再触发摘要"的无限递归（与 search_and_summarize 同款防线）
 """
 
-from agent.core.llm import LLM, Message
+from agent.core.llm import LLM
+from agent.core.types import Message
 
 # 原文窗口大小：最近 6 条（约 3 轮对话）逐字进 payload
 KEEP_LAST = 6
