@@ -212,10 +212,8 @@ class KnowledgeBase:
 
 
 def demo() -> None:
-    from pathlib import Path   # P1-3：demo 离线脚本自带路径，不走 ctx
-
     kb = KnowledgeBase()
-    for note in load_notes(Path("data/notes")):
+    for note in load_notes(NOTES_DIR):
         kb.add_document(note)
 
     question = "PHP是什么？"

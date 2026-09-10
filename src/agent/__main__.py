@@ -16,13 +16,13 @@ from agent.core.llm import get_llm
 from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.loader import load_notes
 from agent.memory.store import load_session, save_session
+from agent.paths import NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 from agent.tools.registry import ToolRegistry
 
 VERSION = "0.8.0"
-NOTES_DIR = Path("data/notes")                   # P1-3：全项目唯一的笔记目录真值源
-MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx）
+MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx；单消费者路径留本地）
 
 
 def main() -> None:

@@ -1,19 +1,16 @@
 """跨工具编号一致性：search_history 与 read_history 必须共享同一套 #编号坐标系。"""
 
-from pathlib import Path
-
 from agent.core.types import Message
+from agent.paths import NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 from agent.tools.registry import ToolRegistry
 
-# 测试只跑 history 工具，notes_dir 不会被真正访问，路径值无所谓
-_DUMMY_NOTES_DIR = Path("data/notes")
-
 
 def _make_registry(history: list[Message]) -> ToolRegistry:
+    # 本测试只跑 history 工具，notes_dir 不会被真正访问；用共享常量保持全项目一份
     registry = ToolRegistry()
-    register_builtin(registry, ToolContext(notes_dir=_DUMMY_NOTES_DIR, history=history))
+    register_builtin(registry, ToolContext(notes_dir=NOTES_DIR, history=history))
     return registry
 
 

@@ -4,8 +4,8 @@
   依赖发散 —— register_builtin(registry, kb, llm, history) 每加一个工具
     依赖就膨胀一个参数，签名永不稳定；收进 ctx 后签名固定为 (registry, ctx)。
   路径写死 —— builtin.py 的 NOTES_DIR 和 loader.py 的默认参数各藏一份
-    "data/notes"，两个真值源迟早打架；现在路径由组装层（__main__）定
-    一次，装进 ctx 流下去。
+    "data/notes"，两个真值源迟早打架；现在路径唯一真值源是 agent/paths.py，
+    __main__（组装层）import 后装进 ctx 流下去。
 
 进 ctx 的准入标准：工具运行时需要、但工具自己无权决定的东西。
 kb / llm / history / notes_dir 合格；MEMORY_PATH 没有任何工具用

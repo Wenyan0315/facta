@@ -19,6 +19,7 @@ from agent.knowledge.knowledge_base import (
     get_embedder,
 )
 from agent.knowledge.loader import load_notes
+from agent.paths import NOTES_DIR
 from evals.dataset import CASES
 
 TOP_K = 5  # 检索深度：取前 5 条来评估
