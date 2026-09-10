@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.14（2026-09-09）｜随着里程碑推进持续迭代此文档
+> 版本：v0.15（2026-09-10）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块/决策）时，同步更新本文件并提升版本号
 
 ## 设计原则
@@ -164,3 +164,4 @@
 - **会话状态持久化（2026-09-08，修复 P0-1）**：M6.1 只落盘底片 messages，M6.2 的 summary/summarized_upto 是 run_chat 局部变量，重启即清零——滚动摘要退化成「启动首轮一次性全量大压缩」（档案越长越接近悬崖式压缩，且暗号跨压缩存活不可复现）。修法：抽 `Session` dataclass（messages + summary + summarized_upto）整体落盘，store 出 `save_session/load_session`（version 预留演进 + 旧列表格式自动迁移 + 游标钳到 [1,len] 防越界）；run_chat 改为注入 Session 原地变异、归还 Session——落盘策略仍归 __main__（控制反转不打折）。连带收口 __main__ 接线（此前半段还是旧 load_messages/save_messages，直接 NameError）。
 - **回归测试落地（2026-09-08）**：两份独立评审共同点名「1244 行源码 0 单测、不变量写进散文靠人肉验收」。补 `ScriptedLLM`（按脚本吐 tool_calls，工具链路首次可离线验证；每次 generate 记录收到的 messages 供断言）+ `pytest` dev 依赖 + `tests/` 13 用例，把验收五轮 saga 踩过的坑固化成断言：覆盖不变量（死区防御）、窗口边界（左边界落 user/孤儿 tool）、孤儿清理（trim_incomplete_round）、触发缓存（阈值前零调用）、跨工具编号一致性（search_history/read_history 共享 #坐标系）。铁律：不变量写成断言，不写成注释。此后每个里程碑必带测试。
 - **路线重排（2026-09-08，采纳两份评审）**：①MCP 提前——三次顺延的集结号，作为通往 coding agent 最直接的积木提到 M7.5 之后 ②M8 知识图谱 / M9 论文推送降为「兴趣支线，可跳」（对 coding agent 几乎零复用；headless 任务模式挪阶段二复用，不浪费既有设计）③streaming 从 M6 摘出、独立成交互层里程碑（增量协议+UX，与记忆无关）④P1 重构（Message→types.py、ToolContext 收敛、路径注入）排队 M7 开工前置。多会话管理（原 M6.3b）属「会话隔离+状态管理」，另排期，不塞回记忆层。
+- **P1-2/P1-3 ToolContext 与路径收口（2026-09-10，M7 前置重构收官）**：治两病——①依赖发散：`register_builtin(registry, kb, llm, history)` 每加工具依赖就膨胀（评审点名「接 MCP 时必炸」），收敛为 `register_builtin(registry, ctx)` 签名永固；②路径写死：`"data/notes"` 在 builtin.py 模块常量与 loader.py 默认参数各藏一份（两个真值源迟早打架），且 load_notes 的默认参数是藏在签名里的第三个真值源。修法三件：`tools/context.py` 新建 ToolContext dataclass（kb/llm/history 可 None 触发条件注册，notes_dir 必填无默认——默认值即真值源）；`__main__` 成为路径唯一真值源（NOTES_DIR 定义一次，经 ctx 流下去；MEMORY_PATH 无工具用，不进 ctx 留在 __main__）；loader 默认参数拔除、evals/demo 离线脚本自带局部路径。**准入标准**（防 ctx 变垃圾抽屉）：工具运行时需要 + 工具自己无权决定的东西才进 ctx。**依赖方向**：ToolContext 放 tools 层而非 core/types.py——它要 import KnowledgeBase（knowledge 层），放 core 会让最底层反向认识上层（P1-1 刚矫正过的病）。新增回归测试 `test_history_is_live_reference`：把 List identity trap 固化成断言（注册后 append 必须可见，手滑 .copy() 当场爆炸）。验证：14 用例全绿 + mock 冒烟 8 工具清单与重构前逐项一致 + 21 条历史往返无损。

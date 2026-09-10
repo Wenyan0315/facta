@@ -1,6 +1,7 @@
 from pathlib import Path
 
-def load_notes(notes_dir: Path | str = "data/notes") -> list[str]:
+def load_notes(notes_dir: Path | str) -> list[str]:
+    # P1-3：notes_dir 必填——默认值是藏在签名里的第二个真值源，拔掉
     directory = Path(notes_dir)          # 统一转成 Path（兼容传字符串）
     if not directory.exists():
         raise FileNotFoundError(f"笔记目录不存在：{directory.resolve()}")

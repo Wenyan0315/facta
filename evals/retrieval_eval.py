@@ -52,7 +52,7 @@ def reciprocal_rank(retrieved: list[str], expected: list[str]) -> float:
 def build_kb(embedder: Embedder) -> KnowledgeBase:
     """搭一个和线上完全一样的知识库（向量化方式由 embedder 决定）。"""
     kb = KnowledgeBase(embedder)
-    for note in load_notes():
+    for note in load_notes(NOTES_DIR):
         kb.add_document(note)
     return kb
 

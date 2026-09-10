@@ -17,10 +17,12 @@ from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.loader import load_notes
 from agent.memory.store import load_session, save_session
 from agent.tools.builtin import register_builtin
+from agent.tools.context import ToolContext
 from agent.tools.registry import ToolRegistry
 
 VERSION = "0.8.0"
-MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置
+NOTES_DIR = Path("data/notes")                   # P1-3：全项目唯一的笔记目录真值源
+MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx）
 
 
 def main() -> None:
@@ -38,7 +40,7 @@ def main() -> None:
 
     # 2) 知识库：从 data/notes/ 读笔记，BGE-M3 语义检索
     #    以后加笔记 = 往 data/notes/ 丢一个 md 文件，代码零改动
-    notes = load_notes()
+    notes = load_notes(NOTES_DIR)
     kb = KnowledgeBase(get_embedder("siliconflow"))
     for note in notes:
         kb.add_document(note)
@@ -51,11 +53,18 @@ def main() -> None:
         print(f"已恢复 {len(session.messages)} 条历史消息（{MEMORY_PATH}）")
 
     # 4) 工具（M5）：登记内置工具，交给主循环
-    #    kb 给 search/write 查重检索、llm 给 search_and_summarize 做内部摘要、
-    #    session.messages 给 search_history/read_history 做会话内检索（闭包注入依赖，
-    #    传列表对象本身而非副本——run_chat 原地 append，工具才能实时看到全部历史）
+    #    P1-2：依赖打包成 ToolContext——kb 给 search/write 查重检索、
+    #    llm 给 search_and_summarize 做内部摘要、history 给会话内检索
+    #    （闭包注入，传列表对象本身而非副本——run_chat 原地 append，
+    #    工具才能实时看到全部历史）、notes_dir 消灭工具层写死的路径
     registry = ToolRegistry()
-    register_builtin(registry, kb, llm, session.messages)
+    ctx = ToolContext(
+        notes_dir=NOTES_DIR,
+        kb=kb,
+        llm=llm,
+        history=session.messages,
+    )
+    register_builtin(registry, ctx)
     print(f"已装载工具：{', '.join(registry.names())}")
 
     # 5) 进入多轮对话主循环

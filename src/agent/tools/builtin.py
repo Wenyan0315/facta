@@ -8,9 +8,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 
 from agent.core.types import Message
+from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
 
 # 空参数工具的 JSON Schema：类型是 object、没有属性
@@ -62,41 +62,41 @@ _READ_HISTORY_PARAMS = {
     "required": ["start"],
 }
 
-NOTES_DIR = Path("data/notes")
-
 def get_current_time() -> str:
     """返回当前日期、时间和星期。"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
 
 
-def list_notes() -> str:
-    """列出知识库 data/notes/ 下的所有笔记文件名。"""
-    files = sorted(NOTES_DIR.glob("*.md"))
-    if not files:
-        return "知识库里还没有任何笔记。"
-    return "知识库笔记清单：\n" + "\n".join(f"- {f.name}" for f in files)
-
-def read_notes(filename: str) -> str:
-    """读取知识库 data/notes/ 下的指定笔记文件。"""
-    try:
-        with open(f"{NOTES_DIR}/{filename}", "r", encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        return f"知识库里没有 {filename} 这个笔记。"
-
-def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Message] | None = None) -> None:
+def register_builtin(registry: ToolRegistry, ctx: ToolContext) -> None:
     """把内置工具登记进注册表。description 认真写——模型靠它决定何时用工具。
 
-    kb / llm / history 通过闭包注入给需要它们的工具（工具函数签名必须与
-    schema 一致，不能加参数，所以让它们生在 register_builtin 里，直接引用
-    外层变量）。history 特别注意：传的是列表对象本身（不是副本）——
-    run_chat 在这个列表上原地 append，工具才能实时看到全部历史。
+    P1-2：依赖全部来自 ToolContext（组装层构造），签名从此固定——
+    以后加新依赖是往 ctx 加字段，这里不再改签名。
+    函数签名必须与 schema 一致，不能加参数，所以用闭包的工具都生在
+    本函数里，直接引用 ctx。ctx.history 特别注意：是列表对象本身
+    （不是副本）——run_chat 在这个列表上原地 append，工具才能实时
+    看到全部历史（List identity trap）。
     """
+    def list_notes() -> str:
+        """列出知识库目录下的所有笔记文件名。"""
+        files = sorted(ctx.notes_dir.glob("*.md"))
+        if not files:
+            return "知识库里还没有任何笔记。"
+        return "知识库笔记清单：\n" + "\n".join(f"- {f.name}" for f in files)
+
+    def read_notes(filename: str) -> str:
+        """读取知识库目录下的指定笔记文件。"""
+        try:
+            with open(ctx.notes_dir / filename, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            return f"知识库里没有 {filename} 这个笔记。"
+
     def write_note(filename: str, content: str) -> str:
-        """把一篇笔记写入知识库 data/notes/，带安全检查 + 查重闸门。"""
+        """把一篇笔记写入知识库目录，带安全检查 + 查重闸门。"""
         # 安全清单：agent 第一次能改文件系统，每一道都不能省
-        path = (NOTES_DIR / filename).resolve()
-        if not path.is_relative_to(NOTES_DIR.resolve()):
+        path = (ctx.notes_dir / filename).resolve()
+        if not path.is_relative_to(ctx.notes_dir.resolve()):
             return "拒绝：文件名越界"    # resolve 会消掉 ../，所以必须先 resolve 再判断
         if not filename.endswith(".md"):
             return "拒绝：只允许写入 .md 文件"
@@ -105,8 +105,8 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
         # 查重闸门：内容与已有笔记高度相似则拒绝（治理第 1 层）。
         # KB 只存文本块不记"块来自哪个文件"（溯源缺口，M8 图谱补），
         # 所以用最相似块的开头片段代替文件名。
-        if kb is not None:
-            hits = kb.search(content, top_k=3, min_score=0.85)
+        if ctx.kb is not None:
+            hits = ctx.kb.search(content, top_k=3, min_score=0.85)
             if hits:
                 top_snippet = hits[0][0][:30]
                 return (
@@ -123,7 +123,7 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
 
     def search_notes(query: str) -> str:
         """在个人知识库中语义检索，返回最相关的笔记片段。"""
-        results = kb.search(query, top_k=3)   # 不传 min_score → 用 embedder 自带阈值
+        results = ctx.kb.search(query, top_k=3)   # 不传 min_score → 用 embedder 自带阈值
         if not results:
             return "知识库中没有检索到相关内容。"
         # (片段, 分数) 列表 → 给模型看的编号文本。
@@ -137,7 +137,7 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
     def search_and_summarize(query: str) -> str:
         """检索 + 二次摘要：工具内部再调一次 LLM（Sub-agent 模式的原型）。"""
         # 检索部分：和 search_notes 同源（这就是"复合工具=小管线"）
-        results = kb.search(query, top_k=3)
+        results = ctx.kb.search(query, top_k=3)
         if not results:
             return "知识库中没有检索到相关内容，无法生成摘要。"
         context = "\n".join(f"- {snippet}" for snippet, _ in results)
@@ -149,7 +149,7 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
         #    我们执行并回填，而这里我们是"直接要一段文字"。
         # 思考题①的答案：description 里明确说了"会做摘要、返回总结"——
         # 外层模型知道拿到的不是原始片段，就不会重复自己总结一遍。
-        reply = llm.generate(
+        reply = ctx.llm.generate(
             [Message(role="user", content=(
                 f"请用最多三句话总结以下资料，只提炼关键结论，不要复述原文：\n{context}"
             ))],
@@ -168,14 +168,14 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
         if not q:
             return "检索词为空，请提供关键词。"
         hits = [
-            (i, m) for i, m in enumerate(history)
+            (i, m) for i, m in enumerate(ctx.history)
             if m.role in ("user", "assistant") and m.content and q in m.content.lower()
         ]   # m.content 为 None 的工具轮点菜消息被 and m.content 自然滤掉
         if not hits:
             return "历史中没有检索到包含该关键词的原话。"
         # 给分母：模型只看到 #30 不知道早晚，加上"共 N 条"才能做位置核验
         # （问"第一句"却命中 #30/34 → 自曝关键词搜偏了，应换词重搜）
-        lines = [f"命中 {len(hits)} 条（历史共 {len(history)} 条；#编号越小消息越早）："]
+        lines = [f"命中 {len(hits)} 条（历史共 {len(ctx.history)} 条；#编号越小消息越早）："]
         for i, m in hits[:10]:
             lines.append(f"#{i} [{m.role}] {m.content}")
         if len(hits) > 10:
@@ -196,12 +196,12 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
             return "起始编号从 0 开始（#0 是 system 人设，#1 通常是用户的第一句话）。"
         if not 1 <= count <= 20:
             return "count 需在 1~20 之间（默认 5）。"
-        if start >= len(history):
-            return f"起始编号超出范围：历史共 {len(history)} 条（编号 0~{len(history)-1}）。"
+        if start >= len(ctx.history):
+            return f"起始编号超出范围：历史共 {len(ctx.history)} 条（编号 0~{len(ctx.history)-1}）。"
 
-        lines = [f"历史共 {len(history)} 条（编号与 search_history 一致，越小越早），读取 #{start} 起的 {count} 条："]
-        for i in range(start, min(start + count, len(history))):
-            m = history[i]
+        lines = [f"历史共 {len(ctx.history)} 条（编号与 search_history 一致，越小越早），读取 #{start} 起的 {count} 条："]
+        for i in range(start, min(start + count, len(ctx.history))):
+            m = ctx.history[i]
             tag = ""
             if m.tool_calls:   # 工具轮点菜消息：content 常为 None，标注它点了什么菜
                 tag = f"（点菜：{'、'.join(t['name'] for t in m.tool_calls)}）"
@@ -251,7 +251,7 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
             func=write_note,
         )
     )
-    if kb is not None:   # 条件注册：kb 是核心依赖（无 kb 此工具无意义），菜单不放这道菜
+    if ctx.kb is not None:   # 条件注册：kb 是核心依赖（无 kb 此工具无意义），菜单不放这道菜
         registry.register(
             Tool(
                 name="search_notes",
@@ -269,7 +269,7 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
                 func=search_notes,
             )
         )
-        if llm is not None:   # 复合工具需要双依赖：检索(kb)+摘要(llm)，缺一不上菜单
+        if ctx.llm is not None:   # 复合工具需要双依赖：检索(kb)+摘要(llm)，缺一不上菜单
             registry.register(
                 Tool(
                     name="search_and_summarize",
@@ -285,7 +285,7 @@ def register_builtin(registry: ToolRegistry, kb=None, llm=None, history: list[Me
                     func=search_and_summarize,
                 )
             )
-    if history is not None:   # 条件注册：会话记忆是核心依赖（无 history 此工具无意义）
+    if ctx.history is not None:   # 条件注册：会话记忆是核心依赖（无 history 此工具无意义）
         registry.register(
             Tool(
                 name="search_history",
