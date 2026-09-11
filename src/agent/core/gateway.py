@@ -76,7 +76,9 @@ class RobustLLM(LLM):
                 self._ledger.record_llm(getattr(reply, "usage", None), self._cost_of(reply), elapsed)
                 if key is not None:
                     self._store(key, reply)
-                return reply
+                # 存进缓存的对象绝不外流：返回副本——调用方拿到的手伸不进缓存。
+                # （曾栽过：未命中路径返回缓存本体，调用方一改，缓存被污染）
+                return replace(reply)
             except Exception as exc:
                 # 不可重试（如 401/400）或重试已耗尽 → 记失败，原样抛
                 if not self._should_retry(exc) or attempt == self._retries:
