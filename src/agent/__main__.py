@@ -14,15 +14,17 @@ from dotenv import load_dotenv
 from agent.core.agent_loop import run_chat
 from agent.core.llm import get_llm
 from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
-from agent.knowledge.loader import load_notes
+from agent.knowledge.sync import sync_notes
+from agent.knowledge.vector_store import ChromaVectorStore
 from agent.memory.store import load_session, save_session
 from agent.paths import NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 from agent.tools.registry import ToolRegistry
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx；单消费者路径留本地）
+VECTOR_DB_DIR = Path("data/vector_db")           # M7：向量库落盘位置（运行时数据，.gitignore 已排除）
 
 
 def main() -> None:
@@ -38,13 +40,17 @@ def main() -> None:
     llm = get_llm(provider)
     print(f"当前模型：{provider}")
 
-    # 2) 知识库：从 data/notes/ 读笔记，BGE-M3 语义检索
-    #    以后加笔记 = 往 data/notes/ 丢一个 md 文件，代码零改动
-    notes = load_notes(NOTES_DIR)
-    kb = KnowledgeBase(get_embedder("siliconflow"))
-    for note in notes:
-        kb.add_document(note)
-    print(f"知识库已装载 {len(notes)} 条笔记（BGE-M3 语义检索）。")
+    # 2) 知识库（M7）：组装 embedder + store，索引走增量同步——
+    #    只为真正新增/修改的笔记花 embedding 的钱；改过的自动删旧块重建
+    #    练习模式（假模型）走词袋+内存（离线不花一分钱）；真模型走 BGE-M3 + Chroma 落盘。
+    #    注意两种 embedder 向量维度不同（词袋=词表长度、BGE=1024），绝不能混用同一个
+    #    Chroma 集合——所以教学组合根本不碰 Chroma，各自住各自的店
+    if provider in ("mock", "echo", "repeat"):
+        kb = KnowledgeBase(get_embedder("bow"))
+    else:
+        kb = KnowledgeBase(get_embedder("siliconflow"), ChromaVectorStore(VECTOR_DB_DIR))
+    report = sync_notes(kb, NOTES_DIR)
+    print(f"知识库同步：新增 {report.added} / 删除 {report.removed} / 不变 {report.unchanged}")
 
     # 3) 会话记忆（M6）：启动时载入【完整会话状态】——底片(消息) + 压缩缓存(摘要游标)
     #    关键细节：必须在登记工具之前载入——search_history 的闭包要抓这个列表对象

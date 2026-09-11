@@ -16,6 +16,9 @@ dependencies = [
 dev = [
     "pytest>=7",
 ]
+rag = [
+    "chromadb>=0.5",   # M7 工业向量库：教学版（InMemory+词袋）不需要它，按需 pip install -e ".[rag]"
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

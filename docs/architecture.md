@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.15（2026-09-10）｜随着里程碑推进持续迭代此文档
+> 版本：v0.16（2026-09-11）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块/决策）时，同步更新本文件并提升版本号
 
 ## 设计原则
@@ -50,7 +50,7 @@
 │ │✅ BGE-M3   │ │        │  ├─────────┴─────────┴──────┤  │
 │ │  语义向量   │ │        │  │ ✅OpenAICompatibleLLM     │  │
 │ │✅loader    │ │        │  │  deepseek/siliconflow     │  │
-│ │ +向量库(M7)│ │        │  │ 以后: Claude / 本地Ollama   │ │
+│ │✅向量库+M7 │ │        │  │ 以后: Claude / 本地Ollama   │ │
 │ ├────────────┤ │        │  └──────────────────────────┘  │
 │ │ M8:知识图谱 │ │        └────────────────────────────────┘
 │ └────────────┘ │
@@ -91,7 +91,7 @@
 |---|------|--------|
 | core 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb | 并行工具调用 / 更复杂的规划策略 |
 | LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/siliconflow) | 更多供应商 + 多模型路由 |
-| knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) | 向量库持久化(Chroma) + 知识图谱 |
+| knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集) | 知识图谱 |
 | memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压） | 多会话隔离（另排期） |
 | tools | ✅ Tool+ToolRegistry+6内置工具(时间/清单/读/写/检索/检索+摘要)；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型) | 更多工具 + MCP + skills |
 | evals | ✅ 检索评估(P/R@k, MRR, 双实现对比) | 回答质量度量(LLM-as-judge) |
@@ -115,7 +115,7 @@
 | M5.5 ✅ | Agentic RAG：检索包成工具(search_notes)，查不查/查什么/查几次由模型决定；MCP 顺延待排期 | 放权设计、复杂度塌缩(121→87行) |
 | M6 ✅ | 记忆持久化：JSON落盘(M6.1)→摘要压缩(M6.2)→温层检索(M6.3)→Session整体持久化+回归测试 | 成本控制、状态完整性 |
 | P1 | 重构前置：Message→types.py（依赖方向）+ ToolContext 收敛工具依赖 + 路径统一注入 | 依赖方向、对象收敛 |
-| M7 | 工业 RAG：向量库持久化(Chroma) + 增量更新（弃全量重建）｜evals/文档治理并入收官 | 向量库、增量索引 |
+| M7 ✅ | 工业 RAG：向量库持久化(Chroma) + 增量更新（弃全量重建）｜evals/文档治理并入收官 | 向量库、增量索引 |
 | M7.5 | 生产加固：容错四件套 / 语义缓存 / 成本统计 / 可观测性 | 容错、可观测性 |
 | MCP | 外部工具动态发现（三次顺延的集结号，coding agent 最直接积木） | 协议、动态工具 |
 | streaming | 流式输出（首字延迟 / tool_calls 分片重组 / 用户取消）｜独立交互层 | 增量协议 |
@@ -129,7 +129,7 @@
 终点是企业级 agent 开发，所以**不只是 M7.5 一个节点，而是贯穿每个里程碑的持续视角**：
 
 - **每个里程碑收尾时，补一节"企业视角"**：这个模块进了大厂会面对什么（规模/并发/成本/合规）——已讲过的例子：错误分类与容错四件套（重试退避/超时/熔断/降级链）、模型质量分级降级、语义缓存
-- **教学版 vs 工业版的差距永远点名**：比如现在的 KnowledgeBase 每次 add_document 全量重建向量（O(N) 重算），Chroma 的增量索引怎么解决——知其简陋，才能讲清为什么工业版长那样
+- **教学版 vs 工业版的差距永远点名**：M7 前 KnowledgeBase 每次 add_document 全量重建向量（O(N) 重算），M7 已用 Chroma 增量索引解决——现在的教学版 = InMemory 存取 + 词袋向量（离线零成本），工业版 = Chroma 落盘 + BGE-M3（增量 + 语义）；换件不换衣服是这套打法的验收标准
 - **LLM 应用特有考点**：成本控制（token 计费随轮数增长）、可观测性（没有度量就没有熔断）、评测流水线（evals 已是雏形）
 - **安全**：M9 前安排一讲——提示词注入（工具越权）、key 最小权限、审计日志
 
@@ -166,3 +166,7 @@
 - **路线重排（2026-09-08，采纳两份评审）**：①MCP 提前——三次顺延的集结号，作为通往 coding agent 最直接的积木提到 M7.5 之后 ②M8 知识图谱 / M9 论文推送降为「兴趣支线，可跳」（对 coding agent 几乎零复用；headless 任务模式挪阶段二复用，不浪费既有设计）③streaming 从 M6 摘出、独立成交互层里程碑（增量协议+UX，与记忆无关）④P1 重构（Message→types.py、ToolContext 收敛、路径注入）排队 M7 开工前置。多会话管理（原 M6.3b）属「会话隔离+状态管理」，另排期，不塞回记忆层。
 - **P1-2/P1-3 ToolContext 与路径收口（2026-09-10，M7 前置重构收官）**：治两病——①依赖发散：`register_builtin(registry, kb, llm, history)` 每加工具依赖就膨胀（评审点名「接 MCP 时必炸」），收敛为 `register_builtin(registry, ctx)` 签名永固；②路径写死：`"data/notes"` 在 builtin.py 模块常量与 loader.py 默认参数各藏一份（两个真值源迟早打架），且 load_notes 的默认参数是藏在签名里的第三个真值源。修法三件：`tools/context.py` 新建 ToolContext dataclass（kb/llm/history 可 None 触发条件注册，notes_dir 必填无默认——默认值即真值源）；`__main__` 成为路径唯一真值源（NOTES_DIR 定义一次，经 ctx 流下去；MEMORY_PATH 无工具用，不进 ctx 留在 __main__）；loader 默认参数拔除、evals/demo 离线脚本自带局部路径。**准入标准**（防 ctx 变垃圾抽屉）：工具运行时需要 + 工具自己无权决定的东西才进 ctx。**依赖方向**：ToolContext 放 tools 层而非 core/types.py——它要 import KnowledgeBase（knowledge 层），放 core 会让最底层反向认识上层（P1-1 刚矫正过的病）。新增回归测试 `test_history_is_live_reference`：把 List identity trap 固化成断言（注册后 append 必须可见，手滑 .copy() 当场爆炸）。验证：14 用例全绿 + mock 冒烟 8 工具清单与重构前逐项一致 + 21 条历史往返无损。
 - **P1-3 补强：路径真值源上收到 agent/paths.py（2026-09-10，code review 修复轮）**：P1 收官后立即跑 TRAE-code-review 审两个重构 commit，双验证 agent 交叉确认 5 项，其中 **Critical 一项**：evals 以 NameError 状态被提交——`load_notes(NOTES_DIR)` 进了 commit 而 `NOTES_DIR` 常量定义被 IDE 缓冲区回写吞掉；pytest 全绿是盲区（evals 不在测试链路，纯 import 又不执行函数体，必须调 build_kb 才炸，人工复现确认）。修复连带决策：①NOTES_DIR 真值源从 `__main__` 再上收到 `agent/paths.py`——evals/demo/test 原各自再带一份字面量副本，与「__main__ 与 evals 共用同一 loader → 评估与线上永远同一份语料」的不变量冲突（改一处漏一处即静默评估另一份语料）；共享规则=跨模块路径住 paths.py，单消费者路径（MEMORY_PATH）留消费地不提前搬家 ②pytest `pythonpath` 加 `"."`（evals 在仓库根，原配置测不到它）③新增 `test_evals_build_kb_runs` 接线回归（词袋离线搭库 + min_score=0.0 断言语料非空），把「evals 可运行」钉成断言防同类断链 ④demo() 函数级 import 上移、types.py 补行尾换行（Trivial）。**元教训**：验证必须覆盖被改模块的运行路径，不能只跑 pytest——不在测试链路上的入口（evals、demo）改完必须手动执行一次；IDE 缓冲区与磁盘编辑打架时，提交前须 `git diff` 核对实际入库内容（本次事故根因）。已知盲区（记录不修）：`test_history_is_live_reference` 防工具层内部 .copy()，防不住 `__main__` 调用点的 .copy()——调用点保护靠 mock 冒烟，但冒烟不验「新消息可搜」，如需钉死须加组装层测试。
+- **M7 向量存取层（2026-09-11）**：把「向量住哪」从 KnowledgeBase 拆成 `VectorStore` 接口（upsert/delete/query/get_all/count/clear）+ 双实现——InMemoryVectorStore（教学版，字典+暴力余弦，测试/词袋用，离线零依赖）/ ChromaVectorStore（工业版，PersistentClient 落盘 + 按 id 增删 + 自带索引）。KnowledgeBase 从「自算余弦」变「委托 store.query」，**search 接口签名零变化**——工具层/evals 一行未动（换件不换衣服）。chromadb 装 pyproject 的 `rag` 可选组（教学路径不需要它），实现内延迟导入（与 OpenAICompatibleEmbedder 同招）。**分数契约**：接口规定 query 返回余弦相似度（越大越像）；Chroma 的 cosine 空间返回距离（=1-相似度），换算封装在 ChromaVectorStore 内——不显式配 `hnsw:space=cosine` 就会拿到 L2 距离（量纲反向），BGE 0.55 阈值全部作废，此坑由 `test_inmemory_vs_chroma_same_ranking`（双实现同排序）+ `test_chroma_score_conversion_and_persistence`（关库重开 + 近似 1.0）钉死。
+- **M7 增量同步 sync_notes（2026-09-11）**：`sync.py::sync_notes(kb, notes_dir)` 取代「load_notes→逐篇 add_document」的启动路径（evals/demo 一并转投，评估与生产同一条索引路径）。**身份 = 内容指纹**（sha256 前 16 位，块 id = `指纹:块序`，metadata={source,hashi}）：改名免费（指纹不变→交集）、touch 免费（内容没变→交集）、真改才花钱（旧指纹消失+新指纹出现→删+增）——被否决方案：id 用文件名（改名误判「删+增」全量重算，用户当场否决）；mtime 作判据（touch 误判「改」，且要求另存 manifest=第二个真值源，犯 P1 刚治的病；撤销条件：语料大到读全文件算哈希成为真实成本时，再评估 manifest+mtime 混合方案）。副产品：同内容多文件自动去重（共用指纹，upsert 幂等）。**词袋退化路径**：词袋向量维度=词表长度，增量不成立——`Embedder.supports_incremental` 能力标记（词袋 False→清库全量重建：先 fit 全语料建词表再 embed，漏 fit 则全零向量；BGE True→真增量），sync 据此分支。**混用陷阱**：词袋与 BGE 维度不同，绝不能共用同一 Chroma 集合（维度冲突直接炸）——干脆规定教学组合（词袋+InMemory）不碰 Chroma，`__main__` 按 provider 分流：假模型→词袋+内存（离线不花钱），真模型→BGE+Chroma 落盘。
+- **删除安全阀（2026-09-11，测试逼出的设计修正）**：文件消失 ≠ 用户想删（目录误移动/挂载失败会清空全库、下回重建重烧 embedding）。双重护栏：①空目录由 scan_notes 直接抛错（第一道防线）②批量消失按「文件数」判且**修改不算**（改内容是合法替换）：消失篇数 ≥3 且占比 >20% 中止逼人确认。初版用「待删块数/总量」纯比例判据被测试现场打脸（单文件库改一篇=100%拦截、两文件库删一篇=50%拦截——比例阈值对小样本是噪声，必须带绝对下限，与「SQLite 迁移触发信号」的阈值设计同课）。
+- **M7 验收（2026-09-11）**：tests 15→29（新增 test_vector_store 4 条 + test_sync 10 条），不变量全部钉成断言：首轮全增/二轮幂等白嫖（零 embed）/改·删·增三路/改名免费/删除安全阀+小删除对照/重启零重算（CountingEmbedder 计数 + Chroma 关库重开）/词袋退化全量重建（且 fit 未漏——搜 PHP 排第一）/空目录中止。真实验收：`python -m agent deepseek` 连跑两遍，第一遍「新增 14」（一次性 BGE 全量嵌入），第二遍「不变 14、零新增」——**重启零重算**用真实数据验证通过；mock 冒烟 8 工具清单不变、21 条历史往返无损。连带治理：load_notes（M7 前入口）所有消费方转 sync 后退役删除；chunk_size/overlap 参数目前定死 200/50（KBsync 未暴露配置，届时需要再加）。

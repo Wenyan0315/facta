@@ -10,13 +10,12 @@ KnowledgeBase 不关心底层是哪种，构造时注入即可（依赖注入）
 
 from __future__ import annotations
 
-import math
 import os
 import re
 from abc import ABC, abstractmethod
 from collections import Counter
 
-from agent.knowledge.loader import load_notes
+from agent.knowledge.vector_store import InMemoryVectorStore, VectorStore
 
 
 def tokenize(text: str) -> list[str]:
@@ -52,16 +51,6 @@ def text_to_vector(text: str, vocab: list[str]) -> list[float]:
     return [float(counts.get(word, 0)) for word in vocab]
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """余弦相似度：两个向量夹角的余弦，越接近 1 越相似。"""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
 class Embedder(ABC):
     """向量化接口：把一批文字变成一批向量（顺序一一对应）。
 
@@ -73,6 +62,10 @@ class Embedder(ABC):
     # 分数量纲由实现决定（词袋的 0.35 和 BGE 的 0.45 不是一回事），
     # 所以阈值跟着实现走，而不是散落在调用方硬编码。
     default_min_score: float = 0.0
+
+    # M7：该向量化方式支不支持「增量更新」。词袋向量维度 = 词表长度，
+    # 词表一变所有旧向量作废（不支持）；神经网络版固定维度，可以增量。
+    supports_incremental: bool = False
 
     @abstractmethod
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -112,6 +105,8 @@ class OpenAICompatibleEmbedder(Embedder):
     min_score 跟着"模型"走而不是跟着供应商走：
     换 embedding 模型，分数量纲就变，阈值必须重新校准。
     """
+
+    supports_incremental = True   # 固定维度，新块可单独 embed（M7 增量同步的前提）
 
     def __init__(self, prefix: str, base_url: str, model: str, min_score: float) -> None:
         from openai import OpenAI  # 延迟导入：用词袋时不需要装/加载 openai
@@ -168,53 +163,44 @@ def get_embedder(name: str = "bow") -> Embedder:
 
 
 class KnowledgeBase:
-    """极简向量知识库：存文本块，按相似度检索。
+    """知识库（M7 变身）：检索语义的总管，把「向量住哪」委托给 VectorStore。
 
-    向量化方式由构造时注入的 embedder 决定：
-        KnowledgeBase()                            # 词袋（教学版，离线可用）
-        KnowledgeBase(get_embedder("siliconflow")) # BGE-M3 语义检索
+    两个注入件，跟 __main__ 组装层的老规矩一致：
+        KnowledgeBase()                 # 词袋 + 内存库（教学版，离线可用）
+        KnowledgeBase(get_embedder("siliconflow"), ChromaVectorStore(path))
+    索引维护走 sync.sync_notes(kb, notes_dir)（增量同步，M7 心脏）。
+    search 接口签名与 M7 前完全一致——工具层、evals 无感知。
     """
 
-    def __init__(self, embedder: Embedder | None = None) -> None:
-        self._embedder = embedder or BagOfWordsEmbedder()
-        self._chunks: list[str] = []
-        self._vectors: list[list[float]] = []
-
-    def add_document(self, text: str, chunk_size: int = 200, overlap: int = 50) -> None:
-        """把一篇文档切块后加入知识库，可指定 chunk_size 与 overlap。"""
-        for chunk in chunk_text(text, chunk_size, overlap):
-            self._chunks.append(chunk)
-        # 词袋必须全量重建（词表变了所有向量维度都变）；
-        # 神经网络版理论上可以只算新增块（M7 向量库做增量+持久化，这里从简）。
-        self._rebuild()
-
-    def _rebuild(self) -> None:
-        self._embedder.fit(self._chunks)
-        self._vectors = self._embedder.embed(self._chunks)
+    def __init__(
+        self,
+        embedder: Embedder | None = None,
+        store: VectorStore | None = None,
+    ) -> None:
+        self.embedder = embedder or BagOfWordsEmbedder()
+        self.store = store or InMemoryVectorStore()
 
     def search(
         self, query: str, top_k: int = 3, min_score: float | None = None
     ) -> list[tuple[str, float]]:
-        """返回与问题最相似的 top_k 个文本块，以及各自相似度。
+        """返回与问题最相似的 top_k 个文本块及相似度（越大越像）。
 
-        min_score：低于该分数的结果直接丢弃（防止 top_k 硬凑垃圾结果）。
-        不传（None）时用当前 embedder 的默认及格线——分数量纲跟着实现走。
+        min_score：低于该分数的结果丢弃（防止 top_k 硬凑垃圾结果）。
+        不传时用 embedder 的默认及格线——分数量纲跟着实现走。
         """
         if min_score is None:
-            min_score = self._embedder.default_min_score
-        qvec = self._embedder.embed([query])[0]
-        scored = [
-            (chunk, cosine_similarity(qvec, vec))
-            for chunk, vec in zip(self._chunks, self._vectors)
-        ]
-        scored.sort(key=lambda item: item[1], reverse=True)
-        return [item for item in scored[:top_k] if item[1] >= min_score]
+            min_score = self.embedder.default_min_score
+        qvec = self.embedder.embed([query])[0]
+        results = self.store.query(qvec, top_k)
+        return [(chunk, score) for chunk, score in results if score >= min_score]
 
 
 def demo() -> None:
+    from agent.knowledge.sync import sync_notes  # 函数内导入：sync 依赖本模块，避免循环
+
     kb = KnowledgeBase()
-    for note in load_notes(NOTES_DIR):
-        kb.add_document(note)
+    report = sync_notes(kb, NOTES_DIR)
+    print(f"知识库同步：新增 {report.added} / 删除 {report.removed} / 不变 {report.unchanged}")
 
     question = "PHP是什么？"
     print(f"问题：{question}\n")

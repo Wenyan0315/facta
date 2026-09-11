@@ -18,7 +18,7 @@ from agent.knowledge.knowledge_base import (
     KnowledgeBase,
     get_embedder,
 )
-from agent.knowledge.loader import load_notes
+from agent.knowledge.sync import sync_notes
 from agent.paths import NOTES_DIR
 from evals.dataset import CASES
 
@@ -51,10 +51,9 @@ def reciprocal_rank(retrieved: list[str], expected: list[str]) -> float:
 
 
 def build_kb(embedder: Embedder) -> KnowledgeBase:
-    """搭一个和线上完全一样的知识库（向量化方式由 embedder 决定）。"""
+    """搭一个和线上完全一样的知识库（M7：走 sync_notes，与生产同一条索引路径）。"""
     kb = KnowledgeBase(embedder)
-    for note in load_notes(NOTES_DIR):
-        kb.add_document(note)
+    sync_notes(kb, NOTES_DIR)
     return kb
 
 
