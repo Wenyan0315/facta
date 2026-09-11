@@ -62,6 +62,17 @@ def test_chroma_score_conversion_and_persistence(tmp_path):
     assert store2.query([0.0, 1.0], top_k=1)[0][0] == "Python 是脚本语言"
 
 
+def test_chroma_clear(tmp_path):
+    pytest.importorskip("chromadb")
+    store = ChromaVectorStore(tmp_path / "db")
+    d = _sample_data()
+    store.upsert(d["ids"], d["chunks"], d["vectors"], d["metadatas"])
+    store.clear()
+    assert store.count() == 0
+    assert store.get_all() == {}
+    assert store.query([1.0, 0.0], 1) == []
+
+
 def test_inmemory_vs_chroma_same_ranking(tmp_path):
     pytest.importorskip("chromadb")
     d = _sample_data()

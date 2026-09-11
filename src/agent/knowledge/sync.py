@@ -8,7 +8,8 @@
 三路差集：
   增 = 磁盘指纹 - 库里指纹 → 切块 → embed（花钱的唯一环节）→ upsert
   删 = 库里指纹 - 磁盘指纹 → delete（带安全阀）
-  不变 = 交集 → 跳过（连文件内容都不读）
+  不变 = 交集 → 不重新 embed——注意：算指纹必须读每篇全文（哈希身份的
+         固有成本，本地磁盘读很便宜）；真正省的从来是 embed 不是读盘
 
 两道护栏（对应「删除语义过重」的坑）：
 1. 空目录由 scan_notes 直接抛错——目录暂时不见了 ≠ 清空知识库的许可
@@ -57,6 +58,9 @@ def sync_notes(kb: KnowledgeBase, notes_dir: Path | str) -> SyncReport:
     incremental = getattr(embedder, "supports_incremental", False)
 
     # 1. 扫磁盘 → {指纹: (文件名, 原文)}；空内容文件无块可存，不进库
+    #    去重与标签：同内容多文件共用指纹，source 记第一个文件名；
+    #    该文件删除后若同内容幸存，source 标签不回写（人读标签可能陈旧，
+    #    检索运算只看 hash，正确性不受影响——已知边界）
     disk: dict[str, tuple[str, str]] = {}
     for name, text in scan_notes(notes_dir):
         if text.strip():
@@ -113,11 +117,13 @@ def sync_notes(kb: KnowledgeBase, notes_dir: Path | str) -> SyncReport:
             metadatas=[{"source": name, "hash": fp} for _ in chunks],
         )
 
-    # 4. 删
+    # 4. 删（非原子：先增后删，两步间崩溃会短暂新旧块共存——下次同步自愈。
+    #    刻意选「先增后删」而非「先删后增」：宁可短暂重复，不要窗口期内容缺失）
     store.delete(doomed_ids)
 
     return SyncReport(
         added=len(will_add),
         removed=len(to_remove_hashes) if incremental else 0,
-        unchanged=len(unchanged),
+        # 词袋重建路径每篇都被清掉重加，unchanged 归 0 保持账本自洽
+        unchanged=len(unchanged) if incremental else 0,
     )

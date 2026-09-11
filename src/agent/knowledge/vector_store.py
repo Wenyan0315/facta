@@ -84,7 +84,9 @@ class InMemoryVectorStore(VectorStore):
         self._metas: dict[str, dict] = {}
 
     def upsert(self, ids, chunks, vectors, metadatas):
-        for id_, chunk, vec, meta in zip(ids, chunks, vectors, metadatas):
+        # strict=True：四个列表长度必须一致，不一致是调用方 bug——静默截断
+        # 会把 id/文本/向量/面单错位对齐（Chroma 会抛错，双实现行为要一致）
+        for id_, chunk, vec, meta in zip(ids, chunks, vectors, metadatas, strict=True):
             self._chunks[id_] = chunk
             self._vectors[id_] = vec
             self._metas[id_] = dict(meta)
