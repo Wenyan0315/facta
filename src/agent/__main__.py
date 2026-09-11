@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from agent.core.agent_loop import run_chat
 from agent.core.llm import get_llm
+from agent.core.telemetry import UsageLedger
 from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.sync import sync_notes
 from agent.knowledge.vector_store import ChromaVectorStore
@@ -36,8 +37,11 @@ def main() -> None:
     # 命令行第一个参数 = 用哪个模型，不传默认 deepseek
     provider = sys.argv[1] if len(sys.argv) > 1 else "deepseek"
 
+    # 0) 账本（M7.5）：全进程一本账，LLM 与 embedding 都往里记，退出时打印
+    ledger = UsageLedger()
+
     # 1) 模型
-    llm = get_llm(provider)
+    llm = get_llm(provider, ledger)
     print(f"当前模型：{provider}")
 
     # 2) 知识库（M7）：组装 embedder + store，索引走增量同步——
@@ -46,9 +50,9 @@ def main() -> None:
     #    注意两种 embedder 向量维度不同（词袋=词表长度、BGE=1024），绝不能混用同一个
     #    Chroma 集合——所以教学组合根本不碰 Chroma，各自住各自的店
     if provider in ("mock", "echo", "repeat"):
-        kb = KnowledgeBase(get_embedder("bow"))
+        kb = KnowledgeBase(get_embedder("bow", ledger))
     else:
-        kb = KnowledgeBase(get_embedder("siliconflow"), ChromaVectorStore(VECTOR_DB_DIR))
+        kb = KnowledgeBase(get_embedder("siliconflow", ledger), ChromaVectorStore(VECTOR_DB_DIR))
     report = sync_notes(kb, NOTES_DIR)
     print(f"知识库同步：新增 {report.added} / 删除 {report.removed} / 不变 {report.unchanged}")
 
@@ -82,6 +86,9 @@ def main() -> None:
     # 6) 退出落盘（M6）：完整会话状态（消息 + 压缩缓存）存回 JSON，下次启动恢复
     save_session(session, MEMORY_PATH)
     print(f"对话历史已保存：{len(session.messages)} 条 → {MEMORY_PATH}")
+
+    # 7) 打印本次会话账单（M7.5）：钱花哪了，退出一目了然
+    print(ledger.bill())
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ class Message:
     content: str
     tool_calls: list[dict] | None = None
     tool_call_id: str | None = None
+    usage: dict | None = None   # M7.5：OpenAI 返回的 token 账目（记账统计用），老消息无此字段合法
 
     def __repr__(self) -> str:
         if self.tool_calls:

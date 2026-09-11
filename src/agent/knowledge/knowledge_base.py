@@ -108,7 +108,15 @@ class OpenAICompatibleEmbedder(Embedder):
 
     supports_incremental = True   # 固定维度，新块可单独 embed（M7 增量同步的前提）
 
-    def __init__(self, prefix: str, base_url: str, model: str, min_score: float) -> None:
+    def __init__(
+        self,
+        prefix: str,
+        base_url: str,
+        model: str,
+        min_score: float,
+        price: float = 0.0,
+        ledger=None,
+    ) -> None:
         from openai import OpenAI  # 延迟导入：用词袋时不需要装/加载 openai
 
         api_key = os.environ.get(f"{prefix}_API_KEY", "")
@@ -123,17 +131,25 @@ class OpenAICompatibleEmbedder(Embedder):
         # 共用 _MODEL 会互相覆盖（想换聊天模型，结果把 embedding 也换了）
         self._model = os.environ.get(f"{prefix}_EMBED_MODEL", model)
         self.default_min_score = min_score  # 实例属性，盖掉接口的类属性 0.0
+        # M7.5：embedding 也进同一本账（可选注入；evals/测试不传即不计）
+        self._price = price
+        self._ledger = ledger
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
         resp = self._client.embeddings.create(model=self._model, input=texts)
+        if self._ledger is not None:
+            # 中转商不返回 usage 时按文本条数兜底估算（宁可少记不可炸）
+            tokens = resp.usage.prompt_tokens if resp.usage else len(texts)
+            self._ledger.record_embed(tokens, tokens / 1e6 * self._price)
         # API 保证返回顺序与输入一致
         return [item.embedding for item in resp.data]
 
 
 # embedding 供应商配置表：加一家 = 加一行（和 llm.py 的 PROVIDERS 对称）。
 # 环境变量约定：{PREFIX}_API_KEY / {PREFIX}_BASE_URL / {PREFIX}_EMBED_MODEL
+# price：M7.5 记账价目（¥/百万 tokens）——BGE-M3 硅基流动当前免费额度，示例值
 EMBED_PROVIDERS: dict[str, dict[str, str | float]] = {
     "siliconflow": {
         "prefix": "SILICONFLOW",
@@ -142,22 +158,29 @@ EMBED_PROVIDERS: dict[str, dict[str, str | float]] = {
         # 校准依据（2026-09-05 探针）：相关问题 0.645~0.784，垃圾问题最高 0.491，
         # 0.55 卡在沟中间。这个值属于 BGE-M3 这个模型——换模型必须重跑校准。
         "min_score": 0.55,
+        "price": 0.0,
     },
 }
 
 
-def get_embedder(name: str = "bow") -> Embedder:
+def get_embedder(name: str = "bow", ledger=None) -> Embedder:
     """工厂函数：按名字返回向量化实现。
 
     "bow" -> 词袋（教学版，离线可用）
     "siliconflow"（及 EMBED_PROVIDERS 里任何一家）-> 真语义向量
+    ledger：M7.5 成本账本（可选）——真 embedder 每次调用把 token 记账
     """
     if name == "bow":
         return BagOfWordsEmbedder()
     if name in EMBED_PROVIDERS:
         cfg = EMBED_PROVIDERS[name]
         return OpenAICompatibleEmbedder(
-            cfg["prefix"], cfg["base_url"], cfg["model"], float(cfg["min_score"])
+            cfg["prefix"],
+            cfg["base_url"],
+            cfg["model"],
+            float(cfg["min_score"]),
+            float(cfg.get("price", 0.0)),
+            ledger,
         )
     raise ValueError(f"未知的向量化方式: {name}")
 

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+
+from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
 
 
@@ -128,7 +130,14 @@ class OpenAICompatibleLLM(LLM):
     三个值都可被环境变量 {PREFIX}_API_KEY / _BASE_URL / _MODEL 覆盖。
     """
 
-    def __init__(self, prefix: str, base_url: str, model: str) -> None:
+    def __init__(
+        self,
+        prefix: str,
+        base_url: str,
+        model: str,
+        price_in: float = 0.0,
+        price_out: float = 0.0,
+    ) -> None:
         # 延迟导入：只有真正用到真模型时才需要 openai 库
         from openai import OpenAI
 
@@ -143,6 +152,9 @@ class OpenAICompatibleLLM(LLM):
             base_url=os.environ.get(f"{prefix}_BASE_URL", base_url),
         )
         self._model = os.environ.get(f"{prefix}_MODEL", model)
+        # M7.5：价目（¥/百万 tokens）记在身上，供网关把 token 换算成钱
+        # 假模型没有 pricing 属性 → 网关 getattr 兜底为 None → 成本 0
+        self.pricing = {"in": price_in, "out": price_out}
 
     @staticmethod
     def _to_openai(m: Message) -> dict:
@@ -186,6 +198,15 @@ class OpenAICompatibleLLM(LLM):
         resp = self._client.chat.completions.create(**kwargs)
         msg = resp.choices[0].message
 
+        # M7.5：采集 token 账目（极少数中转商不返回 usage，防御一下），
+        # 挂在 Message 上交给网关记账——Message 多带信息，调用链不用多开一条路
+        usage = None
+        if resp.usage:
+            usage = {
+                "prompt_tokens": resp.usage.prompt_tokens,
+                "completion_tokens": resp.usage.completion_tokens,
+            }
+
         # 模型"点菜"了：把 OpenAI 的对象结构转成我们的简化 dict 结构
         tool_calls = None
         if msg.tool_calls:
@@ -198,31 +219,55 @@ class OpenAICompatibleLLM(LLM):
                 for tc in msg.tool_calls
             ]
         return Message(
-            role="assistant", content=msg.content or "", tool_calls=tool_calls
+            role="assistant",
+            content=msg.content or "",
+            tool_calls=tool_calls,
+            usage=usage,
         )
 
 
 # 供应商配置表：加一家 = 加一行。
 # prefix 约定：环境变量 {PREFIX}_API_KEY / {PREFIX}_BASE_URL / {PREFIX}_MODEL
-PROVIDERS: dict[str, dict[str, str]] = {
+# price_in/price_out：M7.5 记账价目（¥/百万 tokens），示例价，以官网实时价为准
+PROVIDERS: dict[str, dict[str, str | float]] = {
     "deepseek": {
         "prefix": "DEEPSEEK",
         "base_url": "https://api.deepseek.com",
         "model": "deepseek-chat",
+        "price_in": 1.0,
+        "price_out": 2.0,
     },
     "siliconflow": {
         "prefix": "SILICONFLOW",
         "base_url": "https://api.siliconflow.cn/v1",
         "model": "deepseek-ai/DeepSeek-V3",
+        "price_in": 2.0,
+        "price_out": 8.0,
     },
 }
 
 
-def get_llm(provider: str = "mock") -> LLM:
-    """工厂函数：按名字返回对应的模型实现，方便以后切换。"""
+def get_llm(provider: str = "mock", ledger: UsageLedger | None = None) -> LLM:
+    """工厂 = 进程内网关入口（M7.5）：组装实现后统一穿防护壳。
+
+    ledger 是全局账本（__main__ 创建传入）；不传则网关自己建一个自用。
+    从调用方视角返回的还是普通 LLM——agent_loop 等零改动。
+    """
+    from agent.core.gateway import RobustLLM  # 函数内导入：gateway 依赖本模块，避免循环
+
+    if ledger is None:
+        ledger = UsageLedger()
+
     if provider in PROVIDERS:
         cfg = PROVIDERS[provider]
-        return OpenAICompatibleLLM(cfg["prefix"], cfg["base_url"], cfg["model"])
+        inner: LLM = OpenAICompatibleLLM(
+            cfg["prefix"],
+            cfg["base_url"],
+            cfg["model"],
+            float(cfg["price_in"]),
+            float(cfg["price_out"]),
+        )
+        return RobustLLM(inner, ledger)
 
     fakes: dict[str, LLM] = {
         "mock": MockLLM(),
@@ -230,5 +275,5 @@ def get_llm(provider: str = "mock") -> LLM:
         "repeat": RepeatLLM(),
     }
     if provider in fakes:
-        return fakes[provider]
+        return RobustLLM(fakes[provider], ledger)
     raise ValueError(f"未知的模型提供方: {provider}")
