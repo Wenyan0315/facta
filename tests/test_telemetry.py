@@ -39,6 +39,40 @@ class BoomLLM(LLM):
         raise RuntimeError("网络断了")
 
 
+class FlakyLLM(LLM):
+    """先失败 N 次再成功的假模型：模拟网络抖动。"""
+
+    name = "flaky"
+
+    def __init__(self, fail_times: int) -> None:
+        self._fail_left = fail_times
+        self.attempts = 0
+
+    def generate(self, messages, tools=None) -> Message:
+        self.attempts += 1
+        if self._fail_left > 0:
+            self._fail_left -= 1
+            raise ConnectionError("网络抖动")  # 无 status_code → 可重试
+        return Message(
+            role="assistant",
+            content="终于成功",
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        )
+
+
+class _AuthError(Exception):
+    """401 语义：key 无效——重试一万次也不会好。"""
+
+    status_code = 401
+
+
+class UnauthorizedLLM(LLM):
+    name = "unauthorized"
+
+    def generate(self, messages, tools=None) -> Message:
+        raise _AuthError("key 无效")
+
+
 def test_ledger_records_llm_call_with_cost():
     ledger = UsageLedger()
     llm = RobustLLM(UsageFakeLLM(pricing={"in": 1.0, "out": 2.0}), ledger)
@@ -53,11 +87,42 @@ def test_ledger_records_llm_call_with_cost():
 
 def test_failure_recorded_and_rethrown():
     ledger = UsageLedger()
-    llm = RobustLLM(BoomLLM(), ledger)
+    llm = RobustLLM(BoomLLM(), ledger, backoff=0)  # 关退避，测试不睡觉
     with pytest.raises(RuntimeError, match="网络断了"):
         llm.generate([Message(role="user", content="hi")])
     assert ledger.llm_failures == 1
     assert ledger.llm_calls == 0  # 失败不计成功次数
+
+
+def test_retry_then_success():
+    ledger = UsageLedger()
+    flaky = FlakyLLM(fail_times=2)
+    llm = RobustLLM(flaky, ledger, retries=2, backoff=0)
+    reply = llm.generate([Message(role="user", content="hi")])
+
+    assert reply.content == "终于成功"
+    assert flaky.attempts == 3  # 2 次失败 + 1 次成功
+    assert ledger.llm_retries == 2
+    assert ledger.llm_failures == 0
+    assert ledger.llm_calls == 1  # 最终成功只算一次
+
+
+def test_non_retriable_fails_fast():
+    ledger = UsageLedger()
+    llm = RobustLLM(UnauthorizedLLM(), ledger, retries=2, backoff=0)
+    with pytest.raises(_AuthError, match="key 无效"):
+        llm.generate([Message(role="user", content="hi")])
+    assert ledger.llm_retries == 0  # 401 不值得重试
+    assert ledger.llm_failures == 1
+
+
+def test_retry_exhausted_records_failure():
+    ledger = UsageLedger()
+    llm = RobustLLM(BoomLLM(), ledger, retries=1, backoff=0)
+    with pytest.raises(RuntimeError, match="网络断了"):
+        llm.generate([Message(role="user", content="hi")])
+    assert ledger.llm_retries == 1
+    assert ledger.llm_failures == 1
 
 
 def test_no_pricing_means_zero_cost():

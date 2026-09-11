@@ -147,9 +147,12 @@ class OpenAICompatibleLLM(LLM):
                 f"缺少 {prefix}_API_KEY：请先在项目根目录 .env 文件里配置它"
             )
         # base_url / model 也允许环境变量覆盖
+        # M7.5b 超时：网络卡住不能把程序一起卡死（默认 30s，{PREFIX}_TIMEOUT 可调）
+        timeout = float(os.environ.get(f"{prefix}_TIMEOUT", "30"))
         self._client = OpenAI(
             api_key=api_key,
             base_url=os.environ.get(f"{prefix}_BASE_URL", base_url),
+            timeout=timeout,
         )
         self._model = os.environ.get(f"{prefix}_MODEL", model)
         # M7.5：价目（¥/百万 tokens）记在身上，供网关把 token 换算成钱
