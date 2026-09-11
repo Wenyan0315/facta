@@ -22,6 +22,7 @@ from dataclasses import replace
 from agent.core.llm import LLM
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
+from agent.core.vector_math import cosine_similarity
 
 # 值得重试的 HTTP 状态：限流 + 服务器侧暂时性错误
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -131,3 +132,78 @@ class RobustLLM(LLM):
         tokens_in = usage.get("prompt_tokens", 0)
         tokens_out = usage.get("completion_tokens", 0)
         return tokens_in / 1e6 * pricing["in"] + tokens_out / 1e6 * pricing["out"]
+
+
+class SemanticCacheLLM(LLM):
+    """语义缓存衣（c 段第二档）：精确档 miss 后，按语义相似度复用旧答案。
+
+    独立装饰器而不是 RobustLLM 的一个开关（评审 C 条）——
+    它吃 embedder 依赖，塞进 RobustLLM 会让网关吃知识层组件，职责糊掉。
+
+    三个保守触发条件（复用旧答案离答非所问只有一线之隔）：
+    1. 仅 tools=None（纯聊天）——带菜单的回复携带 tool_calls，
+       复用旧答案等于重放旧动作，不安全
+    2. 能定位最后一条 role="user" 的消息当查询；找不到就透传，不硬来
+    3. 与新查询最相似的历史问答 ≥ threshold（BGE 下 0.92 ≈ 同一问）
+
+    诚实定位：个人聊天场景语义命中率天然低——它的战场是 FAQ 类高频
+    相似查询。教学项目实现它是掌握机制；账单会真实反映命中率。
+
+    成本：每次 miss 要 embed 一次查询（经注入的 embedder 进同一个账本）。
+    """
+
+    name = "semantic_cache"
+
+    def __init__(
+        self,
+        inner: LLM,
+        embedder,
+        ledger: UsageLedger | None = None,
+        threshold: float = 0.92,
+        max_entries: int = 64,
+    ) -> None:
+        self._inner = inner
+        self._embedder = embedder
+        self._ledger = ledger or UsageLedger()
+        self._threshold = threshold
+        # (查询向量, 回复) 线性扫描——教学规模 64 条以内，简单就是性能
+        self._entries: list[tuple[list[float], Message]] = []
+        self._max_entries = max_entries
+
+    def generate(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Message:
+        qvec: list[float] | None = None
+        if tools is None:
+            query = next(
+                (m.content for m in reversed(messages) if m.role == "user"), None
+            )
+            if query is not None:
+                qvec = self._embedder.embed([query])[0]
+                cached = self._best_match(qvec)
+                if cached is not None:
+                    self._ledger.record_cache_hit()
+                    return replace(cached)  # 副本外流，缓存本体不可被改（同精确档）
+
+        reply = self._inner.generate(messages, tools)
+
+        # 只有真正走了真模型的回复才入库；超上限时淘汰最老一条
+        if qvec is not None:
+            self._entries.append((qvec, reply))
+            if len(self._entries) > self._max_entries:
+                self._entries.pop(0)
+            # 存进条目的对象绝不外流（同精确档的缓存污染教训）
+            return replace(reply)
+        return reply
+
+    def _best_match(self, qvec: list[float]) -> Message | None:
+        best: Message | None = None
+        best_score = -1.0
+        for vec, reply in self._entries:
+            score = cosine_similarity(qvec, vec)
+            if score > best_score:
+                best_score = score
+                best = reply
+        if best is not None and best_score >= self._threshold:
+            return best
+        return None

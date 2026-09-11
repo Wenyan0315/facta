@@ -15,23 +15,10 @@ InMemory 原生就是余弦；Chroma 的 cosine 空间返回的是「距离」�
 所以要在实现里换算。换算封装在实现内部——上层永远只看到「越大越像」这一个语义。
 """
 
-import math
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """余弦相似度：两个向量夹角的余弦，越接近 1 越相似。
-
-    从 knowledge_base.py 搬过来：M7 后「算距离」变成 store 层的活，
-    数学函数跟着它唯一的使用者走。
-    """
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+from agent.core.vector_math import cosine_similarity  # M7.5c：余弦搬到 core 地基，跨层消费
 
 
 class VectorStore(ABC):
