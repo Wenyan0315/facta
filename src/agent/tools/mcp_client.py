@@ -27,6 +27,7 @@ import json
 import queue
 import subprocess
 import threading
+import time
 
 from agent.tools.registry import Tool, ToolRegistry
 
@@ -44,7 +45,8 @@ class McpClient:
 
     def __init__(self, command: list[str], timeout: float = 30.0) -> None:
         self._timeout = timeout
-        # stderr 直接丢弃：不读它会让子进程的日志写满管道缓冲区把双方卡死
+        # stderr 直接丢弃：不读它会让子进程的日志写满管道缓冲区把双方卡死。
+        # 调试期可改为重定向到文件（open(path, "w")）——防死锁同时留证据
         self._proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -53,6 +55,14 @@ class McpClient:
             text=True,
             encoding="utf-8",
         )
+        # 启动探活：服务器起不来（脚本路径错/依赖缺）就立刻报，别等 initialize
+        # 空等超时（三方评审第 5 条）。100ms 沉降期：Popen 刚返回时子进程可能
+        # 还没来得及退出，立刻 poll 有竞态——健康服务器多等 100ms 无感
+        time.sleep(0.1)
+        if self._proc.poll() is not None:
+            raise McpError(
+                f"MCP 服务器启动失败（退出码 {self._proc.returncode}）：{' '.join(command)}"
+            )
         self._queue: "queue.Queue[dict | None]" = queue.Queue()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -95,7 +105,11 @@ class McpClient:
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def _request(self, method: str, params: dict) -> dict:
-        """同步请求：发带 id 的消息，等到同 id 的响应（跳过通知与他人响应）。"""
+        """同步请求：发带 id 的消息，等到同 id 的响应（跳过通知与他人响应）。
+
+        超时语义：每等一条消息最多 timeout 秒，不是整次调用总超时——
+        服务器若持续吐无关消息，总等待可超 timeout。已知边界，当前够用。
+        """
         req_id = self._next_id
         self._next_id += 1
         self._send(

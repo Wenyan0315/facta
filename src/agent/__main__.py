@@ -1,9 +1,9 @@
 """个人 AI Agent 助手 —— 命令行入口。
 
 用法：
-    python -m agent              # 默认用 deepseek 真模型
-    python -m agent mock         # 用 mock 假模型（不花钱、不联网）
-    python -m agent echo repeat  # 其他测试模型
+    python -m agent          # 默认用 deepseek 真模型
+    python -m agent mock     # 用 mock 假模型（不花钱、不联网）
+    python -m agent echo     # 其他测试模型（只读第一个参数）
 """
 
 import sys
@@ -24,7 +24,7 @@ from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 from agent.tools.registry import ToolRegistry
 
-VERSION = "0.9.0"
+VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
 MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx；单消费者路径留本地）
 VECTOR_DB_DIR = Path("data/vector_db")           # M7：向量库落盘位置（运行时数据，.gitignore 已排除）
 
@@ -50,9 +50,14 @@ def main() -> None:
     else:
         embedder = get_embedder("siliconflow", ledger)
 
-    # 2) 模型（M7.5 网关链）：组装顺序 = 语义缓存 → 防护壳(记账+重试+精确缓存) → 真模型
-    llm = get_llm(provider, ledger)
-    llm = SemanticCacheLLM(llm, embedder, ledger)   # 语义档 miss 的查询 embedding 也进同一本账
+    # 2) 模型链（M7.5 网关 + 三方评审第 2 条拆链）：组装出两条链——
+    #    内部链（internal_llm）：防护壳全套（记账/重试/精确缓存/熔断/降级），
+    #        给压缩器与 search_and_summarize 的内部调用用；
+    #    用户链（llm）：内部链再包一层语义档，只服务用户聊天流量——
+    #        内部调用的（提示词, 回复）进缓存池有串味路径，且内部 prompt
+    #        几乎不可能命中 0.92 阈值（白付 embed）
+    internal_llm = get_llm(provider, ledger)
+    llm = SemanticCacheLLM(internal_llm, embedder, ledger)
     print(f"当前模型：{provider}")
 
     # 3) 知识库（M7）：组装 embedder + store，索引走增量同步——
@@ -72,14 +77,15 @@ def main() -> None:
 
     # 5) 工具（M5）：登记内置工具，交给主循环
     #    P1-2：依赖打包成 ToolContext——kb 给 search/write 查重检索、
-    #    llm 给 search_and_summarize 做内部摘要、history 给会话内检索
+    #    llm 给 search_and_summarize 做内部摘要（内部链，不穿语义档——评审第 2 条）、
+    #    history 给会话内检索
     #    （闭包注入，传列表对象本身而非副本——run_chat 原地 append，
     #    工具才能实时看到全部历史）、notes_dir 消灭工具层写死的路径
     registry = ToolRegistry()
     ctx = ToolContext(
         notes_dir=NOTES_DIR,
         kb=kb,
-        llm=llm,
+        llm=internal_llm,
         history=session.messages,
     )
     register_builtin(registry, ctx)
@@ -89,7 +95,8 @@ def main() -> None:
     #    M5.5 起检索权在模型手里（Agentic RAG）：run_chat 不再需要 kb，
     #    知识库完全通过工具层（search_notes）介入对话
     #    M6 起：会话状态注入 → 跑完归还，本层负责落盘（组装层管策略）
-    session = run_chat(llm, registry, session)
+    #    拆链（评审第 2 条）：压缩器内部调用走 summary_llm=内部链
+    session = run_chat(llm, registry, session, summary_llm=internal_llm)
 
     # 7) 退出落盘（M6）：完整会话状态（消息 + 压缩缓存）存回 JSON，下次启动恢复
     save_session(session, MEMORY_PATH)

@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖（含 dev 测试件 + rag 向量库）
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,rag]"
+
+      - name: 跑全量测试（pipefail 防管道吞退出码——血案教训的自动化防线）
+        run: |
+          set -o pipefail
+          python -m pytest -q

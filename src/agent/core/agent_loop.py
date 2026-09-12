@@ -70,7 +70,15 @@ def run_chat(
     llm: LLM,
     registry: ToolRegistry | None = None,
     session: Session | None = None,
+    summary_llm: LLM | None = None,
 ) -> Session:
+    """多轮对话主循环。
+
+    summary_llm（拆链，三方评审第 2 条）：摘要压缩的内部 LLM 调用走这条链，
+    默认沿用 llm。语义档只该服务用户聊天流量——内部调用的（提示词, 回复）
+    进缓存池有串味路径，且内部 prompt 几乎不可能命中阈值（白付 embed）。
+    """
+    summarizer = summary_llm or llm
     # 会话状态：从外部注入（__main__ 从 session.json 载入 Session 后传入），
     # 底片（messages）+ 压缩缓存（summary/summarized_upto）整体进出。
     # 人设两段式：Session.messages 永远是个列表（可能是空），空则原地种人设。
@@ -107,7 +115,7 @@ def run_chat(
             #    落盘）；用户消息留在底片；提示语只打印、不进历史
             try:
                 session.summary, session.summarized_upto = maybe_compress(
-                    llm, session.messages, session.summary, session.summarized_upto
+                    summarizer, session.messages, session.summary, session.summarized_upto
                 )
                 payload = build_payload(session.messages, session.summary, session.summarized_upto)
                 # 时间锚点注入投影（不入底片）：位置固定在第 2 条（system 之后、

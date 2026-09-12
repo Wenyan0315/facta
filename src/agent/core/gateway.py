@@ -126,6 +126,9 @@ class RobustLLM(LLM):
                 if key is not None:
                     self._store(key, reply)
                 # 存进缓存的对象绝不外流：返回副本——调用方拿到的手伸不进缓存。
+                # 注意 replace 是浅拷贝：tool_calls 列表仍与缓存本体共享引用——
+                # 「缓存不可被改」靠「消息按不可变使用」的约定成立；若有人改动
+                # 返回消息的 tool_calls 列表，隔离会被击穿（已知边界）
                 return replace(reply)
 
         # 最终失败：记账 + 熔断计数 + 原样抛给上层（FallbackLLM / 主循环）
