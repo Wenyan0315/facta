@@ -262,6 +262,7 @@ def get_llm(
     provider: str = "mock",
     ledger: UsageLedger | None = None,
     config: "GatewayConfig | None" = None,
+    with_mock_fallback: bool = True,
 ) -> LLM:
     """工厂 = 进程内网关（M7.5d 起是降级链组装器）。
 
@@ -269,8 +270,8 @@ def get_llm(
     每个候选各穿自己的防护壳（记账+重试+精确缓存+熔断）；
     链由一个 FallbackLLM 统筹切换。练习模式（假模型）单候选项，不组链。
 
-    ledger / config 是全局账本与网关参数（__main__ 创建传入）；
-    从调用方视角返回的还是普通 LLM——agent_loop 等零改动。
+    with_mock_fallback=False（评测用）：不挂 mock 兜底——评估时主模型
+    失败就大声抛异常，而不是被 mock 顶替静默污染分数。
     """
     from agent.core.gateway import FallbackLLM, GatewayConfig, RobustLLM  # 函数内导入：gateway 依赖本模块，避免循环
 
@@ -302,8 +303,12 @@ def get_llm(
         if name != provider and os.environ.get(f"{backup_cfg['prefix']}_API_KEY"):
             chain.append(_wrapped(_build_openai(backup_cfg), name))
 
-    # mock 兜底（用户拍板）：全挂也保对话可用；降级时 FallbackLLM 会打印声明
-    chain.append(_wrapped(MockLLM(), "mock"))
+    # mock 兜底（用户拍板）：全挂也保对话可用；降级时 FallbackLLM 会打印声明。
+    # 评测场景传 with_mock_fallback=False 关掉（失败须大声，不被 mock 顶替）
+    if with_mock_fallback:
+        chain.append(_wrapped(MockLLM(), "mock"))
+    if len(chain) == 1:
+        return chain[0]  # 无备用无兜底：单候选，省一个 Fallback 包装层
     return FallbackLLM(chain, ledger)
 
 
