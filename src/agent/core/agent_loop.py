@@ -13,6 +13,10 @@ M5 起：工具调用循环（ReAct 雏形）——
 回填 → 模型看到结果再决策。循环直到模型给出最终文本回复。
 """
 
+from __future__ import annotations
+
+from datetime import datetime
+
 from agent.core.llm import LLM, LLMUnavailableError
 from agent.core.types import Message
 from agent.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
@@ -39,6 +43,27 @@ _EXIT_WORDS = {"quit", "exit", "q", "退出", "再见"}
 
 # 工具循环保险丝：模型理论上可能一直点菜不收敛，永远要给循环设上限
 _MAX_TOOL_ROUNDS = 5
+
+_WEEKDAYS = "一二三四五六日"
+
+
+def _time_stamp(now: datetime | None = None) -> Message:
+    """当前时间戳（投影专用，绝不入底片）。
+
+    为什么要它（真实使用经验逼出来的）：跨会话恢复时，模型没有「现在」的
+    概念，会拿上次对话的时间当锚点，安静地算错一切相对时间——"更新数据"
+    取到半个月前的日期还不报错。时间戳管「今天是哪天」这个锚点；
+    get_current_time 工具继续管秒级精度与未来时间点。
+
+    进投影不进底片的理由：时间属于「本轮视野」而非「对话内容」——
+    入底片会堆日期垃圾、被摘要吸收；投影每轮现切、随轮作废。
+    now 参数留给测试注入固定时刻。
+    """
+    now = now or datetime.now()
+    return Message(
+        role="system",
+        content=f"今天：{now:%Y-%m-%d}（周{_WEEKDAYS[now.weekday()]}）{now:%H:%M}",
+    )
 
 
 def run_chat(
@@ -85,6 +110,9 @@ def run_chat(
                     llm, session.messages, session.summary, session.summarized_upto
                 )
                 payload = build_payload(session.messages, session.summary, session.summarized_upto)
+                # 时间锚点注入投影（不入底片）：位置固定在第 2 条（system 之后、
+                # 摘要/对话之前）；本轮工具循环共享同一个时间戳
+                payload.insert(1, _time_stamp())
 
                 for _round in range(_MAX_TOOL_ROUNDS):
                     reply = llm.generate(payload, tools)   # 发的是投影，不是底片
