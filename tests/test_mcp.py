@@ -18,6 +18,7 @@ from agent.tools.mcp_client import McpCallError, McpClient, register_mcp_tools
 from agent.tools.registry import ToolRegistry
 
 SERVER = Path(__file__).resolve().parents[1] / "servers" / "notes_server.py"
+SDK_SERVER = Path(__file__).resolve().parents[1] / "servers" / "sdk_server.py"
 
 
 @pytest.fixture
@@ -80,3 +81,21 @@ def test_close_terminates_process():
     proc = c._proc
     c.close()
     assert proc.poll() is not None  # 进程已终止，无孤儿
+
+
+def test_interop_with_official_sdk_server():
+    """互操作验收：手写客户端连官方 SDK 实现的服务器（独立裁判）。
+
+    自建服务器与自写客户端共享同一份协议直觉，只有独立实现能检验
+    双方是否互相印证了同一个系统性错误。官方 SDK 没装则跳过，
+    不炸全绿（importorskip）。
+    """
+    pytest.importorskip("mcp")
+    client = McpClient([sys.executable, str(SDK_SERVER)])
+    try:
+        names = {t["name"] for t in client.list_tools()}
+        assert {"get_server_time", "echo"} <= names
+        assert client.call_tool("get_server_time", {}) == "2026-09-12 18:00:00"
+        assert client.call_tool("echo", {"text": "roundtrip"}) == "roundtrip"
+    finally:
+        client.close()

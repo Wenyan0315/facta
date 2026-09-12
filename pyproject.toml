@@ -15,6 +15,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7",
+    "mcp>=2.0",   # MCP 互操作验收的裁判服务器（servers/sdk_server.py）；将来写真实服务器也用
 ]
 rag = [
     "chromadb>=1.5",   # M7 工业向量库：下限取实测验证版本（1.5.9），教学版不需要，按需 pip install -e ".[rag]"
