@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.17（2026-09-11）｜随着里程碑推进持续迭代此文档
+> 版本：v0.18（2026-09-12）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块/决策）时，同步更新本文件并提升版本号
 
 ## 设计原则
@@ -90,7 +90,7 @@
 | 层 | 现状 | 建成后 |
 |---|------|--------|
 | core 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb | 并行工具调用 / 更复杂的规划策略 |
-| LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/siliconflow) | 更多供应商 + 多模型路由 |
+| LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/siliconflow) + 进程内网关(M7.5：记账/重试超时/精确+语义缓存/熔断三态/降级链+优雅兜底) | 更多供应商 + 多模型路由 |
 | knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集) | 知识图谱 |
 | memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压） | 多会话隔离（另排期） |
 | tools | ✅ Tool+ToolRegistry+6内置工具(时间/清单/读/写/检索/检索+摘要)；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型) | 更多工具 + MCP + skills |
@@ -116,7 +116,7 @@
 | M6 ✅ | 记忆持久化：JSON落盘(M6.1)→摘要压缩(M6.2)→温层检索(M6.3)→Session整体持久化+回归测试 | 成本控制、状态完整性 |
 | P1 | 重构前置：Message→types.py（依赖方向）+ ToolContext 收敛工具依赖 + 路径统一注入 | 依赖方向、对象收敛 |
 | M7 ✅ | 工业 RAG：向量库持久化(Chroma) + 增量更新（弃全量重建）｜evals/文档治理并入收官 | 向量库、增量索引 |
-| M7.5 | 生产加固：容错四件套 / 语义缓存 / 成本统计 / 可观测性 | 容错、可观测性 |
+| M7.5 ✅ | 生产加固：网关四件套（记账+重试超时+精确/语义缓存+熔断）｜降级链 + 优雅兜底 | 容错、可观测性、成本控制 |
 | MCP | 外部工具动态发现（三次顺延的集结号，coding agent 最直接积木） | 协议、动态工具 |
 | streaming | 流式输出（首字延迟 / tool_calls 分片重组 / 用户取消）｜独立交互层 | 增量协议 |
 | 阶段二 | coding agent：skill 系统 + 安全 + 工具访问 + 多 agent 协作 | 实战整合 |
@@ -171,3 +171,12 @@
 - **删除安全阀（2026-09-11，测试逼出的设计修正）**：文件消失 ≠ 用户想删（目录误移动/挂载失败会清空全库、下回重建重烧 embedding）。双重护栏：①空目录由 scan_notes 直接抛错（第一道防线）②批量消失按「文件数」判且**修改不算**（改内容是合法替换）：消失篇数 ≥3 且占比 >20% 中止逼人确认。初版用「待删块数/总量」纯比例判据被测试现场打脸（单文件库改一篇=100%拦截、两文件库删一篇=50%拦截——比例阈值对小样本是噪声，必须带绝对下限，与「SQLite 迁移触发信号」的阈值设计同课）。
 - **M7 验收（2026-09-11）**：tests 15→29（新增 test_vector_store 4 条 + test_sync 10 条），不变量全部钉成断言：首轮全增/二轮幂等白嫖（零 embed）/改·删·增三路/改名免费/删除安全阀+小删除对照/重启零重算（CountingEmbedder 计数 + Chroma 关库重开）/词袋退化全量重建（且 fit 未漏——搜 PHP 排第一）/空目录中止。真实验收：`python -m agent deepseek` 连跑两遍，第一遍「新增 14」（一次性 BGE 全量嵌入），第二遍「不变 14、零新增」——**重启零重算**用真实数据验证通过；mock 冒烟 8 工具清单不变、21 条历史往返无损。连带治理：load_notes（M7 前入口）所有消费方转 sync 后退役删除；chunk_size/overlap 参数目前定死 200/50（KBsync 未暴露配置，届时需要再加）。
 - **M7 评审修复轮（2026-09-11）**：TRAE-code-review + 双验证 agent 审 ec10839，8 项全修（无 Critical）：①docstring 成本模型失实（「不变=不读文件」是错的——算哈希必须读全文，省的是 embed 不是读盘）②两新文件补行尾换行（types.py 同款复发，验证手段固化：提交前 `tail -c 1 | xxd`）③Chroma clear 补测试（原死路径零覆盖，1.5.9 下实测可用后钉进断言）④metadata.source 去重陈旧记入代码注释为已知边界 ⑤chromadb 下限提至实测版本 >=1.5 ⑥InMemory upsert 换 `zip(strict=True)`（静默截断对齐错位 vs Chroma 抛错，双实现行为对齐）⑦词袋路径 unchanged 归 0（账本自洽）⑧「先增后删」崩溃一致性窗口注释记录（刻意选先增后删：宁可短暂重复不要窗口期缺失）。被排除的误报一条：主审怀疑「批量改名误触安全阀」——vanished 有 `hash∈to_remove` 前置过滤，改名指纹不变进不了集合，双验证员一致推翻。元教训：同行评审的价值不在「找到 8 个问题」，在「主审自己的假设被证伪」——改名误报那条就是我拿着错误假设去找证据，被验证员按代码逻辑否决。
+- **M7.5 网关四件套（2026-09-11/12）**：`get_llm()` 工厂落实为进程内网关（兑现 2026-09-05「网关不做独立服务」的既定决策），所有 `llm.generate` 调用点（主循环×2/压缩器/工具内子调用）零改动获得四件衣。分段落地：
+
+  **a 记账与可观测**：`Message.usage` 可选字段（接口演进老规矩：带默认值不破坏老代码）；OpenAICompatibleLLM 解析 resp.usage；`core/telemetry.py` 的 `UsageLedger` 进程级账本（LLM+embedding 一本账）；PROVIDERS/EMBED_PROVIDERS 加价目行（示例价注明以官网为准）；退出时 `__main__` 打印账单。**记账位置在 wrapper 不在实现类**——假模型同样过闸（mock 模式 ¥0 也有账）、重试次数只有 wrapper 数得清、嵌入侧因无输出通道而在实现类内部记（两套记账模式并存的不对称已记录，语义档查询 embed 的记账也因此自动覆盖）。
+
+  **b 重试与超时**：可重试异常判型用鸭子方式（getattr status_code——None/429/5xx 重试，4xx 立即抛），不 import openai 保假模型路径轻装；指数退避 0.5s→1s 默认重试 2 次；客户端 timeout 默认 30s（`{PREFIX}_TIMEOUT` 可覆盖）。记账联动：retries/failures 计数进账单。
+
+  **c 缓存两档**：精确档（键=模型身份+完整输入哈希；命中返回 replace 副本；LRU 128 进程级不落盘）；语义档（独立装饰器 SemanticCacheLLM，评审 C 条——吃 embedder 依赖不塞进 RobustLLM；三个保守条件：仅 tools=None 防重放 tool_calls/能定位最后一条 user/相似度≥0.92）。**缓存隔离事故**：未命中路径一度把缓存本体返回给调用方（命中路径隔离了、miss 路径漏了），红测试被管道吞掉退出码后随 commit 推送（`pytest|tail` 退出码是 tail 的），修复为「入库即隔离，返回永远副本」。语义档诚实定位：个人聊天命中率天然低，战场是 FAQ 类高频相似查询。cosine_similarity 第三次搬迁——语义档（core 层）要用它，从 knowledge/vector_store.py 再搬到 `core/vector_math.py` 地基（规律：函数有跨层多个消费者时属于最低公共层）。
+
+  **d 熔断与降级链（评审 F 契约定稿后实施）**：①`LLMUnavailableError` 定义在 llm.py（接口层语言，主循环不 import 网关）②agent_loop 把「摘要→投影→工具循环→收尾」整轮罩进捕获：模型全挂 → 掐半截工具轮 + 用户消息留底片 + 提示语不进历史 + 程序不崩（熔断保护的终点是体验不是崩溃）③`FallbackLLM` 降级链：候选逐个试、切换打印诚实声明、链耗尽才抛；捕获全部 Exception——401 切下一个（主候选没救≠备选没救）④熔断三态挂每个候选自己的 RobustLLM：连续失败≥阈值(默认3)→open 冷却(默认30s)快速失败→冷却期满 half_open 放行一次试探（成败定回路去留；冷启用 time.monotonic）⑤`GatewayConfig` dataclass 收敛参数（评审 B 条，防 ToolContext 病的网关版复发）⑥get_llm 升级为链组装器：主模型→有 key 的备用真模型（没 key 的备选不报错，不是主选）→mock 兜底（用户拍板，降级时打印声明）。测试教训两条：时间相关状态（冷却）必须假时钟（monkeypatch time.monotonic）驱动——cooldown=0 时 open 态时长也是 0，快速失败分支全程不可观测；keyword-only 传参防位置漂移（GatewayConfig 一度被塞进 ledger 参数位）。验收：57 用例全绿，mock（单候选）与 deepseek（真降级链）双链路冒烟正常。
