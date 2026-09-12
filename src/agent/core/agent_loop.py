@@ -13,7 +13,7 @@ M5 起：工具调用循环（ReAct 雏形）——
 回填 → 模型看到结果再决策。循环直到模型给出最终文本回复。
 """
 
-from agent.core.llm import LLM
+from agent.core.llm import LLM, LLMUnavailableError
 from agent.core.types import Message
 from agent.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
 from agent.memory.store import Session
@@ -75,39 +75,45 @@ def run_chat(
 
             # 2) M6.2 发送前投影：触发式摘要（内部调用）→ 切 payload
             #    压缩缓存记在 Session 上——随底片一起落盘，重启不从头再压
-            session.summary, session.summarized_upto = maybe_compress(
-                llm, session.messages, session.summary, session.summarized_upto
-            )
-            payload = build_payload(session.messages, session.summary, session.summarized_upto)
-
             # 3) 工具循环：决策 → 执行 → 观察 → 再决策（M5 心脏）
-            for _round in range(_MAX_TOOL_ROUNDS):
-                reply = llm.generate(payload, tools)   # 发的是投影，不是底片
-
-                if not reply.tool_calls:   # 模型不点菜了 → 最终回答，退出循环
-                    break
-
-                # 双写：底片入史（落盘用）+ 投影同步（本轮内模型必须看得见）
-                session.messages.append(reply)
-                payload.append(reply)
-
-                for tc in reply.tool_calls:   # 模型一次可能点多个菜
-                    print(f"  [调用工具] {tc['name']}({tc['arguments']})")
-                    result = registry.execute(tc["name"], tc["arguments"])
-                    print(f"  [工具结果] {result}")
-                    # 结果以 role="tool" 回填，tool_call_id 对应是哪次调用
-                    tool_msg = Message(role="tool", tool_call_id=tc["id"], content=result)
-                    session.messages.append(tool_msg)
-                    payload.append(tool_msg)
-            else:
-                # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
-                print("  [已达到工具调用轮数上限，强制结束本轮]")
-                reply = llm.generate(payload, None)  # 最后一问不递菜单，逼它说话
-
             # 4) 收尾：最终回答只入底片（投影本轮作废，下轮重切）
-            session.messages.append(reply)
+            # —— 2/3/4 都罩在 LLMUnavailableError 保护下（M7.5d F 契约）：
+            #    模型全挂 → 优雅结束本轮而非崩溃；半截工具轮掐掉（防孤儿 tool
+            #    落盘）；用户消息留在底片；提示语只打印、不进历史
+            try:
+                session.summary, session.summarized_upto = maybe_compress(
+                    llm, session.messages, session.summary, session.summarized_upto
+                )
+                payload = build_payload(session.messages, session.summary, session.summarized_upto)
 
-            print(f"agent：{reply.content}")
+                for _round in range(_MAX_TOOL_ROUNDS):
+                    reply = llm.generate(payload, tools)   # 发的是投影，不是底片
+
+                    if not reply.tool_calls:   # 模型不点菜了 → 最终回答，退出循环
+                        break
+
+                    # 双写：底片入史（落盘用）+ 投影同步（本轮内模型必须看得见）
+                    session.messages.append(reply)
+                    payload.append(reply)
+
+                    for tc in reply.tool_calls:   # 模型一次可能点多个菜
+                        print(f"  [调用工具] {tc['name']}({tc['arguments']})")
+                        result = registry.execute(tc["name"], tc["arguments"])
+                        print(f"  [工具结果] {result}")
+                        # 结果以 role="tool" 回填，tool_call_id 对应是哪次调用
+                        tool_msg = Message(role="tool", tool_call_id=tc["id"], content=result)
+                        session.messages.append(tool_msg)
+                        payload.append(tool_msg)
+                else:
+                    # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
+                    print("  [已达到工具调用轮数上限，强制结束本轮]")
+                    reply = llm.generate(payload, None)  # 最后一问不递菜单，逼它说话
+
+                session.messages.append(reply)
+                print(f"agent：{reply.content}")
+            except LLMUnavailableError as exc:
+                trim_incomplete_round(session.messages)
+                print(f"[模型不可用] {exc}\n本轮到此为止，网络/额度恢复后重新提问即可。")
     except (KeyboardInterrupt, EOFError):
         # M6.2：修掉 M6.1 的 tradeoff②——Ctrl+C / Ctrl+D 不再丢历史。
         # 先掐掉可能不完整的工具轮（孤儿 tool 消息落盘 = 下次启动 API 400），

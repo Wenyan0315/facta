@@ -13,6 +13,14 @@ from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
 
 
+class LLMUnavailableError(RuntimeError):
+    """所有候选模型都不可用时的最终信号（M7.5d 降级链耗尽）。
+
+    主循环捕获它 → 友善提示 + 优雅结束本轮，而不是让程序崩溃——
+    这是「熔断保护」与「用户体验」之间的接口契约（评审 F 条）。
+    """
+
+
 class LLM(ABC):
     """所有大模型实现的统一接口。
 
@@ -250,33 +258,60 @@ PROVIDERS: dict[str, dict[str, str | float]] = {
 }
 
 
-def get_llm(provider: str = "mock", ledger: UsageLedger | None = None) -> LLM:
-    """工厂 = 进程内网关入口（M7.5）：组装实现后统一穿防护壳。
+def get_llm(
+    provider: str = "mock",
+    ledger: UsageLedger | None = None,
+    config: "GatewayConfig | None" = None,
+) -> LLM:
+    """工厂 = 进程内网关（M7.5d 起是降级链组装器）。
 
-    ledger 是全局账本（__main__ 创建传入）；不传则网关自己建一个自用。
+    真模型模式：主模型 → 有 key 的备用真模型 → mock 兜底，
+    每个候选各穿自己的防护壳（记账+重试+精确缓存+熔断）；
+    链由一个 FallbackLLM 统筹切换。练习模式（假模型）单候选项，不组链。
+
+    ledger / config 是全局账本与网关参数（__main__ 创建传入）；
     从调用方视角返回的还是普通 LLM——agent_loop 等零改动。
     """
-    from agent.core.gateway import RobustLLM  # 函数内导入：gateway 依赖本模块，避免循环
+    from agent.core.gateway import FallbackLLM, GatewayConfig, RobustLLM  # 函数内导入：gateway 依赖本模块，避免循环
 
     if ledger is None:
         ledger = UsageLedger()
+    if config is None:
+        config = GatewayConfig()
 
-    if provider in PROVIDERS:
-        cfg = PROVIDERS[provider]
-        inner: LLM = OpenAICompatibleLLM(
-            cfg["prefix"],
-            cfg["base_url"],
-            cfg["model"],
-            float(cfg["price_in"]),
-            float(cfg["price_out"]),
-        )
-        return RobustLLM(inner, ledger)
+    def _wrapped(inner: LLM, label: str) -> LLM:
+        inner.name = label  # 降级打印时能认出谁是谁（OpenAICompatible 类名不带供应商）
+        return RobustLLM(inner, ledger, config)
 
-    fakes: dict[str, LLM] = {
-        "mock": MockLLM(),
-        "echo": EchoLLM(),
-        "repeat": RepeatLLM(),
-    }
-    if provider in fakes:
-        return RobustLLM(fakes[provider], ledger)
-    raise ValueError(f"未知的模型提供方: {provider}")
+    if provider in ("mock", "echo", "repeat"):
+        fakes: dict[str, LLM] = {
+            "mock": MockLLM(),
+            "echo": EchoLLM(),
+            "repeat": RepeatLLM(),
+        }
+        return _wrapped(fakes[provider], provider)
+
+    if provider not in PROVIDERS:
+        raise ValueError(f"未知的模型提供方: {provider}")
+
+    cfg = PROVIDERS[provider]
+    chain: list[LLM] = [_wrapped(_build_openai(cfg), provider)]
+
+    # 备用真模型：只挂「有 key 的」——没 key 的备选在启动时不报错（不是主选）
+    for name, backup_cfg in PROVIDERS.items():
+        if name != provider and os.environ.get(f"{backup_cfg['prefix']}_API_KEY"):
+            chain.append(_wrapped(_build_openai(backup_cfg), name))
+
+    # mock 兜底（用户拍板）：全挂也保对话可用；降级时 FallbackLLM 会打印声明
+    chain.append(_wrapped(MockLLM(), "mock"))
+    return FallbackLLM(chain, ledger)
+
+
+def _build_openai(cfg: dict) -> LLM:
+    return OpenAICompatibleLLM(
+        cfg["prefix"],
+        cfg["base_url"],
+        cfg["model"],
+        float(cfg["price_in"]),
+        float(cfg["price_out"]),
+    )

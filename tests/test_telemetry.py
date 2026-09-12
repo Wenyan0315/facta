@@ -8,7 +8,7 @@
 
 import pytest
 
-from agent.core.gateway import RobustLLM
+from agent.core.gateway import GatewayConfig, RobustLLM
 from agent.core.llm import LLM, get_llm
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
@@ -87,7 +87,7 @@ def test_ledger_records_llm_call_with_cost():
 
 def test_failure_recorded_and_rethrown():
     ledger = UsageLedger()
-    llm = RobustLLM(BoomLLM(), ledger, backoff=0)  # 关退避，测试不睡觉
+    llm = RobustLLM(BoomLLM(), ledger, GatewayConfig(backoff=0))  # 关退避，测试不睡觉
     with pytest.raises(RuntimeError, match="网络断了"):
         llm.generate([Message(role="user", content="hi")])
     assert ledger.llm_failures == 1
@@ -97,7 +97,7 @@ def test_failure_recorded_and_rethrown():
 def test_retry_then_success():
     ledger = UsageLedger()
     flaky = FlakyLLM(fail_times=2)
-    llm = RobustLLM(flaky, ledger, retries=2, backoff=0)
+    llm = RobustLLM(flaky, ledger, GatewayConfig(retries=2, backoff=0))
     reply = llm.generate([Message(role="user", content="hi")])
 
     assert reply.content == "终于成功"
@@ -109,7 +109,7 @@ def test_retry_then_success():
 
 def test_non_retriable_fails_fast():
     ledger = UsageLedger()
-    llm = RobustLLM(UnauthorizedLLM(), ledger, retries=2, backoff=0)
+    llm = RobustLLM(UnauthorizedLLM(), ledger, GatewayConfig(retries=2, backoff=0))
     with pytest.raises(_AuthError, match="key 无效"):
         llm.generate([Message(role="user", content="hi")])
     assert ledger.llm_retries == 0  # 401 不值得重试
@@ -118,7 +118,7 @@ def test_non_retriable_fails_fast():
 
 def test_retry_exhausted_records_failure():
     ledger = UsageLedger()
-    llm = RobustLLM(BoomLLM(), ledger, retries=1, backoff=0)
+    llm = RobustLLM(BoomLLM(), ledger, GatewayConfig(retries=1, backoff=0))
     with pytest.raises(RuntimeError, match="网络断了"):
         llm.generate([Message(role="user", content="hi")])
     assert ledger.llm_retries == 1

@@ -17,9 +17,9 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
-from agent.core.llm import LLM
+from agent.core.llm import LLM, LLMUnavailableError
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
 from agent.core.vector_math import cosine_similarity
@@ -28,8 +28,40 @@ from agent.core.vector_math import cosine_similarity
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
+@dataclass
+class GatewayConfig:
+    """网关各件衣服的参数（评审 B 条：收敛构造参数，防签名膨胀）。
+
+    语义档参数在 SemanticCacheLLM 自己构造上——它是独立装饰器，
+    threshold/max_entries 是它的业务参数，不蹭网关配置。
+    """
+
+    retries: int = 2
+    backoff: float = 0.5
+    cache: bool = True
+    cache_size: int = 128
+    # d 段熔断：连续失败达阈值 → 打开（冷却期内快速失败）→ 冷却期满半开放行一次试探
+    fail_threshold: int = 3
+    cooldown_seconds: float = 30.0
+
+
+class CircuitOpenError(RuntimeError):
+    """熔断打开时的快速失败信号——FallbackLLM 拿它切下一个候选。"""
+
+    def __init__(self, cooldown_left: float = 0.0) -> None:
+        super().__init__(f"熔断打开中，约 {cooldown_left:.0f}s 后自动恢复")
+        self.cooldown_left = cooldown_left
+
+
 class RobustLLM(LLM):
-    """包任意 LLM 实现的防护壳（a 记账衣 + b 重试衣 + c 缓存衣）。"""
+    """包任意 LLM 实现的防护壳（a 记账 + b 重试 + c 精确缓存 + d 熔断）。
+
+    四件衣服的穿法（顺序即语义）：
+      精确缓存最先——命中即返回，不碰熔断不碰网络；
+      熔断闸门次之——打开中快速失败，不再去撞墙；
+      重试+超时最内——真调用的最后一次防守；
+      记账横切所有出口（命中/成功/失败/重试都有账）。
+    """
 
     name = "robust"
 
@@ -37,58 +69,101 @@ class RobustLLM(LLM):
         self,
         inner: LLM,
         ledger: UsageLedger | None = None,
-        retries: int = 2,
-        backoff: float = 0.5,
-        cache: bool = True,
-        cache_size: int = 128,
+        config: GatewayConfig | None = None,
     ) -> None:
         self._inner = inner
         self._ledger = ledger or UsageLedger()
-        self._retries = retries
-        self._backoff = backoff
-        # 进程级 LRU 缓存，不落盘——重启清零没损失，下次重新算就是了
+        self._cfg = config or GatewayConfig()
+        # 进程级 LRU 精确缓存，不落盘——重启清零没损失，下次重新算就是了
         self._cache: "OrderedDict[str, Message]" = OrderedDict()
-        self._cache_on = cache
-        self._cache_size = cache_size
+        # d 衣熔断状态：closed（计数中）→ open（冷却中）→ half_open（放行一次试探）
+        self._consecutive_failures = 0
+        self._opened_at: float | None = None
+        self._half_open = False
 
     @property
     def inner(self) -> LLM:
         """露出被包的原模型——测试断言与调试用。"""
         return self._inner
 
+    @property
+    def name(self) -> str:
+        """对外报内层模型的名字——降级链打印时认得清谁是谁。"""
+        return getattr(self._inner, "name", self._inner.__class__.__name__)
+
     def generate(
         self, messages: list[Message], tools: list[dict] | None = None
     ) -> Message:
-        # c 衣（第一层·精确档）：同输入就直接吐缓存，连重试衣都不进——命中即省钱
-        key = self._cache_key(messages, tools) if self._cache_on else None
+        # c 衣：精确缓存命中 → 直接返回副本，不碰熔断不碰网络
+        key = self._cache_key(messages, tools) if self._cfg.cache else None
         if key is not None:
             cached = self._cache.get(key)
             if cached is not None:
                 self._ledger.record_cache_hit()
-                # 返回副本：调用方会 append/修改消息，共享同一个对象=缓存被污染
-                # （List identity trap 的表兄弟）
                 return replace(cached)
 
+        # d 衣：熔断闸门。open 且冷却未到 → CircuitOpenError 快速失败；
+        #        冷却期满 → 半开放行这一次试探（结局由本次调用的成败决定）
+        self._check_breaker()
+
         start = time.perf_counter()
-        for attempt in range(self._retries + 1):
+        error: Exception | None = None
+        for attempt in range(self._cfg.retries + 1):
             try:
                 reply = self._inner.generate(messages, tools)
+            except Exception as exc:
+                error = exc
+                # 不可重试（如 401/400）或重试已耗尽 → 奔最终失败
+                if not self._should_retry(exc) or attempt == self._cfg.retries:
+                    break
+                self._ledger.record_retry()
+                if self._cfg.backoff:
+                    time.sleep(self._cfg.backoff * (2 ** attempt))  # 指数退避
+            else:
                 elapsed = time.perf_counter() - start
                 self._ledger.record_llm(getattr(reply, "usage", None), self._cost_of(reply), elapsed)
+                self._on_success()
                 if key is not None:
                     self._store(key, reply)
                 # 存进缓存的对象绝不外流：返回副本——调用方拿到的手伸不进缓存。
-                # （曾栽过：未命中路径返回缓存本体，调用方一改，缓存被污染）
                 return replace(reply)
-            except Exception as exc:
-                # 不可重试（如 401/400）或重试已耗尽 → 记失败，原样抛
-                if not self._should_retry(exc) or attempt == self._retries:
-                    self._ledger.record_llm_failure()
-                    raise
-                self._ledger.record_retry()
-                if self._backoff:
-                    time.sleep(self._backoff * (2 ** attempt))  # 指数退避
-        raise RuntimeError("unreachable")  # 循环必然以 return 或 raise 结束
+
+        # 最终失败：记账 + 熔断计数 + 原样抛给上层（FallbackLLM / 主循环）
+        self._ledger.record_llm_failure()
+        self._on_failure()
+        if error is None:  # 理论不可达：循环不 return 就必有 error
+            raise RuntimeError("unreachable")
+        raise error
+
+    # ---- d 衣：熔断三态 ----
+
+    def _check_breaker(self) -> None:
+        if self._opened_at is None and not self._half_open:
+            return  # closed：正常放行
+        if self._opened_at is not None:
+            left = self._cfg.cooldown_seconds - (time.monotonic() - self._opened_at)
+            if left > 0:
+                raise CircuitOpenError(left)  # open：快速失败，不再撞墙
+            # 冷却期满 → 半开：放行这一次试探
+            self._opened_at = None
+            self._half_open = True
+
+    def _on_failure(self) -> None:
+        """一次调用级失败落账（重试再多次也只算一次调用级失败）。"""
+        self._consecutive_failures += 1
+        if self._half_open:
+            # 半开试探失败 → 立即重新熔断，开始新一轮冷却
+            self._half_open = False
+            self._opened_at = time.monotonic()
+            self._consecutive_failures = 0
+        elif self._consecutive_failures >= self._cfg.fail_threshold:
+            self._opened_at = time.monotonic()
+            self._consecutive_failures = 0
+
+    def _on_success(self) -> None:
+        self._consecutive_failures = 0
+        self._opened_at = None
+        self._half_open = False
 
     def _cache_key(self, messages: list[Message], tools: list[dict] | None) -> str:
         """键 = 模型身份 + 完整输入哈希。usage 是回复侧的，不进键。
@@ -107,7 +182,7 @@ class RobustLLM(LLM):
         """写入缓存并维持 LRU 上限；写满时淘汰最老一条。"""
         self._cache[key] = reply
         self._cache.move_to_end(key)
-        while len(self._cache) > self._cache_size:
+        while len(self._cache) > self._cfg.cache_size:
             self._cache.popitem(last=False)
 
     def _should_retry(self, exc: Exception) -> bool:
@@ -207,3 +282,37 @@ class SemanticCacheLLM(LLM):
         if best is not None and best_score >= self._threshold:
             return best
         return None
+
+
+class FallbackLLM(LLM):
+    """降级链（d 段）：候选列表逐个试，全挂抛 LLMUnavailableError。
+
+    切换时打印「已降级到 {name}」——诚实降级，不装正常（也当可观测性事件）。
+    捕获范围是 Exception 全部：401 这类「这个候选没救了」也切下一个——
+    主候选没救不代表备选没救；只有链耗尽才是 LLMUnavailableError。
+    """
+
+    name = "fallback"
+
+    def __init__(
+        self, candidates: list[LLM], ledger: UsageLedger | None = None
+    ) -> None:
+        self._candidates = list(candidates)
+        self._ledger = ledger or UsageLedger()
+
+    @property
+    def candidates(self) -> list[LLM]:
+        return self._candidates
+
+    def generate(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Message:
+        errors: list[str] = []
+        for index, candidate in enumerate(self._candidates):
+            if index > 0:
+                print(f"[降级] 前面的模型不可用，已切换到 {candidate.name}")
+            try:
+                return candidate.generate(messages, tools)
+            except Exception as exc:
+                errors.append(f"{candidate.name}: {exc}")
+        raise LLMUnavailableError("全部模型不可用——" + "；".join(errors))

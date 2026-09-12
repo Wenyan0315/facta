@@ -1,6 +1,6 @@
 """M7.5c 缓存验收：精确档（同输入命中/LRU/副本隔离）+ 语义档（相似复用/保守条件）。"""
 
-from agent.core.gateway import RobustLLM, SemanticCacheLLM
+from agent.core.gateway import GatewayConfig, RobustLLM, SemanticCacheLLM
 from agent.core.llm import LLM
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
@@ -46,7 +46,7 @@ def _semantic_chain(embedder=None, ledger=None, threshold=0.92):
     ledger = ledger or UsageLedger()
     inner = CountingLLM()
     return SemanticCacheLLM(
-        RobustLLM(inner, ledger, retries=0), embedder or FakeEmbedder(), ledger, threshold
+        RobustLLM(inner, ledger, GatewayConfig(retries=0)), embedder or FakeEmbedder(), ledger, threshold
     ), inner, ledger
 
 
@@ -104,7 +104,7 @@ def test_semantic_reply_mutation_does_not_pollute():
 def test_identical_call_hits_cache():
     ledger = UsageLedger()
     inner = CountingLLM()
-    llm = RobustLLM(inner, ledger, retries=0)
+    llm = RobustLLM(inner, ledger, GatewayConfig(retries=0))
 
     first = _ask(llm, "你好")
     second = _ask(llm, "你好")
@@ -118,7 +118,7 @@ def test_identical_call_hits_cache():
 
 def test_different_input_misses_cache():
     inner = CountingLLM()
-    llm = RobustLLM(inner, retries=0)
+    llm = RobustLLM(inner, config=GatewayConfig(retries=0))
     _ask(llm, "问题一")
     _ask(llm, "问题二")
     assert inner.attempts == 2
@@ -126,7 +126,7 @@ def test_different_input_misses_cache():
 
 def test_different_tools_menu_misses_cache():
     inner = CountingLLM()
-    llm = RobustLLM(inner, retries=0)
+    llm = RobustLLM(inner, config=GatewayConfig(retries=0))
     _ask(llm, "同一个问题", tools=None)
     _ask(llm, "同一个问题", tools=[{"name": "get_current_time"}])
     assert inner.attempts == 2  # 菜单不同 = 不同的请求，不能串味
@@ -134,7 +134,7 @@ def test_different_tools_menu_misses_cache():
 
 def test_lru_eviction():
     inner = CountingLLM()
-    llm = RobustLLM(inner, retries=0, cache_size=2)
+    llm = RobustLLM(inner, config=GatewayConfig(retries=0, cache_size=2))
     for q in ("一", "二", "三"):
         _ask(llm, q)
     assert inner.attempts == 3
@@ -144,7 +144,7 @@ def test_lru_eviction():
 
 def test_mutating_reply_does_not_pollute_cache():
     inner = CountingLLM()
-    llm = RobustLLM(inner, retries=0)
+    llm = RobustLLM(inner, config=GatewayConfig(retries=0))
     reply = _ask(llm, "你好")
     reply.content = "被调用方改掉了"  # 模拟上游改动返回的消息
     again = _ask(llm, "你好")
@@ -154,7 +154,7 @@ def test_mutating_reply_does_not_pollute_cache():
 
 def test_cache_disabled():
     inner = CountingLLM()
-    llm = RobustLLM(inner, retries=0, cache=False)
+    llm = RobustLLM(inner, config=GatewayConfig(retries=0, cache=False))
     _ask(llm, "你好")
     _ask(llm, "你好")
     assert inner.attempts == 2
