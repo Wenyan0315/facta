@@ -18,6 +18,46 @@ from dataclasses import dataclass
 from typing import Callable
 
 
+def _validate_args(args: dict, parameters: dict) -> str | None:
+    """按 JSON Schema 最小子集校验参数结构；返回错误描述，合法返回 None。
+
+    校验三维分工里的「结构层」——语法层（json.loads）与语义层（工具函数
+    自身抛异常）之外的补全。只实现 required + 基础类型：
+    花哨的 anyOf/$defs 是给模型看菜单用的，执行防线只需要
+    「缺了必填」和「类型错了」两道；未声明字段放行（宽松，不矫枉过正）。
+    """
+
+    def type_name(spec: dict) -> str | None:
+        # anyOf 等复合写法（MCP 三方 schema 常见）没有单一 type → 跳过
+        return spec.get("type") if isinstance(spec.get("type"), str) else None
+
+    if not isinstance(args, dict):
+        return "参数必须是 JSON 对象"
+    properties = parameters.get("properties", {})
+    for key in parameters.get("required", []):
+        if key not in args:
+            return f"缺少必填参数 {key}"
+    for key, value in args.items():
+        spec = properties.get(key) or {}
+        expected = type_name(spec)
+        if not expected:
+            continue
+        actual = type(value).__name__
+        if expected == "string" and not isinstance(value, str):
+            return f"参数 {key} 应为字符串，实际 {actual}"
+        if expected == "integer" and not (isinstance(value, int) and not isinstance(value, bool)):
+            return f"参数 {key} 应为整数，实际 {actual}"  # bool 是 int 子类，显式排除
+        if expected == "number" and not isinstance(value, (int, float)) or isinstance(value, bool):
+            return f"参数 {key} 应为数字，实际 {actual}"
+        if expected == "boolean" and not isinstance(value, bool):
+            return f"参数 {key} 应为布尔，实际 {actual}"
+        if expected == "array" and not isinstance(value, list):
+            return f"参数 {key} 应为数组，实际 {actual}"
+        if expected == "object" and not isinstance(value, dict):
+            return f"参数 {key} 应为对象，实际 {actual}"
+    return None
+
+
 @dataclass
 class Tool:
     """一个工具 = 元信息 + 函数本体。
@@ -75,6 +115,12 @@ class ToolRegistry:
             args = json.loads(arguments_json) if arguments_json.strip() else {}
         except json.JSONDecodeError as e:
             return f"错误：参数不是合法的 JSON（{e}）"
+
+        # 结构层校验（JSON Schema 最小子集）：语法合法但缺必填/类型错，
+        # 同样以错误字符串回给模型——自我纠正反馈环在两层校验间无差别
+        error = _validate_args(args, tool.parameters)
+        if error:
+            return f"错误：参数校验失败（{error}）"
 
         try:
             result = tool.func(**args)

@@ -160,7 +160,7 @@
 - **防递归检查点精确化**：风险不在"工具边界"，在**每次 llm.generate 调用现场**——拿着菜单的模型才可能点菜。search_and_summarize 是全项目唯一内部调用现场（tools=None 铁律）；kb.search 里的 embedder（BGE-M3）是神经网络但无菜单无意志，非风险。判据："是不是模型"不重要，"有没有菜单"才重要。
 - **Skill**：本质是 prompt 模板 + 资源包，后续做 `skills/` 目录按需加载，不提前设计
 - **多智能体**：阶段二做（Orchestrator 编排 + 子 agent 实例化组合），依赖 M5 扎实后才做
-- **校验 guardrails**：不单独分层，横切在 core 循环和工具层——M4 结构化输出校验+重试；M5 工具参数校验+自我纠错
+- **校验 guardrails**：不单独分层，横切在 core 循环和工具层——M4 结构化输出校验+重试；M5 工具参数校验+自我纠错（2026-09-12 补全景：校验三维分工=语法层 json.loads / 结构层 execute 按 JSON Schema 最小子集校验 required+基础类型（此前 schema 只用于生成菜单、执行时不 enforcement，记忆库硬约束「工具必须 JSON Schema 参数校验」只兑现一半）/ 语义层工具函数自身抛异常——坏参数在任一层都以错误字符串回给模型，自纠反馈环三层无差别）
 - **评估 evals**：独立 `evals/` 目录不进运行链路；检索用 precision@k/recall@k/MRR；M4 后加 LLM-as-judge
 - **会话状态持久化（2026-09-08，修复 P0-1）**：M6.1 只落盘底片 messages，M6.2 的 summary/summarized_upto 是 run_chat 局部变量，重启即清零——滚动摘要退化成「启动首轮一次性全量大压缩」（档案越长越接近悬崖式压缩，且暗号跨压缩存活不可复现）。修法：抽 `Session` dataclass（messages + summary + summarized_upto）整体落盘，store 出 `save_session/load_session`（version 预留演进 + 旧列表格式自动迁移 + 游标钳到 [1,len] 防越界）；run_chat 改为注入 Session 原地变异、归还 Session——落盘策略仍归 __main__（控制反转不打折）。连带收口 __main__ 接线（此前半段还是旧 load_messages/save_messages，直接 NameError）。
 - **回归测试落地（2026-09-08）**：两份独立评审共同点名「1244 行源码 0 单测、不变量写进散文靠人肉验收」。补 `ScriptedLLM`（按脚本吐 tool_calls，工具链路首次可离线验证；每次 generate 记录收到的 messages 供断言）+ `pytest` dev 依赖 + `tests/` 13 用例，把验收五轮 saga 踩过的坑固化成断言：覆盖不变量（死区防御）、窗口边界（左边界落 user/孤儿 tool）、孤儿清理（trim_incomplete_round）、触发缓存（阈值前零调用）、跨工具编号一致性（search_history/read_history 共享 #坐标系）。铁律：不变量写成断言，不写成注释。此后每个里程碑必带测试。
