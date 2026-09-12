@@ -155,12 +155,12 @@ def register_mcp_tools(registry: ToolRegistry, client: McpClient) -> None:
     for mcp_tool in client.list_tools():
         name = mcp_tool["name"]
         schema = mcp_tool.get("inputSchema") or {}
-        parameters = {
-            "type": schema.get("type", "object"),
-            "properties": schema.get("properties", {}),
-        }
-        if schema.get("required"):
-            parameters["required"] = schema["required"]
+        # 全量透传，不挑字段：title/anyOf/$defs/枚举等一旦被白名单挑丢，
+        # schema 就残缺——模型按残缺菜单生成的参数会被服务器拒收。
+        # 只会补默认值，绝不删键（复杂 schema 是三方服务器的常态）。
+        parameters = dict(schema)
+        parameters.setdefault("type", "object")
+        parameters.setdefault("properties", {})
 
         def _func(client=client, name=name, **args) -> str:
             # 默认参数锚定：闭包捕获的是「值」不是循环变量

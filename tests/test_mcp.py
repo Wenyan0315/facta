@@ -99,3 +99,28 @@ def test_interop_with_official_sdk_server():
         assert client.call_tool("echo", {"text": "roundtrip"}) == "roundtrip"
     finally:
         client.close()
+
+
+def test_complex_schema_survives_registration():
+    """注册桥接必须全量保留三方 schema——白名单挑字段会把 schema 挑残。
+
+    真实世界的教训（裁判教的）：SDK 对裸 dict 注解生成的是 anyOf 松
+    对象（没有任何嵌套子字段）——测试里最初假设的「嵌套 tag/language」
+    被现实推翻。真正的不变量是：schema 里出现过的键，一个都不能被
+    桥接丢掉（title/anyOf/$defs 被丢=菜单残缺=模型参数被服务器拒收）。
+    """
+    pytest.importorskip("mcp")
+    client = McpClient([sys.executable, str(SDK_SERVER)])
+    try:
+        registry = ToolRegistry()
+        register_mcp_tools(registry, client)
+        menu = {s["function"]["name"]: s["function"]["parameters"] for s in registry.schemas()}
+
+        params = menu["search_notes"]
+        assert "filters" in params["properties"]  # 复杂参数（anyOf 松对象）没丢
+        raw = {t["name"]: t for t in client.list_tools()}["search_notes"]["inputSchema"]
+        for key in raw:
+            if key not in ("type", "properties", "required"):
+                assert key in params, f"schema 键 {key} 被注册桥接丢弃"
+    finally:
+        client.close()

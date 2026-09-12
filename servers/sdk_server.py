@@ -25,5 +25,18 @@ def echo(text: str) -> str:
     return text
 
 
+@mcp.tool()
+def search_notes(query: str, filters: dict | None = None) -> str:
+    """模拟带嵌套筛选条件的检索——用来压测客户端对复杂 schema 的转换。
+
+    filters 是嵌套对象（含 tag/language 两个子字段），SDK 会生成带嵌套
+    properties 的 inputSchema；我们的注册桥接若只挑几个字段拷贝，
+    嵌套结构或 $defs 会被静默丢干净。
+    """
+    tag = (filters or {}).get("tag", "")
+    language = (filters or {}).get("language", "zh")
+    return f"query={query} tag={tag} language={language}"
+
+
 if __name__ == "__main__":
     mcp.run()
