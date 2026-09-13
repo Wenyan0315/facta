@@ -17,9 +17,10 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
-from agent.core.llm import LLM, LLMUnavailableError
+from agent.core.llm import LLM, LLMUnavailableError, StreamChunk, merge_stream_chunks
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
 from agent.core.vector_math import cosine_similarity
@@ -138,6 +139,75 @@ class RobustLLM(LLM):
             raise RuntimeError("unreachable")
         raise error
 
+    def generate_stream(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Iterator[StreamChunk]:
+        """流式版防护壳（streaming）：四件衣的新语义按「第一块」重新划线。
+
+        生成器惰性是本方法的全部地基：调用本函数 ≠ 请求已发出，
+        函数体在第一次 next() 时才开始执行。于是：
+        - 缓存/熔断照旧在开场判断
+        - 重试只发生在「第一块到手之前」——第一块一 yield 字就外流了，
+          按旧语义整段重试会把话吐两遍
+        锁定候选后：后续块转发 + 途中抓 usage（末班车）→ 流耗尽记成功账；
+        中途失败 → 记失败账 + 熔断计数 + 原样上抛（不能重试不能降级）。
+        """
+        # c 衣：精确缓存命中 → 伪流整块吐出（首字延迟=0，比真流还快）
+        key = self._cache_key(messages, tools) if self._cfg.cache else None
+        if key is not None:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._ledger.record_cache_hit()
+                yield StreamChunk(
+                    content=cached.content or "",
+                    tool_calls=cached.tool_calls,
+                    usage=getattr(cached, "usage", None),
+                )
+                return
+
+        # d 衣：熔断闸门（开场检查一次；流中途没有第二次检查——流已锁定）
+        self._check_breaker()
+
+        start = time.perf_counter()
+        error: Exception | None = None
+        for attempt in range(self._cfg.retries + 1):
+            try:
+                stream = self._inner.generate_stream(messages, tools)
+                first = next(stream)   # 惰性：真正的网络请求发生在这一行
+            except Exception as exc:
+                error = exc
+                if not self._should_retry(exc) or attempt == self._cfg.retries:
+                    break
+                self._ledger.record_retry()
+                if self._cfg.backoff:
+                    time.sleep(self._cfg.backoff * (2 ** attempt))  # 指数退避
+            else:   # 第一块到手 → 立即锁死该候选
+                usage: dict | None = None
+                try:
+                    if first.usage:
+                        usage = first.usage
+                    yield first
+                    for chunk in stream:
+                        if chunk.usage:
+                            usage = chunk.usage
+                        yield chunk
+                except Exception as exc:
+                    # 中途失败：字已外流，重试=重复说话，降级也一样——只能上抛
+                    self._ledger.record_llm_failure()
+                    self._on_failure()
+                    raise
+                # 流耗尽 = 调用成功：usage 记账 + 熔断复位 + 计时
+                self._ledger.record_llm(usage, self._cost_of_usage(usage), time.perf_counter() - start)
+                self._on_success()
+                return
+
+        # 开场失败（一直没拿到第一块）：与 generate 相同的最终失败路径
+        self._ledger.record_llm_failure()
+        self._on_failure()
+        if error is None:  # 理论不可达
+            raise RuntimeError("unreachable")
+        raise error
+
     # ---- d 衣：熔断三态 ----
 
     def _check_breaker(self) -> None:
@@ -202,8 +272,13 @@ class RobustLLM(LLM):
         return status in _RETRYABLE_STATUS
 
     def _cost_of(self, reply: Message) -> float:
-        """按内层模型的价格表把 token 换算成钱；无 usage 或无价目 → 0。"""
-        usage = getattr(reply, "usage", None)
+        return self._cost_of_usage(getattr(reply, "usage", None))
+
+    def _cost_of_usage(self, usage: dict | None) -> float:
+        """按内层模型的价格表把 token 换算成钱；无 usage 或无价目 → 0。
+
+        与 _cost_of 的差别只在入口：非流式从 Message 身上摘 usage，
+        流式路径只有 usage 本尊（末班车块），直接喂。"""
         pricing = getattr(self._inner, "pricing", None)
         if not usage or not pricing:
             return 0.0
@@ -274,6 +349,44 @@ class SemanticCacheLLM(LLM):
             return replace(reply)
         return reply
 
+    def generate_stream(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Iterator[StreamChunk]:
+        """流式版语义缓存：判断照旧（embed+阈值），只换两处手脚。
+
+        - 命中 → 伪流整块吐出（同精确档，首字延迟=0）
+        - miss → 转发流，流耗尽后用 merge_stream_chunks 把这一路拼回
+          完整 Message 入库——语义档的「miss 也积累条目」对流式调用同样成立
+        """
+        qvec: list[float] | None = None
+        if tools is None:
+            query = next(
+                (m.content for m in reversed(messages) if m.role == "user"), None
+            )
+            if query is not None:
+                qvec = self._embedder.embed([query])[0]
+                cached = self._best_match(qvec)
+                if cached is not None:
+                    self._ledger.record_cache_hit()
+                    yield StreamChunk(
+                        content=cached.content or "",
+                        tool_calls=cached.tool_calls,
+                        usage=getattr(cached, "usage", None),
+                    )
+                    return
+
+        collected: list[StreamChunk] = []
+        for chunk in self._inner.generate_stream(messages, tools):
+            collected.append(chunk)
+            yield chunk
+
+        # 流耗尽才拼得出完整回复，此时才入库（entries 存的仍是本体，
+        # 这里刚拼出来的对象没有被消费层引用，无缓存污染面——与外流通道隔离）
+        if qvec is not None:
+            self._entries.append((qvec, merge_stream_chunks(iter(collected))))
+            if len(self._entries) > self._max_entries:
+                self._entries.pop(0)
+
     def _best_match(self, qvec: list[float]) -> Message | None:
         best: Message | None = None
         best_score = -1.0
@@ -318,4 +431,28 @@ class FallbackLLM(LLM):
                 return candidate.generate(messages, tools)
             except Exception as exc:
                 errors.append(f"{candidate.name}: {exc}")
+        raise LLMUnavailableError("全部模型不可用——" + "；".join(errors))
+
+    def generate_stream(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Iterator[StreamChunk]:
+        """流式降级：候选按「第一块」锁定——惰性重试/降级的链上版。
+
+        - 第一块到手之前失败 → 切下一个候选（字还没外流，随便换）
+        - 第一块到手（yield first 之后）→ 锁死：后续失败直接上抛，
+          中途换模型会把前半段回答吐两遍（RobustLLM 同款划线）
+        """
+        errors: list[str] = []
+        for index, candidate in enumerate(self._candidates):
+            if index > 0:
+                print(f"[降级] 前面的模型不可用，已切换到 {candidate.name}")
+            try:
+                stream = candidate.generate_stream(messages, tools)
+                first = next(stream)
+            except Exception as exc:
+                errors.append(f"{candidate.name}: {exc}")
+            else:
+                yield first   # 从这里开始这段话的每一个字都算数了
+                yield from stream
+                return
         raise LLMUnavailableError("全部模型不可用——" + "；".join(errors))

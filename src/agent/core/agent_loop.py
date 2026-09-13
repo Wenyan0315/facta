@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from agent.core.llm import LLM, LLMUnavailableError
+from agent.core.llm import LLM, LLMUnavailableError, merge_stream_chunks
 from agent.core.types import Message
 from agent.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
 from agent.memory.store import Session
@@ -64,6 +64,11 @@ def _time_stamp(now: datetime | None = None) -> Message:
         role="system",
         content=f"今天：{now:%Y-%m-%d}（周{_WEEKDAYS[now.weekday()]}）{now:%H:%M}",
     )
+
+
+# 流式打印回调：块一到就上屏。合并是纯函数、打印是副作用——
+# 副作用从 on_text 这条缝注入（merge 本体离线可测）
+_STREAM_PRINT = lambda text: print(text, end="", flush=True)
 
 
 def run_chat(
@@ -123,10 +128,20 @@ def run_chat(
                 payload.insert(1, _time_stamp())
 
                 for _round in range(_MAX_TOOL_ROUNDS):
-                    reply = llm.generate(payload, tools)   # 发的是投影，不是底片
+                    # 流式消费（streaming）：分片边收边打，收完 merge 拼回完整回复。
+                    # 「agent：」前缀让位于首字延迟——块直接上屏，业界 CLI 惯例；
+                    # 点菜轮 content 通常为空（不冒字），模型偶尔先冒半句再点菜，
+                    # 两种情况都由收尾 print() 换行兜住
+                    reply = merge_stream_chunks(
+                        llm.generate_stream(payload, tools),   # 发的是投影，不是底片
+                        on_text=_STREAM_PRINT,
+                    )
 
                     if not reply.tool_calls:   # 模型不点菜了 → 最终回答，退出循环
+                        print()   # 回答收尾换行
                         break
+
+                    print()   # 点菜轮收尾换行（先冒字再点菜的残字不会和工具行挤一行）
 
                     # 双写：底片入史（落盘用）+ 投影同步（本轮内模型必须看得见）
                     session.messages.append(reply)
@@ -143,10 +158,14 @@ def run_chat(
                 else:
                     # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
                     print("  [已达到工具调用轮数上限，强制结束本轮]")
-                    reply = llm.generate(payload, None)  # 最后一问不递菜单，逼它说话
+                    # 最后一问不递菜单，逼它说话（同流式消费）
+                    reply = merge_stream_chunks(
+                        llm.generate_stream(payload, None),
+                        on_text=_STREAM_PRINT,
+                    )
+                    print()
 
                 session.messages.append(reply)
-                print(f"agent：{reply.content}")
             except LLMUnavailableError as exc:
                 trim_incomplete_round(session.messages)
                 print(f"[模型不可用] {exc}\n本轮到此为止，网络/额度恢复后重新提问即可。")

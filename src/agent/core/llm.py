@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
@@ -19,6 +21,77 @@ class LLMUnavailableError(RuntimeError):
     主循环捕获它 → 友善提示 + 优雅结束本轮，而不是让程序崩溃——
     这是「熔断保护」与「用户体验」之间的接口契约（评审 F 条）。
     """
+
+
+@dataclass
+class StreamChunk:
+    """流式接口的最小增量单元（streaming 里程碑）。
+
+    content:    本块新增的文本片段（可能为空串——点菜轮 content 就是空的）
+    tool_calls: 本块新增的工具调用碎片，None 或元素带 index 的列表；
+                碎片是「增量」不是「全量」：同一 index 的 arguments 分散在多块，
+                拼回完整 JSON 是消费层的活（合并纯函数，可离线测试）
+    usage:      仅最后一块携带（对应 stream_options include_usage 的末班车块）
+    """
+
+    content: str = ""
+    tool_calls: list[dict] | None = None
+    usage: dict | None = None
+
+
+def merge_stream_chunks(
+    chunks: Iterator[StreamChunk],
+    on_text: Callable[[str], None] | None = None,
+) -> Message:
+    """把增量块流拼回一条完整回复（消费层的核心纯函数）。
+
+    三件拼图活：
+    - content：纯累加；on_text 回调让「合并」与「打印」解耦——计算是纯函数，
+      打印是副作用，副作用从参数缝注入，纯函数本体离线可测
+    - tool_calls：按 index 归并。id/name 只出现在第一块（后续碎片是 None），
+      通行做法「旧值优先」（新片有值才覆盖）；arguments 是 JSON 字符串碎片，
+      跨块纯累加
+    - usage：送末班车的那块才有，取最后一块
+
+    这就是「tool_calls 分片重组」难题的全部——模型把点菜的 JSON 参数
+    切碎了发,我们按编号拼回原样,拼好的结构和非流式 generate 返回值
+    一模一样,下游(工具执行/入史)零感知。
+    """
+    parts: list[str] = []
+    slots: dict[int, dict] = {}   # index → 归并中的 tool_call
+    order: list[int] = []         # 首次出现顺序（碎片理论上有交错，保序用）
+    usage: dict | None = None
+
+    for chunk in chunks:
+        if chunk.content:
+            parts.append(chunk.content)
+            if on_text:
+                on_text(chunk.content)
+        if chunk.tool_calls:
+            for frag in chunk.tool_calls:
+                idx = frag.get("index") or 0
+                slot = slots.get(idx)
+                if slot is None:
+                    slot = {
+                        "id": frag.get("id"),
+                        "name": frag.get("name"),
+                        "arguments": "",
+                    }
+                    slots[idx] = slot
+                    order.append(idx)
+                slot["id"] = slot["id"] or frag.get("id")
+                slot["name"] = slot["name"] or frag.get("name")
+                slot["arguments"] += frag.get("arguments") or ""
+        if chunk.usage:
+            usage = chunk.usage
+
+    tool_calls = [slots[i] for i in order] or None
+    return Message(
+        role="assistant",
+        content="".join(parts),
+        tool_calls=tool_calls,
+        usage=usage,
+    )
 
 
 class LLM(ABC):
@@ -39,6 +112,22 @@ class LLM(ABC):
         self, messages: list[Message], tools: list[dict] | None = None
     ) -> Message:
         """给定对话历史（和可选的工具清单），返回模型的回复。"""
+
+    def generate_stream(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Iterator[StreamChunk]:
+        """流式生成：默认实现 = 伪流（一次吐完一整块）。
+
+        接口演进的老规矩（M5 起）：新能力带默认实现，老代码零改动。
+        没有「增量」概念的实现（MockLLM / ScriptedLLM 等）自动获得伪流——
+        语义与 generate 完全一致，只是享受不到首字延迟的体验增益。
+        只覆写本方法的实现 = 「我支持真流」。"""
+        reply = self.generate(messages, tools)
+        yield StreamChunk(
+            content=reply.content or "",
+            tool_calls=reply.tool_calls,
+            usage=getattr(reply, "usage", None),
+        )
 
 
 class MockLLM(LLM):
@@ -235,6 +324,62 @@ class OpenAICompatibleLLM(LLM):
             tool_calls=tool_calls,
             usage=usage,
         )
+
+    def generate_stream(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> Iterator[StreamChunk]:
+        """真流：stream=True，逐块原始 chunk 转成 StreamChunk 增量。
+
+        两个关键点：
+        - stream_options include_usage：usage 默认不上流，不开它账单漏记
+        - **生成器函数天生惰性**：函数体在第一次 next() 时才执行——
+          「拿到 generate_stream 的返回值」≠「请求已发出」。这个惰性是
+          网关层「第一块之前可重试/可降级」的地基（洗完第一块才锁死候选）
+        """
+        payload = [self._to_openai(m) for m in messages]
+        kwargs: dict = {
+            "model": self._model,
+            "messages": payload,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = tools
+
+        stream = self._client.chat.completions.create(**kwargs)
+        for chunk in stream:
+            usage = self._usage_of(chunk)
+            if not chunk.choices:   # 纯尾巴块只带 usage，没有 choices（部分供应商如此发末班车）
+                yield StreamChunk(usage=usage)
+                continue
+            delta = chunk.choices[0].delta
+            # 碎片只转「增量」不做合并：同 index 的 arguments 跨块拼接归消费层纯函数。
+            # id/name 只出现在第一块，后续碎片这些字段为 None——合并时用「旧的优先」
+            tool_calls = None
+            if delta.tool_calls:
+                tool_calls = [
+                    {
+                        "index": tc.index,
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    }
+                    for tc in delta.tool_calls
+                ]
+            yield StreamChunk(
+                content=delta.content or "",
+                tool_calls=tool_calls,
+                usage=usage,
+            )
+
+    @staticmethod
+    def _usage_of(chunk) -> dict | None:
+        if not getattr(chunk, "usage", None):
+            return None
+        return {
+            "prompt_tokens": chunk.usage.prompt_tokens,
+            "completion_tokens": chunk.usage.completion_tokens,
+        }
 
 
 # 供应商配置表：加一家 = 加一行。
