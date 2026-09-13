@@ -23,8 +23,7 @@ from agent.memory.store import load_session, save_session
 from agent.paths import NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
-from agent.tools.mcp_client import McpClient, McpError, register_mcp_tools
-from agent.tools.mcp_http import HttpMcpClient
+from agent.tools.mcp_config import assemble_servers, load_server_specs
 from agent.tools.registry import ToolRegistry
 
 VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
@@ -93,24 +92,15 @@ def main() -> None:
     )
     register_builtin(registry, ctx)
 
-    # 5.5) MCP 外部工具（MCP-b/c 接线+顽健；MCP-r 远程可选）：拉外部工具进菜单
-    #      ① stdio 本地服务器：练习模式也接——本地进程不花钱，组装路径统一
-    #      ② Context7 远程服务器：默认不接（每次启动背一个网络依赖不值，
-    #         无 key 有限速）；CONTEXT7=1 启动才接，prefix 用 ctx7__ 与本地工具分家
-    mcp_clients = []
+    # 5.5) MCP 外部工具（MCP-config 配置化）：改 mcp_servers.json 加工具，零代码。
+    #      命令型穿 stdio、URL 型穿 streamable HTTP；单台失败只警告不阻断；
+    #      MCP_SERVERS 环境变量可指向个人配置（带 API key 的那种，不进仓库）
     try:
-        stdio_client = McpClient([sys.executable, str(Path("servers/notes_server.py"))])
-        register_mcp_tools(registry, stdio_client, prefix="mcp__")
-        mcp_clients.append(stdio_client)
-    except (McpError, OSError) as e:
-        print(f"MCP 服务器接入失败，本轮无外部工具：{e}")
-    if os.environ.get("CONTEXT7") == "1":   # MCP-r：远程工具开关（真三方验收的运行时形态）
-        try:
-            ctx7_client = HttpMcpClient("https://mcp.context7.com/mcp")
-            register_mcp_tools(registry, ctx7_client, prefix="ctx7__")
-            mcp_clients.append(ctx7_client)
-        except McpError as e:
-            print(f"Context7 接入失败：{e}")
+        specs = load_server_specs(Path(os.environ.get("MCP_SERVERS", "mcp_servers.json")))
+    except ValueError as e:
+        print(f"MCP 配置读取失败，本轮无外部工具：{e}")
+        specs = []
+    mcp_clients = assemble_servers(registry, specs)
     print(f"已装载工具：{', '.join(registry.names())}")
 
     # 6) 进入多轮对话主循环
