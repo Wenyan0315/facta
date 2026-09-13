@@ -41,6 +41,20 @@ class McpCallError(McpError):
     """工具已被服务器执行、但返回了业务错误（isError=true）。"""
 
 
+def join_text_content(result: dict) -> str:
+    """MCP 工具结果统一收口：content 多段文本合并成一段字符串。
+
+    stdio 与 HTTP 两个客户端共享（MCP-r）——协议层的产物形状是同一套，
+    收口逻辑不该各写一份（两个真值源会漂移）。
+    """
+    texts = [
+        item.get("text", "")
+        for item in result.get("content", [])
+        if item.get("type") == "text"
+    ]
+    return "\n".join(texts)
+
+
 class McpClient:
     """最小 MCP 客户端：启动服务器子进程，同步请求-响应。"""
 
@@ -156,12 +170,7 @@ class McpClient:
         result = self._request(
             "tools/call", {"name": name, "arguments": arguments}
         )
-        texts = [
-            item.get("text", "")
-            for item in result.get("content", [])
-            if item.get("type") == "text"
-        ]
-        text = "\n".join(texts)
+        text = join_text_content(result)
         if result.get("isError"):
             raise McpCallError(text or f"{name} 返回了错误")
         return text

@@ -19,6 +19,7 @@ dev = [
 ]
 rag = [
     "chromadb>=1.5",   # M7 工业向量库：下限取实测验证版本（1.5.9），教学版不需要，按需 pip install -e ".[rag]"
+    "httpx>=0.28",     # MCP-r 远程客户端（HttpMcpClient）的网络库：同步 Client 只用一个
 ]
 
 [tool.setuptools.packages.find]
