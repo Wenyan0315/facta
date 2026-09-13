@@ -220,6 +220,7 @@ class KnowledgeBase:
 
 def demo() -> None:
     from agent.knowledge.sync import sync_notes  # 函数内导入：sync 依赖本模块，避免循环
+    from agent.paths import NOTES_DIR          # P1-3 血案同款修复：demo 入口跑起来才炸的 NameError
 
     kb = KnowledgeBase()
     report = sync_notes(kb, NOTES_DIR)
