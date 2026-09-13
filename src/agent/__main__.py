@@ -22,6 +22,7 @@ from agent.memory.store import load_session, save_session
 from agent.paths import NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
+from agent.tools.mcp_client import McpClient, McpError, register_mcp_tools
 from agent.tools.registry import ToolRegistry
 
 VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
@@ -89,14 +90,30 @@ def main() -> None:
         history=session.messages,
     )
     register_builtin(registry, ctx)
+
+    # 5.5) MCP 外部工具（MCP-b 接线）：拉起工具服务器 → 动态发现 →
+    #      前缀登记进菜单。练习模式也接——本地进程不花钱，且组装路径统一。
+    #      接入失败只警告不阻断（内置工具照常）——MCP-c 完整降级链的雏形
+    mcp_client = None
+    try:
+        mcp_client = McpClient([sys.executable, str(Path("servers/notes_server.py"))])
+        register_mcp_tools(registry, mcp_client)
+    except (McpError, OSError) as e:
+        print(f"MCP 服务器接入失败，本轮无外部工具：{e}")
     print(f"已装载工具：{', '.join(registry.names())}")
 
     # 6) 进入多轮对话主循环
     #    M5.5 起检索权在模型手里（Agentic RAG）：run_chat 不再需要 kb，
     #    知识库完全通过工具层（search_notes）介入对话
     #    M6 起：会话状态注入 → 跑完归还，本层负责落盘（组装层管策略）
-    #    拆链（评审第 2 条）：压缩器内部调用走 summary_llm=内部链
-    session = run_chat(llm, registry, session, summary_llm=internal_llm)
+    # 拆链（评审第 2 条）：压缩器内部调用走 summary_llm=内部链
+    try:
+        session = run_chat(llm, registry, session, summary_llm=internal_llm)
+    finally:
+        # MCP-b：无论正常退出还是异常崩掉，都关掉工具服务器——不留孤儿进程
+        # （save 不放 finally：异常路径写回旧 session 会覆盖好数据，只在该跑时跑）
+        if mcp_client is not None:
+            mcp_client.close()
 
     # 7) 退出落盘（M6）：完整会话状态（消息 + 压缩缓存）存回 JSON，下次启动恢复
     save_session(session, MEMORY_PATH)

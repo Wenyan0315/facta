@@ -8,20 +8,39 @@ tools/call。业务错误以 isError=true 返回（不进程崩溃）。
 """
 
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
+# 沙箱根目录（MCP-b 评审#1）：「栅栏长在服务器侧」——能力提供者自守边界，
+# 客户端只能做菜单层尽力而为（"什么路径算越界"是服务器的业务知识）。
+# 环境变量可覆盖：测试把沙箱指到 tmp_path，避免污染仓库。
+SANDBOX_ROOT = Path(
+    os.environ.get(
+        "MCP_SANDBOX_DIR", str(Path(__file__).resolve().parent / "sandbox")
+    )
+).resolve()
+
+
+def _in_sandbox(raw: str) -> Path:
+    """把请求路径锁进沙箱：resolve 后再判根前缀，一举挡住三类逃逸——
+    绝对路径（Path/abs 除法会吞掉前缀）、`..` 上跳、符号链接指外。"""
+    target = (SANDBOX_ROOT / raw).resolve()
+    if target != SANDBOX_ROOT and not target.is_relative_to(SANDBOX_ROOT):
+        raise PermissionError(f"路径越界：仅允许访问沙箱目录 {SANDBOX_ROOT}")
+    return target
+
 
 def _read_file(args: dict) -> str:
-    path = Path(args.get("path", ""))
+    path = _in_sandbox(str(args.get("path", "")))
     if not path.is_file():
         raise FileNotFoundError(f"文件不存在：{path}")
     return path.read_text(encoding="utf-8")
 
 
 def _write_file(args: dict) -> str:
-    path = Path(args.get("path", ""))
+    path = _in_sandbox(str(args.get("path", "")))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(args.get("content", ""), encoding="utf-8")
     return f"已写入 {path}"
@@ -74,6 +93,7 @@ def _reply(msg: dict, result: dict) -> None:
 
 
 def main() -> None:
+    SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
     for line in sys.stdin:
         line = line.strip()
         if not line:

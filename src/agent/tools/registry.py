@@ -82,6 +82,10 @@ class ToolRegistry:
         """登记一个工具（名字重复时后者覆盖前者）。"""
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> None:
+        """把工具从菜单摘除（MCP-c：服务器已死时摘掉死菜，模型不再撞墙）。"""
+        self._tools.pop(name, None)
+
     def names(self) -> list[str]:
         """当前已登记的工具名清单（给外部展示用）。"""
         return list(self._tools.keys())

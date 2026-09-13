@@ -24,6 +24,7 @@ register_mcp_tools 的接口与 ToolRegistry 的形状不动（换件不换衣�
 """
 
 import json
+import os
 import queue
 import subprocess
 import threading
@@ -43,10 +44,16 @@ class McpCallError(McpError):
 class McpClient:
     """最小 MCP 客户端：启动服务器子进程，同步请求-响应。"""
 
-    def __init__(self, command: list[str], timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        command: list[str],
+        timeout: float = 30.0,
+        env: dict[str, str] | None = None,
+    ) -> None:
         self._timeout = timeout
         # stderr 直接丢弃：不读它会让子进程的日志写满管道缓冲区把双方卡死。
         # 调试期可改为重定向到文件（open(path, "w")）——防死锁同时留证据
+        # env：在继承的基础上叠加（沙箱目录注入、将来真实服务器的 API key 都走这条缝）
         self._proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -54,6 +61,7 @@ class McpClient:
             stderr=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
+            env={**os.environ, **(env or {})},
         )
         # 启动探活：服务器起不来（脚本路径错/依赖缺）就立刻报，别等 initialize
         # 空等超时（三方评审第 5 条）。100ms 沉降期：Popen 刚返回时子进程可能
@@ -135,6 +143,14 @@ class McpClient:
         """服务器交出的工具说明书清单——「动态发现」的全部秘密。"""
         return self._request("tools/list", {}).get("tools", [])
 
+    def is_alive(self) -> bool:
+        """服务器进程还活着吗——点菜前的快探（MCP-c ①）。
+
+        服务器中途挂掉时，若直接 call 会撞 _request 的 30s 超时才醒。
+        先用 poll 看一眼：死了直接快速失败，不让 agent 对着死进程干等。
+        """
+        return self._proc.poll() is None
+
     def call_tool(self, name: str, arguments: dict) -> str:
         """转发一次模型点菜；多段文本合并返回；业务错误抛 McpCallError。"""
         result = self._request(
@@ -160,14 +176,47 @@ class McpClient:
                 self._proc.kill()
 
 
-def register_mcp_tools(registry: ToolRegistry, client: McpClient) -> None:
+DEFAULT_PREFIX = "mcp__"
+DEAD_TOOL_EVICT_AFTER = 2   # 同一工具连续碰到「服务器已死」几次就摘牌
+
+
+def register_mcp_tools(
+    registry: ToolRegistry,
+    client: McpClient,
+    prefix: str = DEFAULT_PREFIX,
+) -> None:
     """把服务器交出的工具登记进 ToolRegistry——与内置工具同等待遇。
 
-    MCP-a：工具名直接采用（演示服务器与内置工具名不冲突）。
-    冲突治理（前缀命名/覆盖策略）是 MCP-b 的活。
+    冲突治理（MCP-b）：外部工具统一加前缀。动机是 registry.register 的
+    语义——「重名后者覆盖前者」：若无前缀且 MCP 后注册，外部工具会
+    顶掉内置工具（write_note 的四道栅栏被 write_local_file 换掉！）。
+    前缀让外部工具装不成内置；连前缀都撞（有人故意撞名）则抛错拒绝，
+    静默覆盖等于把菜单卖给外部进程。
+
+    顽健性（MCP-c）：服务器中途挂掉时对模型暴露的两个出口——
+    ① 点菜前 is_alive 快探：死进程直接回「离线」错误，不干等 30s 超时；
+    ② 死菜摘牌：同一工具连续 DEAD_TOOL_EVICT_AFTER 次碰到死服务器，
+    从菜单摘除并告知模型——模型看不到死菜，自然不会反复撞墙。
     """
+    fail_counts: dict[str, int] = {}   # 注册名 → 连续碰到死服务器的次数
+
+    def _report_dead(register_name: str) -> str:
+        """服务器确认已死：计一次数；够阈值就把死菜从菜单摘掉。"""
+        fail_counts[register_name] = fail_counts.get(register_name, 0) + 1
+        message = f"MCP 服务器已离线，无法调用 {register_name}"
+        if fail_counts[register_name] >= DEAD_TOOL_EVICT_AFTER:
+            registry.unregister(register_name)
+            message += "；该工具已从菜单移除"
+        return message
+
     for mcp_tool in client.list_tools():
-        name = mcp_tool["name"]
+        server_name = mcp_tool["name"]          # 服务器端的真名（call 要用）
+        register_name = f"{prefix}{server_name}"  # 菜单里的前缀名（防撞）
+        if register_name in registry.names():
+            raise McpError(
+                f"MCP 工具名冲突：{register_name} 已被占用"
+                "——前缀是标准防撞配置，撞名说明有人故意为之，须人工裁定"
+            )
         schema = mcp_tool.get("inputSchema") or {}
         # 全量透传，不挑字段：title/anyOf/$defs/枚举等一旦被白名单挑丢，
         # schema 就残缺——模型按残缺菜单生成的参数会被服务器拒收。
@@ -176,14 +225,29 @@ def register_mcp_tools(registry: ToolRegistry, client: McpClient) -> None:
         parameters.setdefault("type", "object")
         parameters.setdefault("properties", {})
 
-        def _func(client=client, name=name, **args) -> str:
+        def _func(
+            client=client,
+            server_name=server_name,
+            register_name=register_name,
+            **args,
+        ) -> str:
             # 默认参数锚定：闭包捕获的是「值」不是循环变量
             # （List identity trap 的表亲——循环里造闭包，变量必须钉住）
-            return client.call_tool(name, args)
+            # 注意锚的是 server_name（原真名）——服务器不认识前缀名
+            if not client.is_alive():
+                # 返回消息而非抛异常：registry 转的通用错误壳会丢掉摘牌告知
+                return _report_dead(register_name)
+            try:
+                return client.call_tool(server_name, args)
+            except McpError:
+                if not client.is_alive():
+                    # 死在执行途中（断开被哨兵/超时捕获）：同样计一次
+                    return _report_dead(register_name)
+                raise   # 服务器活着的业务错误/协议错误：照旧交给 registry 转字符串
 
         registry.register(
             Tool(
-                name=name,
+                name=register_name,
                 description=mcp_tool.get("description", ""),
                 parameters=parameters,
                 func=_func,
