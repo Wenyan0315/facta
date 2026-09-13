@@ -103,8 +103,14 @@ def _load_known(learned_dir: Path) -> str:
     return "\n".join(parts) if parts else "（暂无）"
 
 
-def _parse_json_array(text: str) -> list[dict]:
-    """容错解析：剥掉 ```json 围栏（模型的常见坏习惯），坏 JSON 返回空。"""
+def _parse_json_array(text: str) -> tuple[list[dict], bool]:
+    """容错解析：剥 ```json 围栏（模型的常见坏习惯），返回 (条目, 是否解析成功)。
+
+    为什么返回元组而不是空列表一了百了：「模型明确输出 []」（档案员认为无话
+    可说，正常）与「输出坏 JSON」（异常）是两种完全不同的状态，文案和后续
+    动作都不同——把两者都折成空列表，就是冒烟测试里「档案员没有产出条目
+    （或输出无法解析）」这句混淆文案的根因。
+    """
     stripped = text.strip()
     if stripped.startswith("```"):
         stripped = stripped.strip("`")
@@ -113,10 +119,10 @@ def _parse_json_array(text: str) -> list[dict]:
     try:
         data = json.loads(stripped)
     except json.JSONDecodeError:
-        return []
+        return [], False
     if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    return []
+        return [item for item in data if isinstance(item, dict)], True
+    return [], False   # 解析成功但不是数组（如裸对象）：同样视为不可用
 
 
 def _harden(items: list[dict]) -> list[Entry]:
@@ -171,23 +177,27 @@ def consolidate(
         known=_load_known(learned_dir),
         transcript=transcript,
     )
-    raw = _parse_json_array(
+    raw, extract_ok = _parse_json_array(
         llm.generate([Message(role="user", content=extract_prompt)]).content
     )
+    if not extract_ok:
+        return "记忆固化：档案员输出无法解析（坏 JSON），未写入"
     if not raw:
-        return "记忆固化：档案员没有产出条目（或输出无法解析）"
+        return "记忆固化：档案员明确表示无条目可沉淀，未写入"
 
     review_prompt = REVIEW_TEMPLATE.format(
         entries_json=json.dumps(raw, ensure_ascii=False),
         transcript=transcript,
     )
-    kept = _parse_json_array(
+    kept, review_ok = _parse_json_array(
         llm.generate([Message(role="user", content=review_prompt)]).content
     )
+    if not review_ok:
+        return "记忆固化：审查输出无法解析（坏 JSON），未写入"
     entries = _harden(kept)
 
     if not entries:
-        return f"记忆固化：{len(raw)} 条候选全部被审查驳回，未写入"
+        return f"记忆固化：{len(raw)} 条候选全部被审查驳回（或未过硬校验），未写入"
 
     categories = _append(entries, learned_dir)
     return (

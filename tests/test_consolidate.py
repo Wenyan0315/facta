@@ -114,6 +114,37 @@ def test_bad_json_is_graceful(tmp_path):
     report = consolidate(session, llm, tmp_path / "learned")
 
     assert "无法解析" in report
+    assert "坏 JSON" in report
+    assert not (tmp_path / "learned").exists()
+
+
+def test_empty_array_means_explicitly_nothing(tmp_path):
+    """输出 [] ≠ 输出坏 JSON：前者是档案员明确表示无话可说，不烧审查调用。"""
+    llm = ScriptedLLM([Message(role="assistant", content="```json\n[]\n```")])
+    session = _session(_dialogue())
+
+    report = consolidate(session, llm, tmp_path / "learned")
+
+    assert "无条目可沉淀" in report
+    assert len(llm.calls) == 1   # 明确无产出 → 不白烧第二次（审查）调用
+    assert not (tmp_path / "learned").exists()
+
+
+def test_review_bad_json_stops_before_disk(tmp_path):
+    """萃取正常但审查输出坏 JSON：异常文案明确指向审查段，不落盘。"""
+    script = [
+        Message(
+            role="assistant",
+            content='[{"category": "constraints", "content": "项目路径统一放 paths.py 管理"}]',
+        ),
+        Message(role="assistant", content="审查员打了个喷嚏"),
+    ]
+    llm = ScriptedLLM(script)
+    session = _session(_dialogue())
+
+    report = consolidate(session, llm, tmp_path / "learned")
+
+    assert "审查输出无法解析" in report
     assert not (tmp_path / "learned").exists()
 
 
