@@ -19,8 +19,9 @@ from agent.core.telemetry import UsageLedger
 from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.sync import sync_notes
 from agent.knowledge.vector_store import ChromaVectorStore
+from agent.memory.consolidate import consolidate
 from agent.memory.store import load_session, save_session
-from agent.paths import NOTES_DIR
+from agent.paths import LEARNED_DIR, NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 from agent.tools.mcp_config import assemble_servers, load_server_specs
@@ -74,6 +75,7 @@ def main() -> None:
     # 4) 会话记忆（M6）：启动时载入【完整会话状态】——底片(消息) + 压缩缓存(摘要游标)
     #    关键细节：必须在登记工具之前载入——search_history 的闭包要抓这个列表对象
     session = load_session(MEMORY_PATH)
+    loaded_len = len(session.messages)   # M6.4：复盘起点——无新对话则退出时不白烧 LLM
     if session.messages:
         print(f"已恢复 {len(session.messages)} 条历史消息（{MEMORY_PATH}）")
 
@@ -119,6 +121,11 @@ def main() -> None:
     # 7) 退出落盘（M6）：完整会话状态（消息 + 压缩缓存）存回 JSON，下次启动恢复
     save_session(session, MEMORY_PATH)
     print(f"对话历史已保存：{len(session.messages)} 条 → {MEMORY_PATH}")
+
+    # 7.5) M6.4 记忆固化：退出复盘——把本轮长出来的「值得跨会话记住的项目级信息」
+    #      沉淀到 data/learned/。内部调用走内部链（拆链原则）；since=启动时消息数，
+    #      启动即退出（无新对话）→ consolidate 内部直接跳过
+    print(consolidate(session, internal_llm, LEARNED_DIR, since=loaded_len))
 
     # 8) 打印本次会话账单（M7.5）：钱花哪了，退出一目了然
     print(ledger.bill())

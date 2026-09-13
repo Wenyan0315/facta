@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.29（2026-09-13）｜随着里程碑推进持续迭代此文档
+> 版本：v0.30（2026-09-13）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块/决策）时，同步更新本文件并提升版本号
 
 ## 设计原则
@@ -92,10 +92,10 @@
 | core 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb | 并行工具调用 / 更复杂的规划策略 |
 | LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/siliconflow) + 进程内网关(M7.5：记账/重试超时/精确+语义缓存/熔断三态/降级链+优雅兜底) | 更多供应商 + 多模型路由 |
 | knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集) | 知识图谱 |
-| memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压） | 多会话隔离（另排期） |
+| memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘） | 多会话隔离（另排期）、用户级记忆仓库外位置 |
 | tools | ✅ Tool+ToolRegistry+6内置工具(时间/清单/读/写/检索/检索+摘要)；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型) | 更多工具 + MCP + skills |
 | evals | ✅ 检索评估(P/R@k, MRR, 双实现对比) + LLM-as-judge 回答质量(基线 13/13 合格, 0% 错误, 全轮 ¥0.011) | 更难的对抗题库 + 回答质量回归 |
-| data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据) | 长文档、多来源 |
+| data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据)；data/learned/*.md 项目级长时记忆(M6.4，进 git) | 长文档、多来源 |
 
 ## 三、两条演进主线
 
@@ -117,7 +117,7 @@
 | P1 | 重构前置：Message→types.py（依赖方向）+ ToolContext 收敛工具依赖 + 路径统一注入 | 依赖方向、对象收敛 |
 | M7 ✅ | 工业 RAG：向量库持久化(Chroma) + 增量更新（弃全量重建）｜evals/文档治理并入收官 | 向量库、增量索引 |
 | M7.5 ✅ | 生产加固：网关四件套（记账+重试超时+精确/语义缓存+熔断）｜降级链 + 优雅兜底 | 容错、可观测性、成本控制 |
-| M6.4 | 记忆固化：对话→分类萃取→长时记忆沉淀（data/learned/*.md，退出复盘+中途兜底）｜MCP 收官后开工 | 分层记忆、萃取纪律、防幻觉污染 |
+| M6.4 ✅ | 记忆固化：对话→分类萃取→审查→硬校验→长时记忆沉淀（data/learned/*.md，退出复盘） | 分层记忆、萃取纪律、防幻觉污染 |
 | MCP | 外部工具动态发现（三次顺延的集结号，coding agent 最直接积木） | 协议、动态工具 |
 | streaming | 流式输出（首字延迟 / tool_calls 分片重组 / 用户取消）｜独立交互层 | 增量协议 |
 | 阶段二 | coding agent：skill 系统 + 安全 + 工具访问 + 多 agent 协作 | 实战整合 |
@@ -193,3 +193,4 @@
 - **Context7 三次纠错循环（2026-09-13 实测记录）**：①mcp 2.x 改名潮第三次命中——`streamablehttp_client`→`streamable_http_client`（之前抓的是服务端 FastMCP→MCPServer，这次是客户端 API，同一次大改版的两半）②`inputSchema`→`input_schema`（SDK 全面蛇形化，抄旧文档代码会死）③resolve-library-id 的 schema 是 anyOf 复合体——`query` 与 `libraryName` 一个不能少，服务器端校验逐字拆弹（与 registry 结构层校验同哲学的服务器侧版本；再次坐实「复杂 schema 全量透传」裁定）④返回纯文本带 id（非 JSON）——拿库 id 要正则提取，真实三方工具的输出形态比教科书脏。
 - **MCP-config：配置化装配（2026-09-13，用户「agent 都让人配置」观察驱动）**：MCP 形态二维拆解——传输层（stdio/HTTP+SSE/streamable HTTP，协议都是 JSON-RPC 2.0）vs 部署层（写死 vs 配置驱动）。`mcp_servers.json` 清单 + `mcp_config.py` 装配工厂：每台服务器 `{name, command 或 url 二选一, prefix 缺省 f"{name}__", enabled, timeout, headers}`；命令型穿 McpClient、URL 型穿 HttpMcpClient，`register_mcp_tools` 通吃（同构异构第三件衣服的装配版）。四个设计裁定：①**占位符 {python}**——command 首元素替换成 sys.executable，清单可移植（写死 "python" 撞「venv 未激活 PATH 无 python」实测坑）②**enabled=false 只挂名**——远程服务器默认不拉（启动背网络依赖不值），个人配置开 ③**含密钥配置不进仓库**——`MCP_SERVERS` 环境变量指个人文件（.env 纪律延伸）④**单台失败/撞名只警告**——坏一台不拖垮全场，撞名拒绝而非静默覆盖（菜单不卖给外部进程）。验收：8 条配置测试（校验/缺省前缀/占位符真连/死命令跳过/撞名跳过）+ 默认清单冒烟 11 工具 + 个人清单 live 冒烟接上 ctx7。全量 100 用例。
 - **官方 GitHub MCP 服务器接入（2026-09-13，用户「再装个 GitHub 插件」驱动）**：排查链——gh 2.100 的 `gh mcp` 已从核心拆出（官方扩展不在 extension search）+ 无 node 无 go，本地部署路（Go 二进制/Docker/npm）全堵。联网查证官方文档后转向**远程托管版**：`https://api.githubcopilot.com/mcp/` 对全体 GitHub 用户开放（无需 Copilot 订阅），认证 = `Authorization: Bearer <PAT>`。PAT 用 `gh auth token` 现取（已有 gh 登录即可）→ **手写 HttpMcpClient 直接接入成功：44 个工具长进菜单（github__ 前缀），get_me 真实调用返回账号信息**。安全红线实务：token 只进临时个人配置与进程环境，不入仓库、不进日志、跑了即弃。测试资产：`tests/test_mcp_github_live.py`（PYTEST_LIVE_NETWORK 门 + gh 未装/未登录自动 skip；断言只信实测工具名——远程版命名与本地版不同），CI 默认跳过。至此 MCP 真三方验收凑齐三家：Context7（社区/远程 HTTP）+ 官方 SDK 裁判 + GitHub 官方（远程 HTTP）。全量 100 用例 + 2 live 跳过。
+- **记忆固化 M6.4 落地（2026-09-13，兑现 2026-09-12 方向）**：`memory/consolidate.py` 四段管线——**①萃取**：LLM 档案员读复盘材料（滚动摘要+尾窗 12 条，与投影同构但不带人设）提炼候选条目，提示词铁律：只记对话明确说过的、禁补全推断（「档案员不是评论员」加强版）+ 三问过滤（跨会话成立？/以后用得上？/已知记忆没记过？）②**审查**：第二次 LLM 调用对照原文踢编造——**critic 第一次值班，挂在不可逆写入之前**（呼应 LLM-as-judge 度量「错误率 0% 暂不上运行时 critic」的裁定：批量离线场景先用上）③**硬校验**：程序管形状——类别白名单（非法类别归 other 不炸管道）/批内去重/条数上限 5/单条 200 字/JSON 容错剥围栏；分工铁律「信模型的部分是语义，不信的部分全都交给代码」④**落盘**：按类别 append 到 `data/learned/{类别}.md`，时间戳程序加（出处链条里程序是唯一可信作者）。**三桶刻意不含 preferences**：偏好是「用户级」信息，其仓库外位置未建——留桶等于引导模型把隐私写进可能公开的 repo，能力跟着位置走（红线联动）。**零成本门**：`since=loaded_len` 启动时消息数，无新对话退出时直接跳过、不白烧两次 LLM 调用。批间去重 v1 靠「已知记忆」提示词喂全部已有条目（升级触发信号=learned 条目 >10）。接线：__main__ 退出路径（save 之后、账单之前），内部链调用（拆链原则）。测试 7 条钉死全流程（管线写盘/审查踢编造/非法类别/坏 JSON/已知记忆入提示词/无新对话零调用/上限+去重），真模型冒烟写出 constraints.md 2 条（项目级、红线过滤后进 git）。剪裁记录（各自带触发信号）：用户级记忆→仓库外位置实现；长会话中途兜底→「会话后段记忆丢失」实测症状；learned 入 RAG→learned 文件数 >10 或需跨会话检索；审查升级跨供应商裁判→幻觉率实测 >0。全量 107 用例 + 2 live 跳过。
