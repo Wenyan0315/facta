@@ -130,7 +130,7 @@ def test_run_chat_survives_llm_unavailable(monkeypatch, capsys):
         [RobustLLM(SwitchableLLM(fail=True), ledger, GatewayConfig(retries=0))], ledger
     )
 
-    session = run_chat(llm, None)  # 不该崩
+    session, _ = run_chat(llm, None)  # 不该崩
 
     captured = capsys.readouterr().out
     assert "[模型不可用]" in captured

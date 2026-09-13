@@ -12,7 +12,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from agent.core.agent_loop import run_chat
+from agent.core.agent_loop import EXIT_NEW, run_chat
 from agent.core.gateway import SemanticCacheLLM
 from agent.core.llm import get_llm
 from agent.core.telemetry import UsageLedger
@@ -20,8 +20,13 @@ from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.sync import sync_notes
 from agent.knowledge.vector_store import ChromaVectorStore
 from agent.memory.consolidate import consolidate
-from agent.memory.store import load_session, save_session
-from agent.paths import LEARNED_DIR, NOTES_DIR
+from agent.memory.store import (
+    archive_session,
+    derive_title,
+    load_session,
+    save_session,
+)
+from agent.paths import LEARNED_DIR, NOTES_DIR, SESSIONS_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 from agent.tools.mcp_config import assemble_servers, load_server_specs
@@ -75,7 +80,6 @@ def main() -> None:
     # 4) 会话记忆（M6）：启动时载入【完整会话状态】——底片(消息) + 压缩缓存(摘要游标)
     #    关键细节：必须在登记工具之前载入——search_history 的闭包要抓这个列表对象
     session = load_session(MEMORY_PATH)
-    loaded_len = len(session.messages)   # M6.4：复盘起点——无新对话则退出时不白烧 LLM
     if session.messages:
         print(f"已恢复 {len(session.messages)} 条历史消息（{MEMORY_PATH}）")
 
@@ -105,27 +109,41 @@ def main() -> None:
     mcp_clients = assemble_servers(registry, specs)
     print(f"已装载工具：{', '.join(registry.names())}")
 
-    # 6) 进入多轮对话主循环
-    #    M5.5 起检索权在模型手里（Agentic RAG）：run_chat 不再需要 kb，
-    #    知识库完全通过工具层（search_notes）介入对话
-    #    M6 起：会话状态注入 → 跑完归还，本层负责落盘（组装层管策略）
-    # 拆链（评审第 2 条）：压缩器内部调用走 summary_llm=内部链
+    # 6) 多会话主循环（S1）：run_chat 归还 (会话, 退出原因)。
+    #    quit/interrupt → 收官；new → 先存后清再开一轮。
+    #    拆链（评审第 2 条）：压缩器内部调用走 summary_llm=内部链
+    #    MCP 客户端只在最终退出时关闭——多会话循环期间关了，下一轮工具全死
     try:
-        session = run_chat(llm, registry, session, summary_llm=internal_llm)
+        while True:
+            loaded_len = len(session.messages)   # M6.4 复盘起点（每轮重取：/new 后新会话从 0 起）
+            session, reason = run_chat(llm, registry, session, summary_llm=internal_llm)
+
+            # 7) 退出落盘（M6）：完整会话状态（消息 + 压缩缓存）存回 JSON
+            save_session(session, MEMORY_PATH)
+            print(f"对话历史已保存：{len(session.messages)} 条 → {MEMORY_PATH}")
+
+            # 7.5) M6.4 记忆固化：退出复盘——since=本轮启动消息数，
+            #      无新对话（启动即退出）→ consolidate 内部直接跳过
+            print(consolidate(session, internal_llm, LEARNED_DIR, since=loaded_len))
+
+            if reason != EXIT_NEW:
+                break
+
+            # S1 先存后清：save（上一行）→ 归档成功 → 才清内存 → 写新 active。
+            # 归档失败会抛异常中止，旧对话仍在 session.json，什么都没丢
+            archived = archive_session(MEMORY_PATH, SESSIONS_DIR)
+            title = derive_title(session)
+            # 原地清、绝不 rebind：search_history 工具的闭包抓的是 session.messages
+            # 这个列表对象本身（列表身份陷阱的反面教材），rebind 会让工具失明
+            session.messages.clear()
+            session.summary = None
+            session.summarized_upto = 1
+            save_session(session, MEMORY_PATH)   # active 立即反映为新空会话
+            print(f"已归档「{title}」→ {archived.name}，新会话开始")
     finally:
         # MCP-b/r：无论正常退出还是异常崩掉，都关掉所有工具服务器——不留孤儿进程
-        # （save 不放 finally：异常路径写回旧 session 会覆盖好数据，只在该跑时跑）
         for client in mcp_clients:
             client.close()
-
-    # 7) 退出落盘（M6）：完整会话状态（消息 + 压缩缓存）存回 JSON，下次启动恢复
-    save_session(session, MEMORY_PATH)
-    print(f"对话历史已保存：{len(session.messages)} 条 → {MEMORY_PATH}")
-
-    # 7.5) M6.4 记忆固化：退出复盘——把本轮长出来的「值得跨会话记住的项目级信息」
-    #      沉淀到 data/learned/。内部调用走内部链（拆链原则）；since=启动时消息数，
-    #      启动即退出（无新对话）→ consolidate 内部直接跳过
-    print(consolidate(session, internal_llm, LEARNED_DIR, since=loaded_len))
 
     # 8) 打印本次会话账单（M7.5）：钱花哪了，退出一目了然
     print(ledger.bill())

@@ -40,6 +40,16 @@ SYSTEM_PROMPT = (
 
 # 用户输入这些词就结束对话
 _EXIT_WORDS = {"quit", "exit", "q", "退出", "再见"}
+# S1 多会话：输入这些词开新会话。agent_loop 只发信号不碰文件——落盘/归档归 __main__
+_NEW_SESSION_WORDS = {"/new", "新会话"}
+
+# 退出原因（S1）：让 __main__ 知道「为什么出来了」
+#   quit      → 用户主动收工，正常收官
+#   new       → 用户要开新会话，__main__ 执行「先存后清」再进下一轮
+#   interrupt → Ctrl+C / Ctrl+D 中断（M6.2 已清理半截轮）
+EXIT_QUIT = "quit"
+EXIT_NEW = "new"
+EXIT_INTERRUPT = "interrupt"
 
 # 工具循环保险丝：模型理论上可能一直点菜不收敛，永远要给循环设上限
 _MAX_TOOL_ROUNDS = 5
@@ -76,8 +86,12 @@ def run_chat(
     registry: ToolRegistry | None = None,
     session: Session | None = None,
     summary_llm: LLM | None = None,
-) -> Session:
-    """多轮对话主循环。
+) -> tuple[Session, str]:
+    """多轮对话主循环。返回 (会话状态, 退出原因)。
+
+    退出原因（S1 起）是「信号上抛、执行下放」的载体：agent_loop 不碰文件
+    （分层约定），但用户敲 quit 还是 /new 只有它知道——于是把原因编码进
+    返回值，让组装层按原因决定「收官」还是「先存后清再开一轮」。
 
     summary_llm（拆链，三方评审第 2 条）：摘要压缩的内部 LLM 调用走这条链，
     默认沿用 llm。语义档只该服务用户聊天流量——内部调用的（提示词, 回复）
@@ -97,14 +111,18 @@ def run_chat(
     # （M5.5 起：三级信息政策写进人设，一次设定全程生效）
     # 菜单只生成一次，整个会话复用
     tools = registry.schemas() if registry else None
-    print("输入 quit / exit / 退出 可结束对话。")
+    print("输入 quit / exit / 退出 可结束对话；/new 开新会话。")
 
     try:
         while True:
             user_input = input("你：").strip()
             if user_input.lower() in _EXIT_WORDS:
                 print("再见！")
-                break
+                return session, EXIT_QUIT
+            if user_input.lower() in _NEW_SESSION_WORDS:
+                # /new：只发信号不做文件操作——会话连同「开新会话」的意图
+                # 一起交给 __main__，由它执行先存后清（分层约定）
+                return session, EXIT_NEW
             if not user_input:
                 continue
 
@@ -178,4 +196,4 @@ def run_chat(
         session.summarized_upto = min(session.summarized_upto, len(session.messages))   # 覆盖进度不越界
 
     # 会话状态交还给调用方。本函数不碰文件——落盘策略归 __main__（组装层）管
-    return session
+    return session, EXIT_INTERRUPT

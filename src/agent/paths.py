@@ -16,3 +16,4 @@ from pathlib import Path
 
 NOTES_DIR = Path("data/notes")   # 知识库笔记目录（语料资产，进 git）
 LEARNED_DIR = Path("data/learned")   # M6.4 记忆固化目录（项目级记忆资产，进 git；用户级记忆另行住仓库外）
+SESSIONS_DIR = Path("data/memory/sessions")   # S1 多会话管理：历史会话归档仓库（active 仍是 data/memory/session.json，位置固定无指针）

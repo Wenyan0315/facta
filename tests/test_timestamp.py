@@ -6,7 +6,7 @@
 
 from datetime import datetime
 
-from agent.core.agent_loop import _time_stamp, run_chat
+from agent.core.agent_loop import EXIT_QUIT, _time_stamp, run_chat
 from agent.core.llm import ScriptedLLM
 from agent.core.types import Message
 
@@ -25,9 +25,11 @@ def test_stamp_in_payload_not_in_history(monkeypatch):
     llm = ScriptedLLM([Message(role="assistant", content="恢复啦")])
     script = llm  # ScriptedLLM 记录每次收到的 messages 快照
 
-    session = run_chat(script, None)
+    session, reason = run_chat(script, None)
 
     # 底片干净：历史里没有任何时间戳痕迹
     assert all("今天：" not in m.content for m in session.messages)
     # 投影有戳：模型这一轮确实看到了「今天」
     assert any("今天：" in m.content for m in script.calls[0])
+    # 正常输入「退出」→ 退出原因 quit（S1 返回值契约）
+    assert reason == EXIT_QUIT
