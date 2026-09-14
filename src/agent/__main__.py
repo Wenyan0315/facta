@@ -6,110 +6,30 @@
     python -m agent echo     # 其他测试模型（只读第一个参数）
 """
 
-import os
 import sys
-from pathlib import Path
 
-from dotenv import load_dotenv
-
-from agent.core.agent_loop import EXIT_NEW, run_chat
-from agent.core.gateway import SemanticCacheLLM
-from agent.core.llm import get_llm
-from agent.core.telemetry import UsageLedger
-from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
-from agent.knowledge.sync import sync_notes
-from agent.knowledge.vector_store import ChromaVectorStore
+from agent.cli import EXIT_NEW, run_chat
 from agent.memory.consolidate import consolidate
-from agent.memory.store import (
-    archive_session,
-    derive_title,
-    load_session,
-    save_session,
-)
-from agent.paths import LEARNED_DIR, NOTES_DIR, SESSIONS_DIR
-from agent.tools.builtin import register_builtin
-from agent.tools.context import ToolContext
-from agent.tools.mcp_config import assemble_servers, load_server_specs
-from agent.tools.registry import ToolRegistry
+from agent.memory.store import archive_session, derive_title, save_session
+from agent.orchestrator.assemble import MEMORY_PATH, assemble
+from agent.paths import LEARNED_DIR, SESSIONS_DIR
 
 VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
-MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx；单消费者路径留本地）
-VECTOR_DB_DIR = Path("data/vector_db")           # M7：向量库落盘位置（运行时数据，.gitignore 已排除）
 
 
 def main() -> None:
     print(f"Personal Agent v{VERSION}")
 
-    # 把项目根目录 .env 里的配置（API key 等）加载进环境变量
-    load_dotenv()
-
     # 命令行第一个参数 = 用哪个模型，不传默认 deepseek
     provider = sys.argv[1] if len(sys.argv) > 1 else "deepseek"
 
-    # 0) 账本（M7.5）：全进程一本账，LLM 与 embedding 都往里记，退出时打印
-    ledger = UsageLedger()
+    # 组装依赖（单一真值源 S2a）：账本/embedder/双链/知识库/会话/工具/MCP
+    # 全在 assemble 里，本入口只解析 provider 再拿结果
+    ctx = assemble(provider)
+    session = ctx.session
+    llm, registry, internal_llm = ctx.llm, ctx.registry, ctx.internal_llm
 
-    # 1) embedder：语义缓存与知识库共用一个（记账只注入这一处）
-    #    练习模式（假模型）走词袋（离线不花一分钱）；真模型走 BGE-M3。
-    #    注意两种 embedder 向量维度不同（词袋=词表长度、BGE=1024），绝不能混用
-    #    同一个 Chroma 集合——所以教学组合根本不碰 Chroma，各自住各自的店
-    if provider in ("mock", "echo", "repeat"):
-        embedder = get_embedder("bow", ledger)
-    else:
-        embedder = get_embedder("siliconflow", ledger)
-
-    # 2) 模型链（M7.5 网关 + 三方评审第 2 条拆链）：组装出两条链——
-    #    内部链（internal_llm）：防护壳全套（记账/重试/精确缓存/熔断/降级），
-    #        给压缩器与 search_and_summarize 的内部调用用；
-    #    用户链（llm）：内部链再包一层语义档，只服务用户聊天流量——
-    #        内部调用的（提示词, 回复）进缓存池有串味路径，且内部 prompt
-    #        几乎不可能命中 0.92 阈值（白付 embed）
-    internal_llm = get_llm(provider, ledger)
-    llm = SemanticCacheLLM(internal_llm, embedder, ledger)
-    print(f"当前模型：{provider}")
-
-    # 3) 知识库（M7）：组装 embedder + store，索引走增量同步——
-    #    只为真正新增/修改的笔记花 embedding 的钱；改过的自动删旧块重建
-    if provider in ("mock", "echo", "repeat"):
-        kb = KnowledgeBase(embedder)
-    else:
-        kb = KnowledgeBase(embedder, ChromaVectorStore(VECTOR_DB_DIR))
-    report = sync_notes(kb, NOTES_DIR)
-    print(f"知识库同步：新增 {report.added} / 删除 {report.removed} / 不变 {report.unchanged}")
-
-    # 4) 会话记忆（M6）：启动时载入【完整会话状态】——底片(消息) + 压缩缓存(摘要游标)
-    #    关键细节：必须在登记工具之前载入——search_history 的闭包要抓这个列表对象
-    session = load_session(MEMORY_PATH)
-    if session.messages:
-        print(f"已恢复 {len(session.messages)} 条历史消息（{MEMORY_PATH}）")
-
-    # 5) 工具（M5）：登记内置工具，交给主循环
-    #    P1-2：依赖打包成 ToolContext——kb 给 search/write 查重检索、
-    #    llm 给 search_and_summarize 做内部摘要（内部链，不穿语义档——评审第 2 条）、
-    #    history 给会话内检索
-    #    （闭包注入，传列表对象本身而非副本——run_chat 原地 append，
-    #    工具才能实时看到全部历史）、notes_dir 消灭工具层写死的路径
-    registry = ToolRegistry()
-    ctx = ToolContext(
-        notes_dir=NOTES_DIR,
-        kb=kb,
-        llm=internal_llm,
-        history=session.messages,
-    )
-    register_builtin(registry, ctx)
-
-    # 5.5) MCP 外部工具（MCP-config 配置化）：改 mcp_servers.json 加工具，零代码。
-    #      命令型穿 stdio、URL 型穿 streamable HTTP；单台失败只警告不阻断；
-    #      MCP_SERVERS 环境变量可指向个人配置（带 API key 的那种，不进仓库）
-    try:
-        specs = load_server_specs(Path(os.environ.get("MCP_SERVERS", "mcp_servers.json")))
-    except ValueError as e:
-        print(f"MCP 配置读取失败，本轮无外部工具：{e}")
-        specs = []
-    mcp_clients = assemble_servers(registry, specs)
-    print(f"已装载工具：{', '.join(registry.names())}")
-
-    # 6) 多会话主循环（S1）：run_chat 归还 (会话, 退出原因)。
+    # 多会话主循环（S1）：run_chat 归还 (会话, 退出原因)。
     #    quit/interrupt → 收官；new → 先存后清再开一轮。
     #    拆链（评审第 2 条）：压缩器内部调用走 summary_llm=内部链
     #    MCP 客户端只在最终退出时关闭——多会话循环期间关了，下一轮工具全死
@@ -118,12 +38,12 @@ def main() -> None:
             loaded_len = len(session.messages)   # M6.4 复盘起点（每轮重取：/new 后新会话从 0 起）
             session, reason = run_chat(llm, registry, session, summary_llm=internal_llm)
 
-            # 7) 退出落盘（M6）：完整会话状态（消息 + 压缩缓存）存回 JSON
+            # 退出落盘（M6）：完整会话状态（消息 + 压缩缓存）存回 JSON
             save_session(session, MEMORY_PATH)
             print(f"对话历史已保存：{len(session.messages)} 条 → {MEMORY_PATH}")
 
-            # 7.5) M6.4 记忆固化：退出复盘——since=本轮启动消息数，
-            #      无新对话（启动即退出）→ consolidate 内部直接跳过
+            # M6.4 记忆固化：退出复盘——since=本轮启动消息数，
+            # 无新对话（启动即退出）→ consolidate 内部直接跳过
             print(consolidate(session, internal_llm, LEARNED_DIR, since=loaded_len))
 
             if reason != EXIT_NEW:
@@ -142,11 +62,11 @@ def main() -> None:
             print(f"已归档「{title}」→ {archived.name}，新会话开始")
     finally:
         # MCP-b/r：无论正常退出还是异常崩掉，都关掉所有工具服务器——不留孤儿进程
-        for client in mcp_clients:
+        for client in ctx.mcp_clients:
             client.close()
 
-    # 8) 打印本次会话账单（M7.5）：钱花哪了，退出一目了然
-    print(ledger.bill())
+    # 打印本次会话账单（M7.5）：钱花哪了，退出一目了然
+    print(ctx.ledger.bill())
 
 
 if __name__ == "__main__":

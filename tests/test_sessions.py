@@ -9,7 +9,9 @@
 from datetime import datetime
 from pathlib import Path
 
-from agent.core.agent_loop import EXIT_NEW, EXIT_QUIT, run_chat
+import pytest
+
+from agent.cli import EXIT_NEW, EXIT_QUIT, run_chat
 from agent.core.llm import ScriptedLLM
 from agent.core.types import Message
 from agent.memory.store import (
@@ -18,6 +20,7 @@ from agent.memory.store import (
     derive_title,
     list_archived_sessions,
     load_session,
+    restore_session,
     save_session,
 )
 
@@ -131,3 +134,29 @@ def test_quit_word_signals_exit_quit(monkeypatch):
     _, reason = run_chat(ScriptedLLM([]), None)
 
     assert reason == EXIT_QUIT
+
+
+# ---------- restore 切回（move 语义） ----------
+
+def test_restore_moves_archive_to_active(tmp_path):
+    active = tmp_path / "session.json"
+    archive = tmp_path / "sessions" / "20260913-101956.json"
+    _saved_session(archive, "待切回的会话")   # 先有一个归档
+
+    restored = restore_session(archive, active)
+
+    assert restored.messages[1].content == "待切回的会话"   # 切回的内容对
+    assert active.exists() and not archive.exists()          # move：归档消失，active 接管
+    # active 落盘的内容与返回值一致（写回 active 的就是切回的那段对话）
+    assert [m.content for m in load_session(active).messages] == [m.content for m in restored.messages]
+
+
+def test_restore_missing_archive_raises_without_touching_active(tmp_path):
+    active = tmp_path / "session.json"
+    _saved_session(active, "当前会话")   # active 已有一句真人对话
+
+    with pytest.raises(FileNotFoundError):
+        restore_session(tmp_path / "sessions" / "不存在.json", active)
+
+    # active 原样未动——静默把空会话写进去覆盖真人对话，才是真事故
+    assert load_session(active).messages[1].content == "当前会话"

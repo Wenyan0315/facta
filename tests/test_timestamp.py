@@ -6,7 +6,8 @@
 
 from datetime import datetime
 
-from agent.core.agent_loop import EXIT_QUIT, _time_stamp, run_chat
+from agent.cli import EXIT_QUIT, run_chat
+from agent.orchestrator.loop import _time_stamp
 from agent.core.llm import ScriptedLLM
 from agent.core.types import Message
 

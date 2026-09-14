@@ -124,3 +124,27 @@ def list_archived_sessions(archive_dir: Path) -> list[tuple[Path, str]]:
     for path in sorted(archive_dir.glob("*.json")):
         items.append((path, derive_title(load_session(path))))
     return items
+
+
+def restore_session(archive_path: Path, active_path: Path) -> Session:
+    """S2a 切回继续聊：把归档会话切回 active（move 语义）。
+
+    与 archive_session（copy2 复制）方向相反——那一步「存档但真人留在原地」，
+    这一步「把过去的一段对话拉回来当下正在聊的」：
+    - 读归档 → 写回 active（固定位置）→ 删归档文件
+    - 铁律：任何时刻一段对话只有一个物理副本。写回 active 成功后归档即删，
+      杜绝「active 与 archive 各存一份」的双真值源
+    - 顺序即安全：先写回成功、再删归档——写回失败时归档还在，旧对话不丢
+      （「先存后清」哲学的 restore 版）
+    - 前置：归档必须存在——restore 的语义是「必须已经有了」，不同于 load
+      的「可能还没有」（后者静默返回空会话）。传不存在的路径是调用方 bug，
+      大声崩而非把空会话静默写进 active 覆盖真人对话
+    - 返回值是新会话；内存「换血」（装进现有 messages 列表、绝不 rebind）
+      不在这里做——那是装配层与 run_chat 之间的列表身份契约
+    """
+    if not archive_path.is_file():
+        raise FileNotFoundError(f"归档会话不存在：{archive_path}")
+    session = load_session(archive_path)
+    save_session(session, active_path)
+    archive_path.unlink()
+    return session

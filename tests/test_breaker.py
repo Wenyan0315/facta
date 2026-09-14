@@ -121,7 +121,7 @@ def test_fallback_exhaustion_raises_llm_unavailable():
 
 def test_run_chat_survives_llm_unavailable(monkeypatch, capsys):
     """F 契约第 2 条：模型全挂时主循环不崩——用户消息留底片、无假回复。"""
-    from agent.core.agent_loop import run_chat
+    from agent.cli import run_chat
 
     inputs = iter(["测试问题", "退出"])
     monkeypatch.setattr("builtins.input", lambda _="": next(inputs))
