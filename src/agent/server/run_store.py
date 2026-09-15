@@ -49,10 +49,16 @@ class RunEvent:
 
 @dataclass
 class Run:
-    """一次任务的运行状态：run_id + 状态机 + 事件序列 + 取消标志 + 订阅队列。"""
+    """一次任务的运行状态：run_id + 状态机 + 事件序列 + 取消标志 + 订阅队列。
+
+    title/preview 是任务视图的展示字段（人读的标签，不参与状态机）：
+    title=创建时的用户消息截断，preview=最终回复截断（完成时回填）。
+    """
 
     run_id: str
     status: str = STATUS_PENDING
+    title: str = ""
+    preview: str = ""
     events: list[RunEvent] = field(default_factory=list)
     cancel_requested: bool = False
     _queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
@@ -103,13 +109,13 @@ class RunStore:
         self._runs: dict[str, Run] = {}
         self._lock = threading.Lock()   # 保护 _runs 与「单锁」检查+创建的原子性
 
-    def create(self) -> Run:
-        run = Run(run_id=uuid.uuid4().hex)
+    def create(self, title: str = "") -> Run:
+        run = Run(run_id=uuid.uuid4().hex, title=title)
         with self._lock:
             self._runs[run.run_id] = run
         return run
 
-    def create_if_idle(self) -> Run | None:
+    def create_if_idle(self, title: str = "") -> Run | None:
         """原子地「无 in-flight 才创建」——单锁的检查与创建不可分割。
 
         单锁理由：会话是单内存状态（session 是共享可变对象），并发两个 Run
@@ -118,9 +124,18 @@ class RunStore:
         with self._lock:
             if any(r.status in (STATUS_PENDING, STATUS_RUNNING) for r in self._runs.values()):
                 return None
-            run = Run(run_id=uuid.uuid4().hex)
+            run = Run(run_id=uuid.uuid4().hex, title=title)
             self._runs[run.run_id] = run
             return run
+
+    def list_runs(self) -> list[Run]:
+        """全部 Run，新的在前（任务视图原料）。
+
+        dict 保插入序 = 创建序；v1 全在内存、重启即空（已知边界，外置触发
+        信号=多实例部署）。
+        """
+        with self._lock:
+            return list(reversed(self._runs.values()))
 
     def get(self, run_id: str) -> Run | None:
         with self._lock:

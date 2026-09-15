@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -57,9 +57,15 @@ class CreateRunRequest(BaseModel):
 
 
 def _run_worker(ctx: AppContext, run, user_text: str) -> None:
-    """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。"""
+    """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。
+
+    每轮落盘（finally，先于终态哨兵）：Web 壳是常驻进程，没有 CLI 的退出
+    保存钩子——不落盘，服务被杀/崩溃就丢掉上次归档以来的全部对话（强杀
+    丢数据边界的 web 版，真实使用踩中：会话只在点归档类操作时才写盘）。
+    """
     run.status = STATUS_RUNNING
     run.emit("run.started", {})
+    status = STATUS_FAILED
     try:
         reply = run_turn(
             ctx.session,
@@ -73,14 +79,18 @@ def _run_worker(ctx: AppContext, run, user_text: str) -> None:
         )
         # 终态判定：有最终回答 → completed；否则看是否因取消 → cancelled / failed
         if reply is not None:
-            run.finish(STATUS_COMPLETED)
+            run.preview = (reply.content or "")[:300]   # 任务视图的交付摘要
+            status = STATUS_COMPLETED
         elif run.cancel_requested:
-            run.finish(STATUS_CANCELLED)
-        else:
-            run.finish(STATUS_FAILED)
+            status = STATUS_CANCELLED
     except Exception as exc:   # 防御性兜底：run_turn 已捕获 LLMUnavailableError，这里是意外
         run.emit("error", {"message": str(exc)})
-        run.finish(STATUS_FAILED)
+    finally:
+        try:
+            save_session(ctx.session, MEMORY_PATH)
+        except Exception as exc:   # 落盘失败不吞终态：告知用户，流照常收口
+            run.emit("error", {"message": f"会话落盘失败：{exc}"})
+        run.finish(status)
 
 
 def _archive_current(ctx: AppContext) -> None:
@@ -109,10 +119,11 @@ def _switch_session(ctx: AppContext, archive_path) -> None:
 def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     store = store or RunStore()
     app = FastAPI(title="Personal Agent")
+    static_dir = Path(__file__).parent / "static"
 
     @app.post("/api/runs", status_code=202)
     def create_run(body: CreateRunRequest):
-        run = store.create_if_idle()
+        run = store.create_if_idle(title=body.text[:60])
         if run is None:
             raise HTTPException(409, "已有任务在运行，请稍候再发")
         # daemon 线程：服务退出时不留阻塞；请求线程立即 202 返回
@@ -191,13 +202,30 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         _switch_session(ctx, archive_path)
         return {"title": derive_title(ctx.session)}
 
-    # 任务视图占位（S2 信息架构预留，v1 只做对话视图）
+    # 历史消息：当前 active 会话的 user/assistant 轮（system=人设、tool=中间产物，
+    # 不进对话回放；空 content 的纯点菜轮跳过——历史回放只讲故事线）
+    @app.get("/api/messages")
+    def messages():
+        return [
+            {"role": m.role, "content": m.content}
+            for m in ctx.session.messages
+            if m.role in ("user", "assistant") and m.content
+        ]
+
+    # 任务列表：Run Store 全量（新的在前），任务视图原料
+    @app.get("/api/runs")
+    def runs():
+        return [
+            {"run_id": r.run_id, "status": r.status, "title": r.title, "preview": r.preview}
+            for r in store.list_runs()
+        ]
+
+    # 任务视图（S2 双视图的另一半，v1 最小版：运行记录+状态+交付摘要）
     @app.get("/tasks")
     def tasks():
-        return JSONResponse({"message": "任务视图（委派/状态/交付摘要）v1 未实现，信息架构已预留"})
+        return FileResponse(static_dir / "tasks.html")
 
-    # 前端三件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）
-    static_dir = Path(__file__).parent / "static"
+    # 前端静态文件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）
     app.mount("/", StaticFiles(directory=static_dir, html=True, check_dir=False), name="static")
 
     return app

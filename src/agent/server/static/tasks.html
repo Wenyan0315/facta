@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>任务视图 · Personal Agent</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <button id="new-session" onclick="location.href='/'">← 返回对话</button>
+      <span class="muted" style="font-size:12px;">本次服务进程内的运行记录（重启后清空）</span>
+    </div>
+    <ul id="session-list"><li class="muted">任务视图</li></ul>
+  </aside>
+
+  <main id="chat">
+    <div id="messages">
+      <h2 class="tasks-title">任务运行</h2>
+      <div id="run-list"><p class="muted">加载中…</p></div>
+    </div>
+  </main>
+
+  <script>
+    // 任务视图 v1：Run 列表 + 状态 + 交付摘要（preview）。5 秒轮询刷新。
+    const STATUS_ZH = { pending: "排队中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已取消" };
+
+    async function refresh() {
+      const el = document.getElementById("run-list");
+      let runs;
+      try {
+        runs = await (await fetch("/api/runs")).json();
+      } catch (_) {
+        el.innerHTML = '<p class="muted">加载失败</p>';
+        return;
+      }
+      if (!runs.length) { el.innerHTML = '<p class="muted">暂无任务运行</p>'; return; }
+      el.innerHTML = runs.map(() => `
+        <div class="task-item">
+          <div class="task-head">
+            <span class="task-badge"></span>
+            <span class="task-title"></span>
+          </div>
+          <div class="task-preview"></div>
+        </div>`).join("");
+      // textContent 填充（模型输出不进 innerHTML，防注入同对话视图）
+      el.querySelectorAll(".task-item").forEach((item, i) => {
+        const r = runs[i];
+        item.querySelector(".task-badge").classList.add(r.status);
+        item.querySelector(".task-badge").textContent = STATUS_ZH[r.status] || r.status;
+        item.querySelector(".task-title").textContent = r.title || "(无标题)";
+        item.querySelector(".task-preview").textContent = r.preview || "（无交付摘要）";
+      });
+    }
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

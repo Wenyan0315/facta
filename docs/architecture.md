@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.37（2026-09-15）｜随着里程碑推进持续迭代此文档
+> 版本：v0.38（2026-09-15）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 
 ## 设计原则
@@ -98,7 +98,7 @@
 | knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集) | 知识图谱 |
 | memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘）+ 多会话管理（S1：active+archive，/new 归档重开）+ restore_session 原语（S2a：归档写回 active 后删除，move 语义） | 用户级记忆仓库外位置 |
 | tools | ✅ Tool+ToolRegistry+6内置工具(时间/清单/读/写/检索/检索+摘要)；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型) | 更多工具 + MCP + skills |
-| server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + /tasks 占位；静态三件零构建链；只绑 127.0.0.1 | 任务视图（S2 预留）；Run Store 外置（多实例触发） |
+| server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + 静态三件零构建链；只绑 127.0.0.1。验收修复轮：人设保证（ensure_persona 装配不变量）、每轮落盘、取消检查点③（流中即时）、任务视图最小版（/tasks+GET /api/runs）、历史回放（GET /api/messages）、md 渲染（marked vendored）、Enter/Esc 键盘 | 任务视图完整版（S2 预留）；Run Store 外置（多实例触发） |
 | evals | ✅ 检索评估(P/R@k, MRR, 双实现对比) + LLM-as-judge 回答质量(基线 13/13 合格, 0% 错误, 全轮 ¥0.011) | 更难的对抗题库 + 回答质量回归 |
 | data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据)；data/learned/*.md 项目级长时记忆(M6.4，进 git) | 长文档、多来源 |
 
@@ -165,6 +165,6 @@
 | [009-mcp](decisions/009-mcp.md) | MCP | stdio+HTTP 双传输；服务器侧沙箱；mcp__ 前缀冲突治理；死菜摘牌；mcp_servers.json 配置化；Context7/GitHub 真三方验收 |
 | [010-streaming](decisions/010-streaming.md) | streaming | generate_stream 伪流默认；merge_stream_chunks 分片重组；网关四衣流式语义；取消走 KeyboardInterrupt 通道 |
 | [011-phase2-s1](decisions/011-phase2-s1.md) | 阶段二/S1 | 阶段二规划拍板（界面是壳/依赖驱动排序）；S1 多会话 active+archive；六标的业界调研；聊天网关与本地模型调研 |
-| [012-s2-web](decisions/012-s2-web.md) | S2 | S2a 分层清账（orchestrator 正名/内核外设分离/assemble 真值源）；S2b Web 壳（Run 三接口/SSE/Run Store/协作式取消/会话切回） |
+| [012-s2-web](decisions/012-s2-web.md) | S2 | S2a 分层清账（orchestrator 正名/内核外设分离/assemble 真值源）；S2b Web 壳（Run 三接口/SSE/Run Store/协作式取消/会话切回）；验收修复轮（人设保证/自我画像/流中取消③/每轮落盘/任务视图/历史回放/md 渲染/测试污染事故） |
 | [013-docs-adr-split](decisions/013-docs-adr-split.md) | 文档治理 | ADR 拆分本身（触发信号兑现；57 条 sha256 校验零改写） |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |

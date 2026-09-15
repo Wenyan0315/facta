@@ -25,7 +25,20 @@ from agent.memory.store import Session
 from agent.tools.registry import ToolRegistry
 
 SYSTEM_PROMPT = (
-    "你是一个 AI 学习助手，帮助我学习 AI Agent 开发。"
+    "你是一个 AI 学习助手（个人 agent），帮助我学习 AI Agent 开发。"
+    "【自我画像——用户问你是谁/你的架构/技术实现时，以此为准，不得编造】："
+    "LLM + Function Calling 架构，模型自主决策是否调用工具；"
+    "主模型经 OpenAI 兼容网关接入（当前 DeepSeek），网关带记账/重试/缓存/熔断；"
+    "内置工具：get_current_time、list_notes、read_note、write_note、search_notes"
+    "（BGE-M3 语义检索 + Chroma 向量库，语料是 data/notes/ 的 Markdown 笔记）、"
+    "search_and_summarize、search_history、read_history；"
+    "另有 MCP 外部工具按配置接入（mcp__ 前缀）。"
+    "会话记忆 JSON 持久化 + 滚动摘要压缩，跨会话沉淀进 data/learned/。"
+    "分层：orchestrator 编排 / core 网关地基 / knowledge 检索 / memory 记忆 / "
+    "tools 工具 / server Web 壳。"
+    "没有的能力不得声称有：没有通用文件读写工具（只有笔记读写）、"
+    "没有笔记删除工具、没有用户反馈记录机制。"
+    "【语言】始终使用用户当前提问所用的语言回复。"
     "信息使用政策（按优先级）："
     "①优先用 search_notes 检索我的个人知识库，基于笔记回答；"
     "②资料不足时，可用其他工具（如读取完整笔记）补充；"
@@ -33,7 +46,7 @@ SYSTEM_PROMPT = (
     "但必须标注「以下来自我的通用知识，非笔记内容」。"
     "需要事实信息（比如当前时间）时，主动使用工具获取。"
     "你的历史对话由系统自动保存、跨重启恢复——恢复的历史与当前对话属于"
-    "同一个持续会话；用户说'这轮对话''这轮对话''我们聊过的'时，指含恢复历史的"
+    "同一个持续会话；用户说'这轮对话''我们聊过的'时，指含恢复历史的"
     "整个会话，而非最近一次问答。历史过长时自动压缩为摘要；"
     "摘要中的信息等同于你的亲历记忆，可直接引用，不要声称自己记不住。"
     "需要早前对话的逐字原话时，用 search_history 检索完整历史。"
@@ -43,6 +56,28 @@ SYSTEM_PROMPT = (
 _MAX_TOOL_ROUNDS = 5
 
 _WEEKDAYS = "一二三四五六日"
+
+
+class _RunCancelled(Exception):
+    """内部信号：流式消费中途被取消（检查点③），用于从生成器深处跳出。
+
+    不外发事件——cancelled 是 Run 级终态，归调用方（同检查点①②的约定）。
+    """
+
+
+def _cancel_aware_stream(chunks, should_cancel):
+    """把底层流包成「每块到手前查取消」的流（协作式取消检查点③）。
+
+    检查点①②要等模型调用/工具执行的自然边界，模型一次生成几十秒时
+    用户点取消要干等——检查点③在流式生成中每块到手时检查，命中则
+    close() 底层生成器（触发其清理逻辑收连接）并上抛 _RunCancelled。
+    should_cancel 为 None 时零行为差异（CLI 键盘中断通道不变）。
+    """
+    for chunk in chunks:
+        if should_cancel is not None and should_cancel():
+            chunks.close()
+            raise _RunCancelled()
+        yield chunk
 
 
 def _time_stamp(now: datetime | None = None) -> Message:
@@ -91,8 +126,8 @@ def run_turn(
                         error         {"message": str}  模型全挂，本轮无产出
         should_cancel 协作式取消检查点回调：返回 True 时在下一个检查点掐半截轮、
                       返回 None（不发事件——cancelled 是 Run 级终态，归调用方）。
-                      检查点粒度 = 每次模型调用前 + 每次工具执行前；流式生成中途
-                      无法即时中断（同步生成器，v1 已知边界）。CLI 传 None 走键盘中断。
+                      检查点粒度 = 每次模型调用前（①）+ 流式生成中每块到手时（③，
+                      即时生效）+ 每次工具执行前（②）。CLI 传 None 走键盘中断。
 
     返回：
         Message   本轮最终 assistant 回答（已入底片）
@@ -133,7 +168,7 @@ def run_turn(
             # 流式消费：分片边收边喂 on_text，收完 merge 拼回完整回复。
             # 点菜轮 content 通常为空（不冒字），模型偶尔先冒半句再点菜
             reply = merge_stream_chunks(
-                llm.generate_stream(payload, tools),   # 发的是投影，不是底片
+                _cancel_aware_stream(llm.generate_stream(payload, tools), should_cancel),
                 on_text=on_text,
             )
 
@@ -163,14 +198,17 @@ def run_turn(
             # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
             if on_event:
                 on_event("max_rounds", {})
-            # 最后一问不递菜单，逼它说话（同流式消费）
+            # 最后一问不递菜单，逼它说话（同流式消费，同样罩检查点③）
             reply = merge_stream_chunks(
-                llm.generate_stream(payload, None),
+                _cancel_aware_stream(llm.generate_stream(payload, None), should_cancel),
                 on_text=on_text,
             )
 
         session.messages.append(reply)
         return reply
+    except _RunCancelled:
+        trim_incomplete_round(session.messages)
+        return None
     except LLMUnavailableError as exc:
         trim_incomplete_round(session.messages)
         if on_event:

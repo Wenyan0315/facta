@@ -16,6 +16,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from agent.core.types import Message
 from agent.core.gateway import SemanticCacheLLM
 from agent.core.llm import LLM, get_llm
 from agent.core.telemetry import UsageLedger
@@ -23,6 +24,7 @@ from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.sync import sync_notes
 from agent.knowledge.vector_store import ChromaVectorStore
 from agent.memory.store import Session, load_session
+from agent.orchestrator.loop import SYSTEM_PROMPT
 from agent.paths import NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
@@ -47,6 +49,23 @@ class AppContext:
     session: Session
     registry: ToolRegistry
     mcp_clients: list = field(default_factory=list)   # 最终退出时统一 close，不留孤儿进程
+
+
+def ensure_persona(session: Session) -> None:
+    """人设保证（装配不变量，S2 验收修复轮）：会话必须带着 SYSTEM_PROMPT 开工。
+
+    「空会话种人设」原本只住在 CLI 壳——Web 入口曾跑过无人设会话（真实使用
+    踩中：语言漂移、信息政策失效、自我认知全靠模型编）。两分支：
+    - 空会话：种人设（与 cli.py 的守卫幂等——双方都判 messages 是否为空）
+    - 历史遗留的无 system 会话（早期 Web 保存的文件）：头部补插；
+      摘要游标随位移 +1 对齐（summarized_upto 数的是消息位置）
+    """
+    if not session.messages:
+        session.messages.append(Message(role="system", content=SYSTEM_PROMPT))
+    elif session.messages[0].role != "system":
+        session.messages.insert(0, Message(role="system", content=SYSTEM_PROMPT))
+        if session.summarized_upto:
+            session.summarized_upto += 1
 
 
 def assemble(provider: str) -> AppContext:
@@ -92,8 +111,10 @@ def assemble(provider: str) -> AppContext:
     # 4) 会话记忆（M6）：启动时载入【完整会话状态】——底片(消息) + 压缩缓存(摘要游标)
     #    关键细节：必须在登记工具之前载入——search_history 的闭包要抓这个列表对象
     session = load_session(MEMORY_PATH)
-    if session.messages:
-        print(f"已恢复 {len(session.messages)} 条历史消息（{MEMORY_PATH}）")
+    restored = len(session.messages)
+    ensure_persona(session)   # 人设是装配不变量：CLI/Web 两个入口都必须带着开工
+    if restored:
+        print(f"已恢复 {restored} 条历史消息（{MEMORY_PATH}）")
 
     # 5) 工具（M5）：登记内置工具，交给主循环
     #    P1-2：依赖打包成 ToolContext——kb 给 search/write 查重检索、

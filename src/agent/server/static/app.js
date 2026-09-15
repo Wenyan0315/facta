@@ -20,6 +20,19 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// ---- Markdown 渲染 ----
+// 流式中用 textContent（快，pre-wrap 保换行）；终态渲染一次 md。
+// 只渲染 assistant 消息（内容来自自家模型）；用户输入与工具结果永远
+// textContent——不可信内容不进 innerHTML（注入防线）。
+if (window.marked) marked.setOptions({ gfm: true, breaks: true });
+
+function renderMarkdown(el, text) {
+  if (window.marked && text) {
+    el.innerHTML = marked.parse(text);
+    el.classList.add("md-rendered");   // 关掉 pre-wrap：换行交给 md 的 <br>
+  } else el.textContent = text || "";
+}
+
 function scheduleRender() {
   // rAF 节流：网络高频收 text.delta，界面一帧合并画一次
   if (rafPending) return;
@@ -84,6 +97,8 @@ function addToolCard(turn, name, rawArgs) {
 function onDone() {
   if (currentSource) { currentSource.close(); currentSource = null; }
   currentRunId = null;
+  cancelEl.disabled = false;
+  cancelEl.textContent = "取消";
   cancelEl.classList.add("hidden");
 }
 
@@ -118,6 +133,7 @@ function setupEventSource(runId, turn) {
   });
 
   source.addEventListener("error", (e) => {
+    if (!e.data) return;   // 原生 EventSource 网络错误（无 data），交给 onerror
     const d = JSON.parse(e.data).data;
     const el = document.createElement("div");
     el.className = "tool-card";
@@ -127,9 +143,20 @@ function setupEventSource(runId, turn) {
     scrollBottom();
   });
 
-  source.addEventListener("run.completed", onDone);
+  source.addEventListener("run.completed", () => {
+    // 终态渲染 markdown：流式中纯文本，收尾一次性成稿
+    if (currentTextEl && pendingText) renderMarkdown(currentTextEl, pendingText);
+    onDone();
+  });
   source.addEventListener("run.failed", onDone);
-  source.addEventListener("run.cancelled", onDone);
+  source.addEventListener("run.cancelled", () => {
+    const el = document.createElement("div");
+    el.className = "tool-card";
+    el.textContent = "已取消本轮";
+    turn.appendChild(el);
+    scrollBottom();
+    onDone();
+  });
   source.onerror = onDone;   // EventSource 网络层错误（与业务 error 事件区分）
 }
 
@@ -167,7 +194,7 @@ async function send() {
   setupEventSource(runId, turn);
 }
 
-// ---- 会话列表 / 切回 / 新会话 ----
+// ---- 会话列表 / 切回 / 新会话 / 历史加载 ----
 
 async function loadSessions() {
   try {
@@ -189,25 +216,61 @@ async function loadSessions() {
   }
 }
 
+function emptyHint(text) {
+  messagesEl.innerHTML = "";
+  const el = document.createElement("div");
+  el.className = "muted empty-hint";
+  el.textContent = text;
+  messagesEl.appendChild(el);
+}
+
+async function loadMessages() {
+  // 历史回放：active 会话的 user/assistant 轮（system/tool 轮后端已过滤）
+  try {
+    const msgs = await (await fetch("/api/messages")).json();
+    messagesEl.innerHTML = "";
+    for (const m of msgs) {
+      if (m.role === "user") addUser(m.content);
+      else {
+        const turn = addAssistantTurn();
+        renderMarkdown(turn.querySelector(".bubble"), m.content);
+      }
+    }
+    if (msgs.length === 0) emptyHint("开始新的对话吧");
+    scrollBottom();
+  } catch (_) {
+    emptyHint("历史加载失败，可直接开始新对话");
+  }
+}
+
 async function switchTo(name) {
   if (currentRunId) return;   // 有任务时不能切回（后端也会 409）
   const resp = await fetch(`/api/sessions/${encodeURIComponent(name)}/switch`, { method: "POST" });
   if (!resp.ok) { alert(await resp.text()); return; }
-  messagesEl.innerHTML = "";
-  const data = await resp.json();
-  const turn = addAssistantTurn();
-  turn.querySelector(".bubble").textContent = `已切回「${data.title}」，继续聊吧`;
-  scrollBottom();
-  loadSessions();   // 目标会话已移回 active，刷新列表
+  await loadMessages();       // 切回后回放完整历史，而不是只显示一句提示
+  loadSessions();             // 目标会话已移回 active，刷新列表
 }
 
 async function newSession() {
   if (currentRunId) return;
   const resp = await fetch("/api/sessions/new", { method: "POST" });
   if (!resp.ok) { alert(await resp.text()); return; }
-  messagesEl.innerHTML = "";
-  loadSessions();   // 当前会话已归档，刷新列表
+  emptyHint("开始新的对话吧");
+  loadSessions();             // 当前会话已归档，刷新列表
 }
+
+// ---- 键盘习惯 ----
+// Enter 发送 / Shift+Enter 换行 / isComposing 护住输入法组合中的 Enter（中文场景）
+// Esc 取消当前任务
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    send();
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && currentRunId) cancelEl.click();
+});
 
 // ---- 初始化 ----
 
@@ -217,8 +280,14 @@ document.getElementById("composer").addEventListener("submit", (e) => {
 });
 
 cancelEl.addEventListener("click", async () => {
-  if (currentRunId) await fetch(`/api/runs/${currentRunId}/cancel`, { method: "POST" });
+  if (!currentRunId) return;
+  cancelEl.disabled = true;          // 即时反馈：不等下一个检查点，按钮先变
+  cancelEl.textContent = "取消中…";
+  try {
+    await fetch(`/api/runs/${currentRunId}/cancel`, { method: "POST" });
+  } catch (_) { /* 网络失败：onDone 兜底恢复按钮 */ }
 });
 
 newSessionBtn.addEventListener("click", newSession);
 loadSessions();
+loadMessages();

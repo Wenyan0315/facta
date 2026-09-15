@@ -152,4 +152,43 @@ body {
 
 #send { background: var(--accent); color: #fff; }
 #cancel { background: #fee2e2; color: var(--danger); }
+#cancel:disabled { opacity: 0.6; cursor: default; }
 .hidden { display: none; }
+
+/* 空态提示 */
+.empty-hint { align-self: center; margin: auto; font-size: 14px; }
+
+/* Markdown 渲染后的 assistant 气泡：源码换行交给 <br>，不再 pre-wrap */
+.bubble.assistant.md-rendered, .bubble.assistant .md-rendered { white-space: normal; }
+.bubble.assistant :is(p, ul, ol, pre, blockquote) { margin: 0.4em 0; }
+.bubble.assistant :is(h1, h2, h3, h4) { margin: 0.6em 0 0.3em; font-size: 1em; }
+.bubble.assistant ul, .bubble.assistant ol { padding-left: 1.4em; }
+.bubble.assistant code {
+  background: var(--bg); border-radius: 4px; padding: 1px 5px;
+  font-family: ui-monospace, monospace; font-size: 0.92em;
+}
+.bubble.assistant pre {
+  background: var(--bg); border-radius: 6px; padding: 10px 12px; overflow-x: auto;
+}
+.bubble.assistant pre code { background: none; padding: 0; }
+.bubble.assistant table { border-collapse: collapse; }
+.bubble.assistant :is(td, th) { border: 1px solid var(--border); padding: 4px 8px; }
+
+/* 任务视图（tasks.html） */
+.tasks-title { font-size: 18px; margin: 0 0 16px; }
+.task-item {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 14px; margin-bottom: 12px;
+}
+.task-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.task-title { font-weight: 600; font-size: 14px; }
+.task-preview { font-size: 13px; color: #374151; line-height: 1.5; }
+.task-badge {
+  font-size: 12px; padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+  background: var(--bg); color: var(--muted);
+}
+.task-badge.completed { background: #dcfce7; color: #15803d; }
+.task-badge.running { background: #dbeafe; color: #1d4ed8; }
+.task-badge.pending { background: var(--bg); color: var(--muted); }
+.task-badge.failed { background: #fee2e2; color: var(--danger); }
+.task-badge.cancelled { background: #f3e8ff; color: #7e22ce; }
