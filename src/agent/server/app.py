@@ -27,6 +27,7 @@ from agent.memory.store import (
     restore_session,
     save_session,
 )
+from agent.memory.title import summarize_title
 from agent.orchestrator.assemble import MEMORY_PATH, AppContext
 from agent.orchestrator.loop import run_turn
 from agent.paths import LEARNED_DIR, SESSIONS_DIR
@@ -94,17 +95,20 @@ def _run_worker(ctx: AppContext, run, user_text: str) -> None:
 
 
 def _archive_current(ctx: AppContext) -> None:
-    """切出当前会话：save → 复盘 → 归档 → 清空内存（原地 clear，不 rebind）。
+    """切出当前会话：提炼标题 → save → 复盘 → 归档 → 清空内存（原地 clear，不 rebind）。
 
-    与 CLI /new 同一序列。原地 clear 不 rebind——search_history 工具的闭包抓的
-    是 ctx.session.messages 这个列表对象本身（列表身份陷阱，S1 反面教材正用）。
+    与 CLI /new 同一序列。标题在 save 之前提炼写进 session.title——save 落盘、
+    归档复制（copy2）都带它，列表读取零 LLM 调用（提炼成本只在归档时付一次）。
+    提炼失败 fallback 到首句派生，不阻断归档。
     """
+    ctx.session.title = summarize_title(ctx.session, ctx.internal_llm) or derive_title(ctx.session)
     save_session(ctx.session, MEMORY_PATH)
     consolidate(ctx.session, ctx.internal_llm, LEARNED_DIR, since=0)   # v1 简化：全量复盘
     archive_session(MEMORY_PATH, SESSIONS_DIR)
     ctx.session.messages.clear()
     ctx.session.summary = None
     ctx.session.summarized_upto = 1
+    ctx.session.title = None
 
 
 def _switch_session(ctx: AppContext, archive_path) -> None:

@@ -19,6 +19,8 @@ def _isolate_session_file(tmp_path, monkeypatch):
     本次是它第一次真烧掉用户数据）。"""
     import agent.server.app as app_module
     monkeypatch.setattr(app_module, "MEMORY_PATH", tmp_path / "session.json")
+    monkeypatch.setattr(app_module, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(app_module, "LEARNED_DIR", tmp_path / "learned")
 
 
 def _make_ctx(reply: str = "你好！") -> AppContext:
@@ -158,6 +160,25 @@ def test_run_persists_session_each_turn(tmp_path, monkeypatch):
     data = json.loads(mem.read_text(encoding="utf-8"))
     contents = [m.get("content") for m in data["messages"]]
     assert "记住这句" in contents and "你好！" in contents
+
+
+def test_archive_new_session_sets_llm_title(tmp_path):
+    # S2 验收修复轮：归档时用 LLM 提炼标题写进归档文件（列表读取零 LLM 调用）
+    from agent.memory.store import load_session
+
+    ctx = _make_ctx()
+    # internal_llm 第 1 次调用 = 提炼标题；后续 consolidate 调用吃兜底（parse 失败不写）
+    ctx.internal_llm = ScriptedLLM([Message(role="assistant", content="PHP 工具封装")])
+    ctx.session.messages.append(Message(role="user", content="PHP 结合 AI Agent 可以做什么"))
+    ctx.session.messages.append(Message(role="assistant", content="PHP 当工具层，决策交给大模型"))
+
+    client = TestClient(create_app(ctx))
+    assert client.post("/api/sessions/new").status_code == 200
+
+    # fixture 已把 SESSIONS_DIR monkeypatch 到 tmp_path/sessions
+    archived = list((tmp_path / "sessions").glob("*.json"))
+    assert len(archived) == 1
+    assert load_session(archived[0]).title == "PHP 工具封装"   # 不是首句截断
 
 
 def test_cancel_interrupts_running_run():

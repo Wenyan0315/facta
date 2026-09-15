@@ -11,6 +11,7 @@ import sys
 from agent.cli import EXIT_NEW, run_chat
 from agent.memory.consolidate import consolidate
 from agent.memory.store import archive_session, derive_title, save_session
+from agent.memory.title import summarize_title
 from agent.orchestrator.assemble import MEMORY_PATH, assemble
 from agent.paths import LEARNED_DIR, SESSIONS_DIR
 
@@ -38,7 +39,13 @@ def main() -> None:
             loaded_len = len(session.messages)   # M6.4 复盘起点（每轮重取：/new 后新会话从 0 起）
             session, reason = run_chat(llm, registry, session, summary_llm=internal_llm)
 
-            # 退出落盘（M6）：完整会话状态（消息 + 压缩缓存）存回 JSON
+            # S2 验收修复轮：归档前提炼标题（写进 session.title）——save 落盘、
+            # archive 复制都带它，列表读取零 LLM 调用。提炼失败 fallback 首句派生，
+            # 不阻断归档。quit（不归档）不提炼，省一次 LLM 调用。
+            if reason == EXIT_NEW:
+                session.title = summarize_title(session, internal_llm) or derive_title(session)
+
+            # 退出落盘（M6）：完整会话状态（消息 + 压缩缓存 + 标题）存回 JSON
             save_session(session, MEMORY_PATH)
             print(f"对话历史已保存：{len(session.messages)} 条 → {MEMORY_PATH}")
 
@@ -52,12 +59,13 @@ def main() -> None:
             # S1 先存后清：save（上一行）→ 归档成功 → 才清内存 → 写新 active。
             # 归档失败会抛异常中止，旧对话仍在 session.json，什么都没丢
             archived = archive_session(MEMORY_PATH, SESSIONS_DIR)
-            title = derive_title(session)
+            title = session.title or derive_title(session)   # 清空前先取标签（clear 后 session 已空）
             # 原地清、绝不 rebind：search_history 工具的闭包抓的是 session.messages
             # 这个列表对象本身（列表身份陷阱的反面教材），rebind 会让工具失明
             session.messages.clear()
             session.summary = None
             session.summarized_upto = 1
+            session.title = None
             save_session(session, MEMORY_PATH)   # active 立即反映为新空会话
             print(f"已归档「{title}」→ {archived.name}，新会话开始")
     finally:

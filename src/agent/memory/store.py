@@ -35,13 +35,15 @@ class Session:
     messages: list[Message] = field(default_factory=list)
     summary: str | None = None
     summarized_upto: int = 1
+    title: str | None = None   # S2 验收修复轮：归档展示标签（LLM 提炼，None=尚未提炼）
 
 
 def save_session(session: Session, path: Path) -> None:
-    """把会话状态（底片 + 缓存）存成 JSON。"""
+    """把会话状态（底片 + 缓存 + 标题）存成 JSON。"""
     path.parent.mkdir(parents=True, exist_ok=True)   # 父目录不存在就建（第一次跑 data/memory/ 还不存在）
     data = {
         "version": SESSION_VERSION,
+        "title": session.title,
         "messages": [asdict(m) for m in session.messages],
         "memory": {
             "summary": session.summary,
@@ -72,6 +74,7 @@ def load_session(path: Path) -> Session:
         messages=messages,
         summary=memory.get("summary"),
         summarized_upto=max(1, min(summarized_upto, len(messages))),
+        title=raw.get("title"),   # 旧归档无此字段 → None，list 时 fallback 首句
     )
 
 
@@ -115,14 +118,17 @@ def derive_title(session: Session) -> str:
 def list_archived_sessions(archive_dir: Path) -> list[tuple[Path, str]]:
     """历史会话清单：按文件名升序（零填充 → 字典序 = 时间序），每项 (归档路径, 标题)。
 
-    这是 S2 会话列表的直接原料。v1 每个文件全量 load 再派生标题——教学
-    规模足够；升级触发信号（文件数 >20 或单文件 >10MB）届时换只读头的索引。
+    这是 S2 会话列表的直接原料。标题优先取归档文件里的 LLM 提炼标签
+    （session.title），没有（旧归档未提炼）则 fallback 到首句派生。
+    v1 每个文件全量 load 再取标题——教学规模足够；升级触发信号（文件数 >20
+    或单文件 >10MB）届时换只读头的索引。
     """
     if not archive_dir.is_dir():
         return []
     items = []
     for path in sorted(archive_dir.glob("*.json")):
-        items.append((path, derive_title(load_session(path))))
+        session = load_session(path)
+        items.append((path, session.title or derive_title(session)))
     return items
 
 

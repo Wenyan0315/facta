@@ -25,6 +25,28 @@ def test_session_round_trip(tmp_path):
     assert loaded.summarized_upto == 3
 
 
+def test_title_round_trip(tmp_path):
+    """S2 验收修复轮：title 是会话展示标签，跟着状态一起落盘、无损读回。"""
+    session = Session(messages=[Message(role="user", content="你好")], title="PHP 做 Agent 工具层")
+    path = tmp_path / "session.json"
+    save_session(session, path)
+    assert load_session(path).title == "PHP 做 Agent 工具层"
+
+
+def test_load_legacy_without_title(tmp_path):
+    """旧归档无 title 字段 → None（list 时 fallback 首句派生）。"""
+    path = tmp_path / "session.json"
+    path.write_text(
+        json.dumps({
+            "version": 1,
+            "messages": [{"role": "user", "content": "你好"}],
+            "memory": {"summary": None, "summarized_upto": 1},
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert load_session(path).title is None
+
+
 def test_load_legacy_list_format(tmp_path):
     """旧格式（M6.2 及以前的纯 [Message,...] 列表）自动迁移：缓存归空、游标归 1。"""
     path = tmp_path / "session.json"
