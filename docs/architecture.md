@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.40（2026-09-15）｜随着里程碑推进持续迭代此文档
+> 版本：v0.41（2026-09-15）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 
 ## 设计原则
@@ -130,7 +130,7 @@
 | S2 ✅ | 产品骨架 v1 对话视图：S2a 清账（agent_loop 正名 orchestrator 编排层、run_turn 内核/外设分离、assemble 装配单一真值源）→ S2b Web 壳（FastAPI+SSE：Run 三接口分离、内存 Run Store 单锁状态机、断线重连重放、会话切回、零构建链前端三件）；任务视图按双视图预留未实现 | 前后端、SSE、Run 状态机 |
 | S3 | 安全底座：提示词注入防护 + 工具权限栅栏 + 审计日志（M9 前安全课升级为里程碑；先栅栏后开门） | 安全 |
 | S4 | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）；**开工附带清账：builtin.py 拆分（工具数>10 触发）+ 补 knowledge_base/builtin 测试护栏** | 文件系统、进程调度 |
-| S5 | skill 系统：可复用技能包与装载（2026-09 需求点名）+ 规则文件（AGENTS.md 式，learned 的读取侧） | 插件化 |
+| S5 | skill 系统：可复用技能包与装载（2026-09 需求点名）+ 规则文件（AGENTS.md 式，learned 的读取侧；含系统提示词外置——SYSTEM_PROMPT 迁出 loop.py，改行为不碰代码，2026-09-15 裁定并入本站） | 插件化 |
 | S6 | 多 agent 协作：subagent 编排（主线2 的终点；判据=噪声隔离，见调研记录；worktree 隔离机制） | 编排 |
 | S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止） | 结构化知识、图可视化 |
 | S8 | 多入口 Gateway：IM 渠道（飞书/Telegram 等）消息归一化接入 agent_loop，与 headless 合并（gateway 常驻进程——重审「不 daemon 化」原则） | 事件驱动、常驻服务 |
