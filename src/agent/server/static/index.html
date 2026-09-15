@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Personal Agent</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <button id="new-session" title="新会话">＋ 新会话</button>
+      <a href="/tasks" class="nav-link">任务视图</a>
+    </div>
+    <ul id="session-list"><li class="muted">加载中…</li></ul>
+  </aside>
+
+  <main id="chat">
+    <div id="messages"></div>
+    <form id="composer">
+      <textarea id="input" rows="1" placeholder="发消息给 agent…"></textarea>
+      <div class="composer-actions">
+        <button type="button" id="cancel" class="hidden">取消</button>
+        <button type="submit" id="send">发送</button>
+      </div>
+    </form>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

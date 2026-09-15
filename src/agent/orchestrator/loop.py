@@ -73,6 +73,7 @@ def run_turn(
     summarizer: LLM | None = None,
     on_text: Callable[[str], None] | None = None,
     on_event: Callable[[str, dict], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> Message | None:
     """跑一轮对话：用户消息入底片 → 投影 →（摘要）→ 工具循环 → 收尾。
 
@@ -88,11 +89,15 @@ def run_turn(
                         tool_result   {"name": str, "result": str}
                         max_rounds    {}       保险丝熔断，强制收尾
                         error         {"message": str}  模型全挂，本轮无产出
+        should_cancel 协作式取消检查点回调：返回 True 时在下一个检查点掐半截轮、
+                      返回 None（不发事件——cancelled 是 Run 级终态，归调用方）。
+                      检查点粒度 = 每次模型调用前 + 每次工具执行前；流式生成中途
+                      无法即时中断（同步生成器，v1 已知边界）。CLI 传 None 走键盘中断。
 
     返回：
         Message   本轮最终 assistant 回答（已入底片）
-        None      模型不可用（LLMUnavailableError 已被捕获：掐半截轮、user 消息留底片、
-                  发 error 事件）——调用方据此决定「跳过本轮」或提示恢复
+        None      本轮无产出：模型不可用（已发 error 事件）或被取消（should_cancel
+                  返回 True）——两种情况都已在内部掐掉半截轮、user 消息留底片
 
     不碰文件、不碰 input/print：落盘归装配层，I/O 归调用方的两条缝。
     """
@@ -120,6 +125,11 @@ def run_turn(
         payload.insert(1, _time_stamp())
 
         for _round in range(_MAX_TOOL_ROUNDS):
+            # 协作式取消检查点①：每次模型调用前。取消则掐半截轮、本轮无产出
+            if should_cancel and should_cancel():
+                trim_incomplete_round(session.messages)
+                return None
+
             # 流式消费：分片边收边喂 on_text，收完 merge 拼回完整回复。
             # 点菜轮 content 通常为空（不冒字），模型偶尔先冒半句再点菜
             reply = merge_stream_chunks(
@@ -136,6 +146,10 @@ def run_turn(
             payload.append(reply)
 
             for tc in reply.tool_calls:   # 模型一次可能点多个菜
+                # 协作式取消检查点②：每次工具执行前
+                if should_cancel and should_cancel():
+                    trim_incomplete_round(session.messages)
+                    return None
                 if on_event:
                     on_event("tool_started", {"name": tc["name"], "arguments": tc["arguments"]})
                 result = registry.execute(tc["name"], tc["arguments"])

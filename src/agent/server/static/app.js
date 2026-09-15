@@ -1,0 +1,224 @@
+// Personal Agent Web 壳（S2b v1）——对话视图前端，零构建链
+
+const messagesEl = document.getElementById("messages");
+const inputEl = document.getElementById("input");
+const cancelEl = document.getElementById("cancel");
+const sessionListEl = document.getElementById("session-list");
+const newSessionBtn = document.getElementById("new-session");
+
+let currentRunId = null;      // 单 in-flight：同一时刻只允许一个 Run
+let currentSource = null;     // 当前 EventSource
+let pendingText = "";         // 当前 assistant 回合累积的流式文本
+let currentTextEl = null;     // 当前正在累积文本的元素（工具卡片后会重置）
+let rafPending = false;
+
+// ---- 渲染基础 ----
+
+function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function scheduleRender() {
+  // rAF 节流：网络高频收 text.delta，界面一帧合并画一次
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(() => {
+    rafPending = false;
+    if (currentTextEl) currentTextEl.textContent = pendingText;
+    scrollBottom();
+  });
+}
+
+function newTextEl(turn) {
+  const el = document.createElement("div");
+  el.className = "bubble assistant";
+  turn.appendChild(el);
+  currentTextEl = el;
+  pendingText = "";
+  return el;
+}
+
+function addUser(text) {
+  const el = document.createElement("div");
+  el.className = "bubble user";
+  el.textContent = text;
+  messagesEl.appendChild(el);
+  scrollBottom();
+}
+
+function addAssistantTurn() {
+  const turn = document.createElement("div");
+  turn.className = "assistant-turn";
+  messagesEl.appendChild(turn);
+  newTextEl(turn);
+  return turn;
+}
+
+function addToolCard(turn, name, rawArgs) {
+  currentTextEl = null;   // 工具卡片会打断文本流，之后文本另起新元素
+  const card = document.createElement("div");
+  card.className = "tool-card";
+
+  let title = name;
+  try {
+    const args = JSON.parse(rawArgs || "{}");
+    if (name === "write_note" || name.includes("write")) title = `写入文件 ${args.filename || ""}`;
+  } catch (_) { /* arguments 非 JSON 时保持原名 */ }
+
+  const nameEl = document.createElement("div");
+  nameEl.className = "tool-name";
+  nameEl.textContent = "🔧 " + title;
+  const resultEl = document.createElement("div");
+  resultEl.className = "tool-result";
+  card.appendChild(nameEl);
+  card.appendChild(resultEl);
+  turn.appendChild(card);
+  scrollBottom();
+  return resultEl;
+}
+
+// ---- 事件源与 Run 生命周期 ----
+
+function onDone() {
+  if (currentSource) { currentSource.close(); currentSource = null; }
+  currentRunId = null;
+  cancelEl.classList.add("hidden");
+}
+
+function setupEventSource(runId, turn) {
+  const source = new EventSource(`/api/runs/${runId}/events`);
+  currentSource = source;
+  let pendingResultEl = null;
+
+  source.addEventListener("text.delta", (e) => {
+    pendingText += JSON.parse(e.data).data.delta || "";
+    scheduleRender();
+  });
+
+  source.addEventListener("tool.started", (e) => {
+    const d = JSON.parse(e.data).data;
+    pendingResultEl = addToolCard(turn, d.name, d.arguments);
+  });
+
+  source.addEventListener("tool.result", (e) => {
+    const d = JSON.parse(e.data).data;
+    if (pendingResultEl) pendingResultEl.textContent = d.result || "";
+    pendingResultEl = null;
+    newTextEl(turn);   // 工具结果之后，模型继续说话从新文本开始
+  });
+
+  source.addEventListener("max_rounds", () => {
+    const el = document.createElement("div");
+    el.className = "tool-card";
+    el.textContent = "已达到工具调用轮数上限，强制结束本轮";
+    turn.appendChild(el);
+    scrollBottom();
+  });
+
+  source.addEventListener("error", (e) => {
+    const d = JSON.parse(e.data).data;
+    const el = document.createElement("div");
+    el.className = "tool-card";
+    el.style = "background:#fee2e2;border-color:#fecaca;";
+    el.textContent = "[模型不可用] " + (d.message || "");
+    turn.appendChild(el);
+    scrollBottom();
+  });
+
+  source.addEventListener("run.completed", onDone);
+  source.addEventListener("run.failed", onDone);
+  source.addEventListener("run.cancelled", onDone);
+  source.onerror = onDone;   // EventSource 网络层错误（与业务 error 事件区分）
+}
+
+async function send() {
+  const text = inputEl.value.trim();
+  if (!text || currentRunId) return;
+  inputEl.value = "";
+
+  addUser(text);
+  const turn = addAssistantTurn();
+  cancelEl.classList.remove("hidden");
+
+  let resp;
+  try {
+    resp = await fetch("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  } catch (_) {
+    onDone();
+    addToolCard(turn, "network", "");
+    turn.querySelector(".tool-result").textContent = "无法连接后端";
+    return;
+  }
+
+  if (!resp.ok) {
+    onDone();
+    currentTextEl.textContent = "[服务返回错误] " + (await resp.text());
+    return;
+  }
+
+  const runId = (await resp.json()).run_id;
+  currentRunId = runId;
+  setupEventSource(runId, turn);
+}
+
+// ---- 会话列表 / 切回 / 新会话 ----
+
+async function loadSessions() {
+  try {
+    const sessions = await (await fetch("/api/sessions")).json();
+    sessionListEl.innerHTML = "";
+    if (sessions.length === 0) {
+      sessionListEl.innerHTML = '<li class="muted">暂无历史会话</li>';
+      return;
+    }
+    for (const s of sessions) {
+      const li = document.createElement("li");
+      li.textContent = s.title;
+      li.title = "点击切回此会话";
+      li.addEventListener("click", () => switchTo(s.name));
+      sessionListEl.appendChild(li);
+    }
+  } catch (_) {
+    sessionListEl.innerHTML = '<li class="muted">加载会话失败</li>';
+  }
+}
+
+async function switchTo(name) {
+  if (currentRunId) return;   // 有任务时不能切回（后端也会 409）
+  const resp = await fetch(`/api/sessions/${encodeURIComponent(name)}/switch`, { method: "POST" });
+  if (!resp.ok) { alert(await resp.text()); return; }
+  messagesEl.innerHTML = "";
+  const data = await resp.json();
+  const turn = addAssistantTurn();
+  turn.querySelector(".bubble").textContent = `已切回「${data.title}」，继续聊吧`;
+  scrollBottom();
+  loadSessions();   // 目标会话已移回 active，刷新列表
+}
+
+async function newSession() {
+  if (currentRunId) return;
+  const resp = await fetch("/api/sessions/new", { method: "POST" });
+  if (!resp.ok) { alert(await resp.text()); return; }
+  messagesEl.innerHTML = "";
+  loadSessions();   // 当前会话已归档，刷新列表
+}
+
+// ---- 初始化 ----
+
+document.getElementById("composer").addEventListener("submit", (e) => {
+  e.preventDefault();
+  send();
+});
+
+cancelEl.addEventListener("click", async () => {
+  if (currentRunId) await fetch(`/api/runs/${currentRunId}/cancel`, { method: "POST" });
+});
+
+newSessionBtn.addEventListener("click", newSession);
+loadSessions();

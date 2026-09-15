@@ -21,6 +21,10 @@ rag = [
     "chromadb>=1.5",   # M7 工业向量库：下限取实测验证版本（1.5.9），教学版不需要，按需 pip install -e ".[rag]"
     "httpx>=0.28",     # MCP-r 远程客户端（HttpMcpClient）的网络库：同步 Client 只用一个
 ]
+web = [
+    "fastapi>=0.110",  # S2 Web 壳：SSE 走 Starlette 的 StreamingResponse，零新协议库
+    "uvicorn>=0.27",   # ASGI server，只绑 127.0.0.1（OpenClaw 调研：安全默认只绑 loopback）
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
