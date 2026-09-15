@@ -28,7 +28,7 @@ from agent.memory.store import (
     save_session,
 )
 from agent.memory.title import summarize_title
-from agent.orchestrator.assemble import MEMORY_PATH, AppContext
+from agent.orchestrator.assemble import MEMORY_PATH, AppContext, ensure_persona
 from agent.orchestrator.loop import run_turn
 from agent.paths import LEARNED_DIR, SESSIONS_DIR
 from agent.server.run_store import (
@@ -125,6 +125,8 @@ def _archive_current(ctx: AppContext) -> bool:
     ctx.session.summary = None
     ctx.session.summarized_upto = 1
     ctx.session.title = None
+    ensure_persona(ctx.session)   # 清空连 system 一起清了——第二场会话前必须补种，否则裸会话（语言/画像/政策全失效）
+    save_session(ctx.session, MEMORY_PATH)   # 收尾落盘（与 CLI /new 同款）：active 立即反映为新空会话——不落盘则磁盘残留旧会话，服务被杀后重启会「复活」已归档对话
     return True
 
 
@@ -135,6 +137,9 @@ def _switch_session(ctx: AppContext, archive_path) -> None:
     ctx.session.messages.extend(restored.messages)
     ctx.session.summary = restored.summary
     ctx.session.summarized_upto = restored.summarized_upto
+    ctx.session.title = restored.title
+    # 旧归档可能无 system（人设保证上线前的文件）——幂等补插+游标对齐
+    ensure_persona(ctx.session)
 
 
 def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:

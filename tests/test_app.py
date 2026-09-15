@@ -189,6 +189,26 @@ def test_empty_session_new_archives_nothing(tmp_path):
     assert list((tmp_path / "sessions").glob("*.json")) == []
 
 
+def test_new_session_reseeds_persona_after_clear(tmp_path):
+    # S2 验收修复轮#4：归档 clear 连 system 一起清——第二场会话曾变裸会话
+    # （真实复踩：新会话里中文提问收到英文回复）。修复后归档即补种人设，
+    # 新 active 落盘/内存都带 system。
+    from agent.orchestrator.loop import SYSTEM_PROMPT
+
+    ctx = _make_ctx()
+    ctx.session.messages.append(Message(role="system", content=SYSTEM_PROMPT))
+    ctx.session.messages.append(Message(role="user", content="第一场对话"))
+
+    client = TestClient(create_app(ctx))
+    assert client.post("/api/sessions/new").status_code == 200
+
+    assert [m.role for m in ctx.session.messages] == ["system"]   # 内存：新会话带人设
+    assert ctx.session.messages[0].content == SYSTEM_PROMPT
+    # 落盘：新 active 文件同样带人设（读回验证）
+    from agent.memory.store import load_session
+    assert load_session(tmp_path / "session.json").messages[0].role == "system"
+
+
 def test_switch_with_empty_current_does_not_archive_empty(tmp_path):
     # 切换时若当前会话为空：不归档空会话、只消耗目标（move 语义），归档数只减不增
     from agent.memory.store import save_session

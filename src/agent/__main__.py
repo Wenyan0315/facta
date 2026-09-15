@@ -12,7 +12,7 @@ from agent.cli import EXIT_NEW, run_chat
 from agent.memory.consolidate import consolidate
 from agent.memory.store import archive_session, derive_title, save_session
 from agent.memory.title import summarize_title
-from agent.orchestrator.assemble import MEMORY_PATH, assemble
+from agent.orchestrator.assemble import MEMORY_PATH, assemble, ensure_persona
 from agent.paths import LEARNED_DIR, SESSIONS_DIR
 
 VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
@@ -66,6 +66,7 @@ def main() -> None:
             session.summary = None
             session.summarized_upto = 1
             session.title = None
+            ensure_persona(session)   # clear 连 system 一起清——补种，新 active 落盘即带人设（与 Web 同款修复）
             save_session(session, MEMORY_PATH)   # active 立即反映为新空会话
             print(f"已归档「{title}」→ {archived.name}，新会话开始")
     finally:

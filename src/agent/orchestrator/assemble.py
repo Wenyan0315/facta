@@ -55,10 +55,15 @@ def ensure_persona(session: Session) -> None:
     """人设保证（装配不变量，S2 验收修复轮）：会话必须带着 SYSTEM_PROMPT 开工。
 
     「空会话种人设」原本只住在 CLI 壳——Web 入口曾跑过无人设会话（真实使用
-    踩中：语言漂移、信息政策失效、自我认知全靠模型编）。两分支：
+    踩中：语言漂移、信息政策失效、自我认知靠模型编）。两分支：
     - 空会话：种人设（与 cli.py 的守卫幂等——双方都判 messages 是否为空）
     - 历史遗留的无 system 会话（早期 Web 保存的文件）：头部补插；
       摘要游标随位移 +1 对齐（summarized_upto 数的是消息位置）
+
+    调用时机（S2 验收修复轮#4 补）：①服务启动（assemble 内）②归档清空后
+    （Web _archive_current / CLI /new）——第二场会话起 clear 会把 system 一并
+    清掉，而本函数只在启动跑一次的话，新会话=裸会话（真实复踩：英文回复
+    再现）。幂等，多处调用无副作用。
     """
     if not session.messages:
         session.messages.append(Message(role="system", content=SYSTEM_PROMPT))
