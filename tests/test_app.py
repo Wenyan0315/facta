@@ -181,6 +181,35 @@ def test_archive_new_session_sets_llm_title(tmp_path):
     assert load_session(archived[0]).title == "PHP 工具封装"   # 不是首句截断
 
 
+def test_empty_session_new_archives_nothing(tmp_path):
+    # S2 验收修复轮#3：空会话不进仓库——此前「点新会话」把空会话无条件归档，
+    # 列表长出「（空会话）」垃圾记录（会话数量感「变多」的一半根因）
+    client = TestClient(create_app(_make_ctx()))   # ctx.session 无任何消息
+    assert client.post("/api/sessions/new").status_code == 200
+    assert list((tmp_path / "sessions").glob("*.json")) == []
+
+
+def test_switch_with_empty_current_does_not_archive_empty(tmp_path):
+    # 切换时若当前会话为空：不归档空会话、只消耗目标（move 语义），归档数只减不增
+    from agent.memory.store import save_session
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    target = sessions_dir / "20260913-101956.json"
+    save_session(
+        Session(messages=[
+            Message(role="user", content="目标会话内容"),
+            Message(role="assistant", content="回复"),
+        ]),
+        target,
+    )
+
+    client = TestClient(create_app(_make_ctx()))   # 当前会话为空
+    assert client.post("/api/sessions/20260913-101956.json/switch").status_code == 200
+
+    assert list(sessions_dir.glob("*.json")) == []   # 目标已切回、空会话未被归档
+
+
 def test_cancel_interrupts_running_run():
     # 用注入的 store 造一个正在运行的 Run——避免真线程跑太快、cancel 追不上的竞态
     from agent.server.run_store import STATUS_RUNNING, RunStore

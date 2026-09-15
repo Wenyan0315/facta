@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.39（2026-09-15）｜随着里程碑推进持续迭代此文档
+> 版本：v0.40（2026-09-15）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 
 ## 设计原则
@@ -165,6 +165,6 @@
 | [009-mcp](decisions/009-mcp.md) | MCP | stdio+HTTP 双传输；服务器侧沙箱；mcp__ 前缀冲突治理；死菜摘牌；mcp_servers.json 配置化；Context7/GitHub 真三方验收 |
 | [010-streaming](decisions/010-streaming.md) | streaming | generate_stream 伪流默认；merge_stream_chunks 分片重组；网关四衣流式语义；取消走 KeyboardInterrupt 通道 |
 | [011-phase2-s1](decisions/011-phase2-s1.md) | 阶段二/S1 | 阶段二规划拍板（界面是壳/依赖驱动排序）；S1 多会话 active+archive；六标的业界调研；聊天网关与本地模型调研 |
-| [012-s2-web](decisions/012-s2-web.md) | S2 | S2a 分层清账（orchestrator 正名/内核外设分离/assemble 真值源）；S2b Web 壳（Run 三接口/SSE/Run Store/协作式取消/会话切回）；验收修复轮（人设保证/自我画像/流中取消③/每轮落盘/任务视图/历史回放/md 渲染/测试污染事故）；会话标题提炼（LLM 主题标签）；learned 幻觉污染清理 |
+| [012-s2-web](decisions/012-s2-web.md) | S2 | S2a 分层清账（orchestrator 正名/内核外设分离/assemble 真值源）；S2b Web 壳（Run 三接口/SSE/Run Store/协作式取消/会话切回）；验收修复轮（人设保证/自我画像/流中取消③/每轮落盘/任务视图/历史回放/md 渲染/测试污染事故）；会话标题提炼（LLM 主题标签）；learned 幻觉污染清理；会话数量不稳定修复（空会话守卫/同秒序号/互斥锁） |
 | [013-docs-adr-split](decisions/013-docs-adr-split.md) | 文档治理 | ADR 拆分本身（触发信号兑现；57 条 sha256 校验零改写） |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |

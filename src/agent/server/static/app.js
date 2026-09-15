@@ -8,6 +8,7 @@ const newSessionBtn = document.getElementById("new-session");
 
 let currentRunId = null;      // 单 in-flight：同一时刻只允许一个 Run
 let currentSource = null;     // 当前 EventSource
+let sessionBusy = false;      // 会话切换/新开 in-flight：防双击造成后端交错
 let pendingText = "";         // 当前 assistant 回合累积的流式文本
 let currentTextEl = null;     // 当前正在累积文本的元素（工具卡片后会重置）
 let rafPending = false;
@@ -245,18 +246,30 @@ async function loadMessages() {
 
 async function switchTo(name) {
   if (currentRunId) return;   // 有任务时不能切回（后端也会 409）
-  const resp = await fetch(`/api/sessions/${encodeURIComponent(name)}/switch`, { method: "POST" });
-  if (!resp.ok) { alert(await resp.text()); return; }
-  await loadMessages();       // 切回后回放完整历史，而不是只显示一句提示
-  loadSessions();             // 目标会话已移回 active，刷新列表
+  if (sessionBusy) return;    // 防双击：切换是慢操作（提标题+固化），连点会交错
+  sessionBusy = true;
+  try {
+    const resp = await fetch(`/api/sessions/${encodeURIComponent(name)}/switch`, { method: "POST" });
+    if (!resp.ok) { alert(await resp.text()); return; }
+    await loadMessages();       // 切回后回放完整历史，而不是只显示一句提示
+    loadSessions();             // 目标会话已移回 active，刷新列表
+  } finally {
+    sessionBusy = false;
+  }
 }
 
 async function newSession() {
   if (currentRunId) return;
-  const resp = await fetch("/api/sessions/new", { method: "POST" });
-  if (!resp.ok) { alert(await resp.text()); return; }
-  emptyHint("开始新的对话吧");
-  loadSessions();             // 当前会话已归档，刷新列表
+  if (sessionBusy) return;
+  sessionBusy = true;
+  try {
+    const resp = await fetch("/api/sessions/new", { method: "POST" });
+    if (!resp.ok) { alert(await resp.text()); return; }
+    emptyHint("开始新的对话吧");
+    loadSessions();             // 当前会话已归档，刷新列表
+  } finally {
+    sessionBusy = false;
+  }
 }
 
 // ---- 键盘习惯 ----

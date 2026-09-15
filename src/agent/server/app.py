@@ -50,6 +50,14 @@ _EVENT_MAP = {
 
 _HEARTBEAT_SECONDS = 15.0   # 无事件时的保活间隔（模型推理可能几十秒静默）
 
+# 会话状态互斥锁（S2 验收修复轮#3）：ctx.session 是共享可变对象 + 归档/切回
+# 动的是文件系统。真实使用踩中「快速点击会话列表，归档数时多时少」——两个
+# 切换请求交错执行（一个已 clear、另一个还在 save），文件系统被打成半成品。
+# 锁域 = 会话写操作（创建 Run / 开新会话 / 切换会话 + worker 落盘）；
+# 读操作（列表/历史/事件）不加锁。与 RunStore._lock 是两把独立锁，获取顺序
+# 恒为 _SESSION_LOCK → RunStore._lock，无环无死锁。
+_SESSION_LOCK = threading.Lock()
+
 
 class CreateRunRequest(BaseModel):
     """创建 Run 的请求体。系统边界处用 JSON Schema 校验（与工具同一纪律）。"""
@@ -88,19 +96,27 @@ def _run_worker(ctx: AppContext, run, user_text: str) -> None:
         run.emit("error", {"message": str(exc)})
     finally:
         try:
-            save_session(ctx.session, MEMORY_PATH)
+            # 落盘也进互斥域：与切换会话的 save/clear 序列化，防交错写半成品
+            with _SESSION_LOCK:
+                save_session(ctx.session, MEMORY_PATH)
         except Exception as exc:   # 落盘失败不吞终态：告知用户，流照常收口
             run.emit("error", {"message": f"会话落盘失败：{exc}"})
         run.finish(status)
 
 
-def _archive_current(ctx: AppContext) -> None:
+def _archive_current(ctx: AppContext) -> bool:
     """切出当前会话：提炼标题 → save → 复盘 → 归档 → 清空内存（原地 clear，不 rebind）。
 
     与 CLI /new 同一序列。标题在 save 之前提炼写进 session.title——save 落盘、
     归档复制（copy2）都带它，列表读取零 LLM 调用（提炼成本只在归档时付一次）。
     提炼失败 fallback 到首句派生，不阻断归档。
+
+    空会话守卫（S2 验收修复轮#3）：没有 user 消息的会话不进仓库——此前切换时
+    把空当前会话无条件归档，列表里长出「（空会话）」垃圾记录。返回是否归档。
+    调用方（_switch_session/端点）必须在 _SESSION_LOCK 内调本函数。
     """
+    if not any(m.role == "user" for m in ctx.session.messages):
+        return False
     ctx.session.title = summarize_title(ctx.session, ctx.internal_llm) or derive_title(ctx.session)
     save_session(ctx.session, MEMORY_PATH)
     consolidate(ctx.session, ctx.internal_llm, LEARNED_DIR, since=0)   # v1 简化：全量复盘
@@ -109,6 +125,7 @@ def _archive_current(ctx: AppContext) -> None:
     ctx.session.summary = None
     ctx.session.summarized_upto = 1
     ctx.session.title = None
+    return True
 
 
 def _switch_session(ctx: AppContext, archive_path) -> None:
@@ -127,11 +144,13 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
 
     @app.post("/api/runs", status_code=202)
     def create_run(body: CreateRunRequest):
-        run = store.create_if_idle(title=body.text[:60])
-        if run is None:
-            raise HTTPException(409, "已有任务在运行，请稍候再发")
-        # daemon 线程：服务退出时不留阻塞；请求线程立即 202 返回
-        threading.Thread(target=_run_worker, args=(ctx, run, body.text), daemon=True).start()
+        # 锁防竞态：created run 期间会话不可被切换（同一互斥域）
+        with _SESSION_LOCK:
+            run = store.create_if_idle(title=body.text[:60])
+            if run is None:
+                raise HTTPException(409, "已有任务在运行，请稍候再发")
+            # daemon 线程：服务退出时不留阻塞；请求线程立即 202 返回
+            threading.Thread(target=_run_worker, args=(ctx, run, body.text), daemon=True).start()
         return {"run_id": run.run_id}
 
     @app.get("/api/runs/{run_id}/events")
@@ -191,19 +210,21 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
 
     @app.post("/api/sessions/new")
     def new_session():
-        if store.active_run() is not None:
-            raise HTTPException(409, "有任务在运行，无法开新会话")
-        _archive_current(ctx)
+        with _SESSION_LOCK:
+            if store.active_run() is not None:
+                raise HTTPException(409, "有任务在运行，无法开新会话")
+            _archive_current(ctx)
         return {"ok": True}
 
     @app.post("/api/sessions/{name}/switch")
     def switch_session(name: str):
-        if store.active_run() is not None:
-            raise HTTPException(409, "有任务在运行，无法切换会话")
-        archive_path = SESSIONS_DIR / name
-        if not archive_path.is_file():
-            raise HTTPException(404, "会话不存在")
-        _switch_session(ctx, archive_path)
+        with _SESSION_LOCK:
+            if store.active_run() is not None:
+                raise HTTPException(409, "有任务在运行，无法切换会话")
+            archive_path = SESSIONS_DIR / name
+            if not archive_path.is_file():
+                raise HTTPException(404, "会话不存在")
+            _switch_session(ctx, archive_path)
         return {"title": derive_title(ctx.session)}
 
     # 历史消息：当前 active 会话的 user/assistant 轮（system=人设、tool=中间产物，

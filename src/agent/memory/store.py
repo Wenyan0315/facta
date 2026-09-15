@@ -83,7 +83,9 @@ def archive_session(path: Path, archive_dir: Path, now: datetime | None = None) 
 
     - 文件名即身份（机器）：唯一、零填充 `%Y%m%d-%H%M%S` 保证「字典序 = 时间序」，
       列历史清单 sorted() 文件名即可，不用读内容
-    - 标题是标签（人看）：这里不生成——由调用方派生（用户消息首句），
+    - 同秒归档冲突：目标已存在时追加 `-1`/`-2` 序号（S2 验收修复轮#3——
+      真实快速点击曾让同秒两次归档覆写，归档数凭空变少）
+    - 标题是标签（人看）：这里不生成——由调用方派生或 LLM 提炼，
       身份和标签分离，不往文件名里塞易漂移的文本
     - 用 shutil.copy2 复制而非 rename：文件消失前先复制成功，
       「先存后清」的语义就落在这里——调用方确认本函数成功后才重置内存
@@ -91,7 +93,14 @@ def archive_session(path: Path, archive_dir: Path, now: datetime | None = None) 
     """
     archive_dir.mkdir(parents=True, exist_ok=True)
     now = now or datetime.now()
-    target = archive_dir / f"{now:%Y%m%d-%H%M%S}.json"
+    base = f"{now:%Y%m%d-%H%M%S}"
+    target = archive_dir / f"{base}.json"
+    counter = 1
+    while target.exists():
+        # 同秒归档不覆写（S1 记录的边界兑现：触发信号=高频 /new 场景，
+        # Web 快速点击切换已实测撞上）——追加序号而非覆盖，旧会话文件保命
+        target = archive_dir / f"{base}-{counter}.json"
+        counter += 1
     shutil.copy2(path, target)
     return target
 
@@ -127,7 +136,12 @@ def list_archived_sessions(archive_dir: Path) -> list[tuple[Path, str]]:
         return []
     items = []
     for path in sorted(archive_dir.glob("*.json")):
-        session = load_session(path)
+        try:
+            session = load_session(path)
+        except (json.JSONDecodeError, TypeError):
+            # 损坏文件跳过不炸清单（写盘中途被杀会留 partial write——
+            # 清单读取是展示路径，不该被一个坏文件整垮）
+            continue
         items.append((path, session.title or derive_title(session)))
     return items
 

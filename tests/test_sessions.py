@@ -62,6 +62,24 @@ def test_archive_creates_dir_on_first_run(tmp_path):
     assert target.exists()   # mkdir(parents=True) 建出的深层目录里躺着归档
 
 
+def test_archive_same_second_appends_counter_not_overwrite(tmp_path):
+    # 同秒归档不覆写（S2 验收修复轮#3）：Web 快速点击切换曾让同秒两次归档
+    # 共用一个文件名，后写覆盖先写——归档数凭空变少。追加序号保命。
+    store = tmp_path / "sessions"
+    active = tmp_path / "session.json"
+    stamp = datetime(2026, 9, 13, 10, 19, 56)
+
+    _saved_session(active, "第一个会话")
+    first = archive_session(active, store, now=stamp)
+    _saved_session(active, "第二个会话")
+    second = archive_session(active, store, now=stamp)
+
+    assert first.name == "20260913-101956.json"
+    assert second.name == "20260913-101956-1.json"   # 同秒 → 序号，不覆写
+    assert load_session(first).messages[1].content == "第一个会话"
+    assert load_session(second).messages[1].content == "第二个会话"
+
+
 # ---------- 标题派生（身份 vs 标签） ----------
 
 def test_derive_title_takes_first_user_first_line():
@@ -111,6 +129,20 @@ def test_list_sorts_by_time_ascending(tmp_path):
 
 def test_list_missing_dir_returns_empty(tmp_path):
     assert list_archived_sessions(tmp_path / "不存在") == []
+
+
+def test_list_skips_corrupt_files(tmp_path):
+    # 损坏文件跳过不炸清单（写盘中途被杀会留 partial write）
+    store = tmp_path / "sessions"
+    store.mkdir()
+    active = tmp_path / "session.json"
+    _saved_session(active, "完好会话")
+    archive_session(active, store, now=datetime(2026, 9, 13, 10, 19, 56))
+    (store / "20260912-000000.json").write_text("{ 半截", encoding="utf-8")   # 坏文件
+
+    items = list_archived_sessions(store)
+    assert len(items) == 1
+    assert items[0][1] == "完好会话"
 
 
 # ---------- run_chat 退出原因契约 ----------
