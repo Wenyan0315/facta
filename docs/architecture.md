@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.35（2026-09-13）｜随着里程碑推进持续迭代此文档
+> 版本：v0.36（2026-09-15）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块/决策）时，同步更新本文件并提升版本号
 
 ## 设计原则
@@ -17,16 +17,18 @@
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                        用户交互层                              │
-│          CLI（现在）→ Web UI / API（以后可选）                  │
+│          ✅ CLI（cli.py 壳）｜ ✅ Web UI（S2b 对话视图）    │
+│          以后：任务视图（S2 预留）/ IM 渠道（S8）              │
 └──────────────────────────┬───────────────────────────────────┘
                            │
 ┌──────────────────────────▼───────────────────────────────────┐
-│                     入口  __main__.py                         │
-│              组装各层依赖，启动 agent（依赖注入）                │
+│       入口 __main__.py（CLI）/ server/__main__.py（Web）       │
+│         装配唯一真值源：orchestrator/assemble.py（依赖注入）    │
 └──────────────────────────┬───────────────────────────────────┘
                            │
 ┌──────────────────────────▼───────────────────────────────────┐
-│  ★ core/  Agent 主循环（大脑）                                 │
+│  ★ orchestrator/ 编排层：run_turn 主循环（大脑）               │
+│    core/ 地基：types / llm / 网关 / 账本 / 向量数学             │
 │                                                              │
 │   ┌─────────────────────────────────────────────────┐        │
 │   │  ✅ 感知 → 决策 ⇄ 行动(工具，检索亦工具) → 观察     │        │
@@ -90,11 +92,13 @@
 
 | 层 | 现状 | 建成后 |
 |---|------|--------|
-| core 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb；streaming 流式消费（分片边收边打→merge 拼回复；内部调用照旧非流） | 并行工具调用 / 更复杂的规划策略 |
+| core 地基 | ✅ types / llm 接口+实现 / 网关四件套 / 账本 / 向量数学——最底层不反认上层（S2a 依赖方向拨正） | 更多供应商 + 多模型路由 |
+| orchestrator 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb；streaming 流式消费（分片边收边打→merge 拼回复；内部调用照旧非流）；S2a 内核/外设分离：run_turn 零 input/print，I/O 走 on_text/on_event/should_cancel 三条缝；S2b 协作式取消两检查点 | 并行工具调用 / 更复杂的规划策略 |
 | LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/siliconflow) + 进程内网关(M7.5：记账/重试超时/精确+语义缓存/熔断三态/降级链+优雅兜底) | 更多供应商 + 多模型路由 |
 | knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集) | 知识图谱 |
-| memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘）+ 多会话管理（S1：active+archive，/new 归档重开） | 用户级记忆仓库外位置 |
+| memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘）+ 多会话管理（S1：active+archive，/new 归档重开）+ restore_session 原语（S2a：归档写回 active 后删除，move 语义） | 用户级记忆仓库外位置 |
 | tools | ✅ Tool+ToolRegistry+6内置工具(时间/清单/读/写/检索/检索+摘要)；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型) | 更多工具 + MCP + skills |
+| server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + /tasks 占位；静态三件零构建链；只绑 127.0.0.1 | 任务视图（S2 预留）；Run Store 外置（多实例触发） |
 | evals | ✅ 检索评估(P/R@k, MRR, 双实现对比) + LLM-as-judge 回答质量(基线 13/13 合格, 0% 错误, 全轮 ¥0.011) | 更难的对抗题库 + 回答质量回归 |
 | data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据)；data/learned/*.md 项目级长时记忆(M6.4，进 git) | 长文档、多来源 |
 
@@ -123,7 +127,7 @@
 | streaming ✅ | 流式输出：generate_stream 接口（默认伪流，老实现零改动）+ 真流实现 + 分片重组纯函数 + 网关四衣流式语义；用户取消复用中断通道 | 增量协议、生成器惰性 |
 | 阶段二 | —— coding agent 产品化（2026-09-13 规划拍板，方向提前定、细节临期定）—— | 实战整合 |
 | S1 ✅ | 多会话管理：/new 会话隔离（active+archive：位置固定无指针、文件名=身份/标题=标签、先存后清、原地清不 rebind） | 状态管理 |
-| S2 | 产品骨架：Web UI 双视图（对话协作 + 任务委派/状态）｜形态裁定：界面是壳内核不变，Web 起步；v1 先做对话视图，信息架构按双视图预留；**开工附带清账：agent_loop 分层正名（现住 core 却依赖 memory/tools）** | 前后端、SSE |
+| S2 ✅ | 产品骨架 v1 对话视图：S2a 清账（agent_loop 正名 orchestrator 编排层、run_turn 内核/外设分离、assemble 装配单一真值源）→ S2b Web 壳（FastAPI+SSE：Run 三接口分离、内存 Run Store 单锁状态机、断线重连重放、会话切回、零构建链前端三件）；任务视图按双视图预留未实现 | 前后端、SSE、Run 状态机 |
 | S3 | 安全底座：提示词注入防护 + 工具权限栅栏 + 审计日志（M9 前安全课升级为里程碑；先栅栏后开门） | 安全 |
 | S4 | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）；**开工附带清账：builtin.py 拆分（工具数>10 触发）+ 补 knowledge_base/builtin 测试护栏** | 文件系统、进程调度 |
 | S5 | skill 系统：可复用技能包与装载（2026-09 需求点名）+ 规则文件（AGENTS.md 式，learned 的读取侧） | 插件化 |
@@ -208,3 +212,5 @@
 - **S1 多会话管理落地（2026-09-13，阶段二第一站）**：`data/memory/session.json`（active）+ `data/memory/sessions/{零填充时间戳}.json`（archive）双区结构，`/new` 命令沿「信号上抛、执行下放」接通多层。**①store 层三个原子操作**：`archive_session`（copy2 复制归档、命名=身份、`now` 参数供测试注入；复制而非 rename——active 位置固定，副本才进仓库）、`derive_title`（标签=第一条 user 首句派生截 20 字，不另存——派生即同步，不存在第二条真值）、`list_archived_sessions`（sorted 文件名=时间序，S2 会话列表原料；升级触发信号 >20 文件/10MB 换索引）。**②agent_loop 层**：`run_chat` 返回值 `Session → (Session, 退出原因)`，原因三值 quit/new/interrupt——分层矛盾（agent_loop 不碰文件 vs /new 全是文件操作）的解法：知道意图的层发信号、管文件的层执行。**③__main__ 装配层**：多会话 while 循环，new 时执行**先存后清**——save 成功后归档、归档成功才清内存、清完立刻写新 active，任一步失败旧对话都还在真值位置。**④列表身份陷阱的反面教材**：/new 后清内存用 `session.messages.clear()` 原地清、绝不 rebind——search_history 闭包抓的是列表对象本身（M6.3 教训正用）；同理 MCP 客户端只在最终退出时关（多会话期间关了下一轮工具全死）、consolidate 的 `loaded_len` 每轮重取（/new 后新会话从 0 起复盘）。**⑤验收**：10 条测试（归档复制保留 active/命名/建目录/标题截断与多行压平/空会话占位/清单排序/空目录/exit-new 信号/exit-quit 信号）+ mock 全链路冒烟（话一 → /new → 话二 → 退出：归档 33 条带正确标题、active 剩 3 条第二段、现场恢复原状）。全量 124→134。已知边界：无「切回历史会话」（读历史走 list+load 手工）、无会话删除（数据只进不出，触发信号=仓库膨胀）、归档冲突文件名同秒会覆写（触发信号=自动化高频 /new 场景，届时加毫秒或序号）。
 - **业界调研与路线图吸收（2026-09-13，六标的交叉验证）**：调研六个标的——**Claude Code**（两度泄露的 51 万行 TS：QueryEngine 集中式 token 预算预检、五层压缩、Coordinator-Worker、工具元数据 isReadOnly/isConcurrencySafe）、**DeepSeek Harness**（Cordis 微内核「一切皆插件」、「模型可见即已记录」append-only 事件流、Minimal 评测模式）、**OpenCode**（客户端-服务器三形态同核、Plan/Build 模式、LSP 反馈、AGENTS.md）、**Trae**（Chat/Builder/SOLO 三级自主度、可配置智能体体系、TRAE Rules）、**Qoder**（Editor/Quest 双窗口、Human on the Loop、RepoWiki 代码结构知识化）、**Cursor**（Shadow Workspace 隐藏窗口 LSP 迭代、SVFS/worktree 多 agent 冲突治理、subagent 噪声隔离判据；$1B ARR 且 Agent 用户已 2 倍于补全用户）。**六大共识**：①界面是壳（第六次验证，S2 Web 起步维持）②自主度分层是产品形态——协作对话与任务委派是两种形态，各家都分 ③subagent 价值核心=噪声隔离（大中间产物留子代、父代只看摘要）④LSP 反馈不可绕过的质量来源 ⑤规则文件是标准件（六家五家做）⑥repo 知识化是下一战场。**路线图级吸收（5 条，已改行+设计原则）**：S2 升级双视图骨架（v1 先对话视图、信息架构预留任务视图）；S6 增补 subagent 判据（噪声隔离 + worktree 机制）；S4 工业版目标明确为 LSP 反馈环（Shadow Workspace 思路）；规则文件并入 S5（learned 的读取侧）；Human on the Loop 写入设计原则。**素材库级（5 条，供临期取用不占路线图）**：⑥token 预算预检（发请求前先算投影 token，超了先裁低优先级上下文再发——现状「消息条数粗代理」的升级）⑦工具元数据化（isReadOnly/isConcurrencySafe——只读并行、修改串行，S3 栅栏设计）⑧审计流事件化（append-only 事件流支持恢复/fork/回放共享同一来源——底片已做到 80%，S3 审计升级方向）⑨多 agent 并发冲突治理（虚拟树/worktree→逻辑合并→人单点批准，S6 隔离机制）⑩评测驱动+模型路由（harness 内置评测模式、benchmark 驱动模型迭代、模型选择器是标配——evals 演进与阶段二 LLM Router）。**否决档案（各带触发信号）**：Tab 补全/Cue 预测——IDE 壳层能力，回本需海量用户，触发信号=产品形态真变 IDE；云会话迁移（Cursor 3 云↔本地 handoff）——需云基建，触发信号=多用户/团队版排期；RepoWiki 十万文件级规模——S7 v0.1 够用即止，触发信号=代码库知识化需求实测出现。
 - **聊天网关与本地模型调研（2026-09-13，OpenClaw/Hermes/Ollama）**：聊天工具控制的业界解是 **Gateway 模式**——**OpenClaw**（MIT：单 gateway 进程=唯一控制面，本地 WebSocket control plane；10+ IM 渠道经适配器归一化成标准消息格式后再进 agent；安全默认只绑 loopback、DM 配对、群聊 Docker 沙箱隔离）与 **Hermes Agent**（Nous Research，MIT：五平台+CLI 单 gateway、跨平台会话延续、**闭环学习**=周期性记忆提示+自主 skill 创建+跨会话召回，与 M6.4 learned/S5 同构；原生支持 local vLLM）。**架构映射**：IM 渠道=agent_loop 的**新入口类型**，与既定 headless 任务模式同族——「谁喂消息、谁看输出」的四变体（CLI/Web/IM/定时）→ 合并为 **S8 多入口 Gateway**。gateway 是常驻进程，意味着重审「不 daemon 化」原则：该原则原意是不自建调度器（定时触发归系统 cron），常驻 gateway 是新物种，边界在 S8 开工时细定。**本地模型裁定（Ollama）**：2026 本地部署事实标准，暴露 OpenAI 兼容 `/v1` 端点——OpenAICompatibleLLM 理论上**零代码接入**（又一个「供应商」，换件不换衣服的第七次验证）；工具调用可靠性红线：<7B 模型 tool calls 高频畸形、Qwen3 8B 起步；已踩坑三条记入素材：Qwen3.6 需 `enable_thinking=false` 模板参数（否则 tool calls 进思考通道）、Gemma4 默认 thinking 致 content 空、num_ctx 超显存→静默 CPU 降速非报错。**排期裁定**：本地模型进另排期 L1（触发信号=需要零成本/离线验收链路或隐私优先场景时排期）；渠道 Gateway 排 S8（阶段二后段，依赖 S2 会话架构与飞书/IM 官方 API 实践）。
+- **S2a 分层清账（2026-09-15，S2 开工附带项）**：诊断——agent_loop 住 core/ 却 import memory/tools/knowledge，最底层反认上层（P1 依赖方向病的复发）；且 run_chat 体内 input/print 直出，Web 壳无法复用。裁定四件：①**编排层正名**——loop.py 迁 `orchestrator/`，定位「编排各层的编排层」；core/ 回归地基（types/llm 接口/网关/账本/向量数学），只被上层认识、不认识任何上层。②**内核/外设分离**——run_chat 拆成 `run_turn(session, user_text, ...)` 纯内核（零 input/print，I/O 走 `on_text`/`on_event` 两条回调缝，副作用归调用方注入——streaming 里程碑 on_text 缝的推广）+ `cli.py` 薄壳（input/print/退出词表）；Web 壳直接复用同一内核，「界面是壳内核不变」落到代码结构。③**装配单一真值源**——`orchestrator/assemble.py::assemble(provider) → AppContext`（provider/双 LLM 链/kb/session/registry/mcp_clients 一本账），CLI 与 Web 两个入口共用，`__main__` 只剩 argv 解析与多会话循环。④store 新增 `restore_session`（move 语义：归档读回 active 后删除归档）——S2b 会话切回的地基。验收：136 用例全绿 + CLI mock 冒烟逐项一致。
+- **S2b Web 壳（2026-09-15，S2 v1 对话视图落地）**：选型落定 **FastAPI + SSE**——SSE 与 streaming 里程碑的增量协议同构（服务端单向推送够用，不上 WebSocket 双向）；前端静态三件（HTML/CSS/JS）零构建链；fastapi/uvicorn 进 pyproject `web` 可选组（与 chromadb 同纪律：教学路径不背重依赖）。**①Run 三接口分离**：POST /api/runs 创建（202 立即返回，后台 daemon 线程跑 run_turn）→ GET /api/runs/{id}/events SSE 订阅 → POST /api/runs/{id}/cancel。**断开 ≠ 取消**：浏览器断开后台照跑，事件落 Run Store，重连后 EventSource 自动带 Last-Event-ID 按 seq 重放缺的事件（重放段与实时段用 seq 哨兵去重）。**②Run Store 内存状态机**：pending→running→{completed|failed|cancelled}，**单一终态不变量**（finish 重复调用不覆盖；终态事件 run.{status} 先进事件流再发结束哨兵——客户端靠终态事件渲染成败，不靠「流断了」猜）；事件 append-only + seq 位置键（排序/去重/重放一键三用），schema_version 版本护栏；**单锁 create_if_idle 原子**——session 是共享可变对象，并发两个 Run 互踩 messages，多并发留 S6。Run/Step/Attempt 三层执行模型 v1 只显式建模 Run，Step/Attempt 落注释（YAGNI）。**③协作式取消**：run_turn 新增第三条缝 `should_cancel`，检查点=每次模型调用前+每次工具执行前（命中则掐半截轮、user 消息留底片、不发事件——cancelled 是 Run 级终态归调用方）；已知边界：流式生成中途无法即时中断（同步生成器），CLI 照旧走 KeyboardInterrupt 通道。**④SSE 编码纯函数**：encode_sse/encode_heartbeat 独立单测（协议边界不可测，下游 bug 全出现在字节里）；`json.dumps(ensure_ascii=False)` 中文原样且自动转义换行/引号/反斜杠防撕破单行 data 帧；心跳用 SSE 注释行（不占业务 seq）。**⑤安全默认只绑 127.0.0.1**（业界调研吸收：本机单人使用）；请求体 pydantic 校验（系统边界与工具层同一纪律）。**⑥会话切回**：/api/sessions 三端点复用 S1 store 原语——切出当前（save→复盘→归档→原地清）→ restore_session 切入 → **内存原地换血（clear+extend 绝不 rebind：search_history 闭包抓的是列表对象，S1 列表身份陷阱的正面应用）**；有 Run 在跑时禁切（409）。**⑦前端**：EventSource 按 event type 路由渲染、requestAnimationFrame 节流合并刷新、工具调用渲染为卡片；/tasks 占位返回「预留未实现」（双视图信息架构预留兑现）。测试新增 14 条（状态机/编码器纯函数/取消两检查点/FastAPI 壳全生命周期与 404），全量 136→150 + 2 live 跳过；curl 端到端验证 SSE 完整生命周期（run.started→text.delta 中文不丢→run.completed）。已知边界（各带触发信号）：Run Store 内存版（多实例部署换 Redis/DB）；切会话时 consolidate 全量复盘（since=0 简化）；单订阅者队列（多客户端同时订同一 Run 需扇出）。
