@@ -68,6 +68,21 @@ def test_tools_registered_and_usable(tmp_path):
     assert "不exist".replace("exist", "存在") in registry.execute("complete_todo", '{"todo_id": 9}')
 
 
+def test_boolean_param_passes_validation(tmp_path):
+    # 回归（真实事故：模型调 list_todos 传 only_pending:true 被「应为数字」误拒）
+    # 根因：registry 校验器 and/or 优先级漏括号——bool 值一律命中 number 分支。
+    # 用事故现场的真实工具+真实参数钉死。
+    store = _store(tmp_path)
+    registry = ToolRegistry()
+    register_todo_tools(registry, store)
+    store.add("没做的")
+
+    out = registry.execute("list_todos", '{"only_pending": true}')
+    assert "没做的" in out and "错误" not in out   # bool 放行，正常列出
+    out_false = registry.execute("list_todos", '{"only_pending": false}')
+    assert "错误" not in out_false
+
+
 def test_agent_and_ui_share_one_store(tmp_path):
     # 工具（agent）与 API 共用同一实例——UI 添加的，agent 能看到；反之亦然
     store = _store(tmp_path)

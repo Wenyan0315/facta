@@ -47,7 +47,9 @@ def _validate_args(args: dict, parameters: dict) -> str | None:
             return f"参数 {key} 应为字符串，实际 {actual}"
         if expected == "integer" and not (isinstance(value, int) and not isinstance(value, bool)):
             return f"参数 {key} 应为整数，实际 {actual}"  # bool 是 int 子类，显式排除
-        if expected == "number" and not isinstance(value, (int, float)) or isinstance(value, bool):
+        if expected == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
+            # 括号必须齐全：and 优先级高于 or，漏括号会让所有 bool 值
+            # 一律误报「应为数字」（list_todos 的 only_pending:true 曾中招）
             return f"参数 {key} 应为数字，实际 {actual}"
         if expected == "boolean" and not isinstance(value, bool):
             return f"参数 {key} 应为布尔，实际 {actual}"
