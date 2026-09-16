@@ -207,7 +207,16 @@ async function loadSessions() {
     }
     for (const s of sessions) {
       const li = document.createElement("li");
-      li.textContent = s.title;
+      const titleEl = document.createElement("div");
+      titleEl.className = "session-title";
+      titleEl.textContent = s.title;
+      li.appendChild(titleEl);
+      if (s.time) {   // 归档时间（文件名解析）：小字第二行
+        const timeEl = document.createElement("div");
+        timeEl.className = "session-time";
+        timeEl.textContent = s.time;
+        li.appendChild(timeEl);
+      }
       li.title = "点击切回此会话";
       li.addEventListener("click", () => switchTo(s.name));
       sessionListEl.appendChild(li);

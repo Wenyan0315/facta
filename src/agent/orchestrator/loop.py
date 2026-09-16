@@ -32,6 +32,8 @@ SYSTEM_PROMPT = (
     "内置工具：get_current_time、list_notes、read_note、write_note、search_notes"
     "（BGE-M3 语义检索 + Chroma 向量库，语料是 data/notes/ 的 Markdown 笔记）、"
     "search_and_summarize、search_history、read_history；"
+    "联网工具（有 key 时可用）：web_search（实时信息/天气/新闻/股价）、"
+    "fetch_web（读网页全文）；"
     "另有 MCP 外部工具按配置接入（mcp__ 前缀）。"
     "会话记忆 JSON 持久化 + 滚动摘要压缩，跨会话沉淀进 data/learned/。"
     "分层：orchestrator 编排 / core 网关地基 / knowledge 检索 / memory 记忆 / "

@@ -30,6 +30,7 @@ from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 from agent.tools.mcp_config import assemble_servers, load_server_specs
 from agent.tools.registry import ToolRegistry
+from agent.tools.web import TavilySearch, register_web_tools
 
 # 组装层唯一真值源：CLI / Web 都从这里拿路径，不在各自入口重定义
 MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx）
@@ -127,16 +128,23 @@ def assemble(provider: str) -> AppContext:
     #    history 给会话内检索
     #    （闭包注入，传列表对象本身而非副本——run_turn 原地 append，
     #    工具才能实时看到全部历史）、notes_dir 消灭工具层写死的路径
+    # 5.5) 联网工具（2026-09-16）：有 TAVILY_API_KEY 才建 client、才上菜单
+    #      （条件注册，与 kb=None 同语义——mock 路径不背联网依赖）。
+    #      key 纪律同 .env 其余条目：代码只读环境变量
+    tavily_key = os.environ.get("TAVILY_API_KEY", "")
+    web_client = TavilySearch(tavily_key) if tavily_key else None
     registry = ToolRegistry()
     ctx = ToolContext(
         notes_dir=NOTES_DIR,
         kb=kb,
         llm=internal_llm,
         history=session.messages,
+        web=web_client,
     )
     register_builtin(registry, ctx)
+    register_web_tools(registry, ctx)
 
-    # 5.5) MCP 外部工具（MCP-config 配置化）：改 mcp_servers.json 加工具，零代码。
+    # 6) MCP 外部工具（MCP-config 配置化）：改 mcp_servers.json 加工具，零代码。
     #      命令型穿 stdio、URL 型穿 streamable HTTP；单台失败只警告不阻断；
     #      MCP_SERVERS 环境变量可指向个人配置（带 API key 的那种，不进仓库）
     try:

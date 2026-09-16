@@ -208,8 +208,15 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     # 会话列表与切回（S2 会话列表原料 = store.list_archived_sessions）
     @app.get("/api/sessions")
     def list_sessions():
+        # time 从文件名解析（身份=时间戳，展示层格式化）——「09-15 23:15」
+        import re
+
+        def _time_from_name(name: str) -> str:
+            m = re.match(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})", name)
+            return f"{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}" if m else ""
+
         return [
-            {"name": path.name, "title": title}
+            {"name": path.name, "title": title, "time": _time_from_name(path.name)}
             for path, title in list_archived_sessions(SESSIONS_DIR)
         ]
 

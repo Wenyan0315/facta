@@ -74,6 +74,8 @@ body {
 }
 
 #session-list li:hover { background: var(--bg); }
+.session-title { overflow: hidden; text-overflow: ellipsis; }
+.session-time { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .muted { color: var(--muted); }
 
 /* 主聊天区 */
