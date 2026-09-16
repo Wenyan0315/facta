@@ -261,7 +261,43 @@ def test_sessions_list_includes_current_on_top(tmp_path):
     assert "current" not in items[1]
 
 
-def test_todos_api_roundtrip(tmp_path):
+def test_ensure_persona_merges_duplicate_system_messages():
+    # 换血 bug 时期残留自愈：头部多条 system 合并为一条，游标左移
+    from agent.core.types import Message
+    from agent.memory.store import Session
+    from agent.orchestrator.assemble import ensure_persona
+
+    s = Session()
+    s.messages = [Message(role="system", content="人设A"), Message(role="system", content="人设B"),
+                  Message(role="system", content="人设C"), Message(role="user", content="你好")]
+    s.summarized_upto = 4
+    ensure_persona(s)
+    assert [m.role for m in s.messages] == ["system", "user"]
+    assert s.messages[0].content == "人设A"   # 保留第一条
+    assert s.summarized_upto == 2              # 4 - 2 条重复
+
+
+def test_switch_replaces_memory_completely(tmp_path):
+    # 换血无条件清：空会话切换不残留旧消息（4 条 system 的根因）
+    from agent.memory.store import save_session
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    target = sessions_dir / "20260913-101956.json"
+    save_session(Session(messages=[Message(role="system", content="目标人设"),
+                                   Message(role="user", content="目标会话")]), target)
+
+    ctx = _make_ctx()   # 当前空会话（仅启动时的 system？不——空 Session 无消息）
+    client = TestClient(create_app(ctx))
+    assert client.post("/api/sessions/20260913-101956.json/switch").status_code == 200
+
+    # 换血后内存 = 目标会话原样，不与切换前的任何残留拼接
+    assert [m.role for m in ctx.session.messages] == ["system", "user"]
+    assert ctx.session.messages[1].content == "目标会话"
+    assert sum(1 for m in ctx.session.messages if m.role == "system") == 1
+
+
+def test_todos_api_roundtrip():
     # 个人待办三端点：添加 201 → 列表 → 勾销 → 404（未知 id）
     client = TestClient(create_app(_make_ctx()))
 

@@ -66,10 +66,26 @@ def ensure_persona(session: Session) -> None:
       摘要游标随位移 +1 对齐（summarized_upto 数的是消息位置）
 
     调用时机（S2 验收修复轮#4 补）：①服务启动（assemble 内）②归档清空后
-    （Web _archive_current / CLI /new）——第二场会话起 clear 会把 system 一并
-    清掉，而本函数只在启动跑一次的话，新会话=裸会话（真实复踩：英文回复
-    再现）。幂等，多处调用无副作用。
+    （Web _archive_current / CLI /new）③切回换血后（_switch_session）——
+    清空/换血动作发生在运行时，本函数只在启动跑一次的话，新会话=裸会话
+    （真实复踩：英文回复再现）。幂等，多处调用无副作用。
+
+    自愈（浏览器验收补）：头部连续多条 system（换血 bug 时期的残留）合并为
+    一条——保留第一条，删其余；摘要游标随删除数左移。
     """
+    # 自愈：合并头部重复 system（历史残留数据修复，游标对齐）
+    if session.messages and session.messages[0].role == "system":
+        dup = 0
+        for m in session.messages[1:]:
+            if m.role == "system":
+                dup += 1
+            else:
+                break
+        if dup:
+            del session.messages[1 : 1 + dup]
+            if session.summarized_upto:
+                session.summarized_upto = max(1, session.summarized_upto - dup)
+
     if not session.messages:
         session.messages.append(Message(role="system", content=SYSTEM_PROMPT))
     elif session.messages[0].role != "system":

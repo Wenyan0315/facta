@@ -137,9 +137,16 @@ def _archive_current(ctx: AppContext) -> bool:
 
 
 def _switch_session(ctx: AppContext, archive_path) -> None:
-    """切回历史会话：切出当前 → 切入目标（move 语义）→ 内存原地换血。"""
+    """切回历史会话：切出当前 → 切入目标（move 语义）→ 内存原地换血。
+
+    换血无条件清（浏览器验收抓到的 bug）：_archive_current 对空会话不动内存，
+    若此处不显式 clear，残留消息会与目标会话拼接——真实使用中 active 里攒出
+    4 条重复 system（每次空会话切换漏一次清）。换血的语义就是「全换」，
+    不依赖上一步是否清过。
+    """
     _archive_current(ctx)
     restored = restore_session(archive_path, MEMORY_PATH)   # 归档写回 active 后消失
+    ctx.session.messages.clear()      # 无条件清：不信任上一步的清（空会话路径没清）
     ctx.session.messages.extend(restored.messages)
     ctx.session.summary = restored.summary
     ctx.session.summarized_upto = restored.summarized_upto
@@ -291,7 +298,17 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     def tasks():
         return FileResponse(static_dir / "tasks.html")
 
-    # 前端静态文件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）
-    app.mount("/", StaticFiles(directory=static_dir, html=True, check_dir=False), name="static")
+    # 前端静态文件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）。
+    # no-cache（每次 revalidate，未变时 304 也快）：浏览器对无 Cache-Control 的
+    # 静态资源做启发式缓存——新 HTML 配旧 JS 的错配曾让 send()/todo 面板静默失灵
+    # （浏览器验收现场抓到：JS 与 DOM 版本错位、点发送无 POST）。开发期零构建链
+    # 的正确姿势；上了内容哈希文件名再改回长缓存。
+    class NoCacheStatic(StaticFiles):
+        def file_response(self, *args, **kwargs):
+            resp = super().file_response(*args, **kwargs)
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
+    app.mount("/", NoCacheStatic(directory=static_dir, html=True, check_dir=False), name="static")
 
     return app
