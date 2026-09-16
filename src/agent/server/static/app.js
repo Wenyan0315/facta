@@ -207,9 +207,16 @@ async function loadSessions() {
     }
     for (const s of sessions) {
       const li = document.createElement("li");
+      if (s.current) {
+        li.classList.add("current");   // 当前会话：高亮常驻，不触发切回（它就在前台）
+        li.title = "当前会话";
+      } else {
+        li.title = "点击切回此会话";
+        li.addEventListener("click", () => switchTo(s.name));
+      }
       const titleEl = document.createElement("div");
       titleEl.className = "session-title";
-      titleEl.textContent = s.title;
+      titleEl.textContent = s.current ? "● " + s.title : s.title;
       li.appendChild(titleEl);
       if (s.time) {   // 归档时间（文件名解析）：小字第二行
         const timeEl = document.createElement("div");
@@ -217,8 +224,6 @@ async function loadSessions() {
         timeEl.textContent = s.time;
         li.appendChild(timeEl);
       }
-      li.title = "点击切回此会话";
-      li.addEventListener("click", () => switchTo(s.name));
       sessionListEl.appendChild(li);
     }
   } catch (_) {

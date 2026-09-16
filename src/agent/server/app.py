@@ -206,6 +206,10 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         raise HTTPException(409, "任务已结束，无法取消")
 
     # 会话列表与切回（S2 会话列表原料 = store.list_archived_sessions）
+    # 列表 = 当前 active（置顶高亮，current: true）+ 归档历史——完整会话视图。
+    # 修复「时隐时现」：move 语义下切回的会话从列表消失、归档后又回来，
+    # CLI 时代合理但在 Web 列表产品里反直觉（真实使用三轮反馈）。当前
+    # 会话必须常驻可见，高亮标识。
     @app.get("/api/sessions")
     def list_sessions():
         # time 从文件名解析（身份=时间戳，展示层格式化）——「09-15 23:15」
@@ -215,10 +219,12 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             m = re.match(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})", name)
             return f"{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}" if m else ""
 
-        return [
+        items = [{"name": "active", "title": derive_title(ctx.session), "time": "", "current": True}]
+        items.extend(
             {"name": path.name, "title": title, "time": _time_from_name(path.name)}
             for path, title in list_archived_sessions(SESSIONS_DIR)
-        ]
+        )
+        return items
 
     @app.post("/api/sessions/new")
     def new_session():

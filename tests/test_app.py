@@ -230,6 +230,29 @@ def test_switch_with_empty_current_does_not_archive_empty(tmp_path):
     assert list(sessions_dir.glob("*.json")) == []   # 目标已切回、空会话未被归档
 
 
+def test_sessions_list_includes_current_on_top(tmp_path):
+    # 「时隐时现」修复：列表 = 当前 active（current:true 置顶）+ 归档——
+    # 当前会话常驻可见，不再随切回/归档消失重现
+    from agent.memory.store import save_session
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    save_session(
+        Session(messages=[Message(role="user", content="归档过的对话")]),
+        sessions_dir / "20260915-230000.json",
+    )
+
+    ctx = _make_ctx()
+    ctx.session.messages.append(Message(role="system", content="人设"))
+    ctx.session.messages.append(Message(role="user", content="正在聊的对话"))
+    client = TestClient(create_app(ctx))
+
+    items = client.get("/api/sessions").json()
+    assert items[0] == {"name": "active", "title": "正在聊的对话", "time": "", "current": True}
+    assert items[1]["name"] == "20260915-230000.json"
+    assert "current" not in items[1]
+
+
 def test_cancel_interrupts_running_run():
     # 用注入的 store 造一个正在运行的 Run——避免真线程跑太快、cancel 追不上的竞态
     from agent.server.run_store import STATUS_RUNNING, RunStore
