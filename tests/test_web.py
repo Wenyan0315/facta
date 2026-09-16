@@ -10,7 +10,13 @@ import pytest
 
 from agent.tools.context import ToolContext
 from agent.tools.registry import ToolRegistry
-from agent.tools.web import _fetch_web, _web_search, register_web_tools
+from agent.tools.web import (
+    _fetch_web,
+    _parse_bocha,
+    _web_search,
+    get_web_search,
+    register_web_tools,
+)
 
 
 class _FakeSearch:
@@ -64,6 +70,49 @@ def test_web_search_formats_results(tmp_path):
 def test_web_search_empty_results_hint(tmp_path):
     out = _web_search(_FakeSearch([]), "不存在的东西")
     assert "无结果" in out
+
+
+# ---------- 博查 Provider（先行实现） ----------
+
+def test_parse_bocha_normalizes_response():
+    # data.webPages.value[] → 协议三项；summary 优先 snippet 兜底；日期附尾
+    payload = {
+        "code": 200,
+        "data": {
+            "webPages": {
+                "value": [
+                    {"name": "上海天气", "url": "https://w.example/sh",
+                     "summary": "晴 23 度", "snippet": "短摘要", "datePublished": "2026-09-16T08:00:00+08:00"},
+                    {"name": "无摘要条目", "url": "https://w.example/2",
+                     "snippet": "只剩 snippet"},
+                ]
+            }
+        },
+    }
+    out = _parse_bocha(payload)
+    assert out[0] == {"title": "上海天气", "url": "https://w.example/sh",
+                      "content": "晴 23 度（发布：2026-09-16）"}
+    assert out[1]["content"] == "只剩 snippet"   # summary 缺失 → snippet 兜底
+
+
+def test_parse_bocha_empty_payload():
+    assert _parse_bocha({}) == []
+    assert _parse_bocha({"data": {}}) == []
+
+
+def test_get_web_search_priority(monkeypatch):
+    # 优先级：BOCHA > TAVILY > None（不上菜单）
+    from agent.tools.web import BochaSearch, TavilySearch
+
+    monkeypatch.delenv("BOCHA_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    assert get_web_search() is None
+
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-x")
+    assert isinstance(get_web_search(), TavilySearch)
+
+    monkeypatch.setenv("BOCHA_API_KEY", "sk-x")
+    assert isinstance(get_web_search(), BochaSearch)   # bocha 抢先
 
 
 # ---------- 栅栏（fetch_web 的 URL 是不可信输入） ----------

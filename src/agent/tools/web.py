@@ -20,6 +20,7 @@ v1 只落 Tavily（免费额度/agent 生态标准/返回已清洗摘要——�
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from typing import Protocol
 from urllib.parse import urlparse
@@ -91,6 +92,69 @@ class TavilySearch:
             {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
             for r in resp.json().get("results", [])
         ]
+
+
+BOCHA_API_URL = "https://api.bochaai.com/v1/web-search"
+
+
+def _parse_bocha(payload: dict) -> list[dict]:
+    """博查响应归一化：data.webPages.value[] → 协议约定的三项。
+
+    纯函数单测的原料——各家响应形状不同（Tavily 平铺 results、博查嵌套
+    webPages），归一化收在实现类里，协议消费方（工具本体）零感知。
+    summary（长摘要）优先、snippet 兜底；datePublished 附进 content 尾部
+    （时效信息对天气/新闻类查询是关键证据）。
+    """
+    items = payload.get("data", {}).get("webPages", {}).get("value", [])
+    out = []
+    for r in items:
+        content = (r.get("summary") or r.get("snippet") or "").strip()
+        date = r.get("datePublished", "")
+        if date:
+            content = f"{content}（发布：{date[:10]}）" if content else f"发布：{date[:10]}"
+        out.append({"title": r.get("name", ""), "url": r.get("url", ""), "content": content})
+    return out
+
+
+class BochaSearch:
+    """博查实现（2026-09-16 先行）：中文搜索质量好、国内直连。
+
+    summary=True 要长摘要（博查特色：比 snippet 详细，对 LLM 更友好）；
+    freshness=noLimit 不限时间——时间过滤的决策权留给模型（它知道用户
+    问的是「今天天气」还是「历史事件」），触发信号=模型常带时间词查询
+    却拿不到新结果时，再把 freshness 暴露成工具参数。
+    """
+
+    name = "bocha"
+
+    def __init__(self, api_key: str) -> None:
+        self._key = api_key
+
+    def search(self, query: str) -> list[dict]:
+        resp = httpx.post(
+            BOCHA_API_URL,
+            headers={"Authorization": f"Bearer {self._key}"},
+            json={"query": query, "count": 5, "summary": True, "freshness": "noLimit"},
+            timeout=SEARCH_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return _parse_bocha(resp.json())
+
+
+def get_web_search() -> "WebSearchClient | None":
+    """搜索 client 工厂（组装层唯一真值源的 web 版）。
+
+    优先级：BOCHA_API_KEY > TAVILY_API_KEY > None（不上菜单）。
+    双路由（中文博查/英文 Tavily，按查询语言分发）是协议的一个包装实现，
+    触发信号 = 两家 key 齐且实测出语言偏好差异时再加，工厂签名不变。
+    """
+    bocha_key = os.environ.get("BOCHA_API_KEY", "")
+    if bocha_key:
+        return BochaSearch(bocha_key)
+    tavily_key = os.environ.get("TAVILY_API_KEY", "")
+    if tavily_key:
+        return TavilySearch(tavily_key)
+    return None
 
 
 def _assert_public_http_url(url: str) -> None:

@@ -30,7 +30,7 @@ from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 from agent.tools.mcp_config import assemble_servers, load_server_specs
 from agent.tools.registry import ToolRegistry
-from agent.tools.web import TavilySearch, register_web_tools
+from agent.tools.web import get_web_search, register_web_tools
 
 # 组装层唯一真值源：CLI / Web 都从这里拿路径，不在各自入口重定义
 MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx）
@@ -128,11 +128,11 @@ def assemble(provider: str) -> AppContext:
     #    history 给会话内检索
     #    （闭包注入，传列表对象本身而非副本——run_turn 原地 append，
     #    工具才能实时看到全部历史）、notes_dir 消灭工具层写死的路径
-    # 5.5) 联网工具（2026-09-16）：有 TAVILY_API_KEY 才建 client、才上菜单
-    #      （条件注册，与 kb=None 同语义——mock 路径不背联网依赖）。
-    #      key 纪律同 .env 其余条目：代码只读环境变量
-    tavily_key = os.environ.get("TAVILY_API_KEY", "")
-    web_client = TavilySearch(tavily_key) if tavily_key else None
+    # 5.5) 联网工具（2026-09-16）：工厂选搜索 Provider（BOCHA 优先/TAVILY 兜底），
+    #      有 key 才上菜单（条件注册，与 kb=None 同语义——mock 路径不背联网依赖）
+    web_client = get_web_search()
+    if web_client is not None:
+        print(f"联网搜索：{web_client.name}")
     registry = ToolRegistry()
     ctx = ToolContext(
         notes_dir=NOTES_DIR,
