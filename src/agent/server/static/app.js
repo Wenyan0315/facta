@@ -299,6 +299,56 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && currentRunId) cancelEl.click();
 });
 
+// ---- 待办（014：任务=个人待办；与 agent 工具共用同一 store） ----
+
+const todoListEl = document.getElementById("todo-list");
+const todoFormEl = document.getElementById("todo-form");
+const todoInputEl = document.getElementById("todo-input");
+
+async function loadTodos() {
+  try {
+    const todos = await (await fetch("/api/todos")).json();
+    todoListEl.innerHTML = "";
+    for (const t of todos) {
+      const li = document.createElement("li");
+      li.className = "todo-item" + (t.done ? " done" : "");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = t.done;
+      box.disabled = t.done;   // 已完成不可点（勾销语义单向，与工具一致）
+      box.addEventListener("change", async () => {
+        await fetch(`/api/todos/${t.id}/complete`, { method: "POST" });
+        loadTodos();
+      });
+      const label = document.createElement("span");
+      label.textContent = t.text;
+      li.appendChild(box);
+      li.appendChild(label);
+      todoListEl.appendChild(li);
+    }
+    if (!todos.length) {
+      todoListEl.innerHTML = '<li class="muted" style="cursor:default;">（无待办）</li>';
+    }
+  } catch (_) { /* 面板加载失败静默——不该挡住聊天主功能 */ }
+}
+
+todoFormEl.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = todoInputEl.value.trim();
+  if (!text) return;
+  todoInputEl.value = "";
+  await fetch("/api/todos", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  loadTodos();
+});
+
+// Run 结束时刷新待办——agent 可能在对话里动了待办（add/complete）
+const _origOnDone = onDone;
+onDone = function () { _origOnDone(); loadTodos(); };
+
 // ---- 初始化 ----
 
 document.getElementById("composer").addEventListener("submit", (e) => {
@@ -318,3 +368,4 @@ cancelEl.addEventListener("click", async () => {
 newSessionBtn.addEventListener("click", newSession);
 loadSessions();
 loadMessages();
+loadTodos();

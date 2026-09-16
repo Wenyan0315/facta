@@ -31,6 +31,7 @@ from agent.knowledge.knowledge_base import KnowledgeBase
 
 if TYPE_CHECKING:
     from agent.tools.web import WebSearchClient   # 仅类型标注用，运行时不导入（防循环）
+    from agent.memory.todos import TodoStore
 
 
 @dataclass
@@ -38,8 +39,9 @@ class ToolContext:
     """工具的依赖包：组装层（__main__）构造，register_builtin 消费。
 
     kb / llm / history / web 允许 None：缺席 = 相应工具不上菜单（条件注册，
-    语义沿用旧签名）。notes_dir 不给默认值——默认值就是第二个真值源，
-    路径必须由组装层显式给出，绝不藏在类型定义里。
+    语义沿用旧签名）。todos（待办仓库）同规则：None = 待办工具不上菜单。
+    notes_dir 不给默认值——默认值就是第二个真值源，路径必须由组装层显式
+    给出，绝不藏在类型定义里。
 
     ⚠ List identity trap：history 必须传 session.messages 对象本身，
     绝不 .copy()——run_chat 在原列表上原地 append，工具闭包抓的是同一
@@ -51,3 +53,4 @@ class ToolContext:
     llm: LLM | None = None
     history: list[Message] | None = None
     web: "WebSearchClient | None" = None   # 联网搜索 client（2026-09-16）：None=web 工具不上菜单
+    todos: "TodoStore | None" = None       # 待办仓库（2026-09-17）：None=待办工具不上菜单

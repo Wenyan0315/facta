@@ -182,6 +182,42 @@ body {
 .bubble.assistant table { border-collapse: collapse; }
 .bubble.assistant :is(td, th) { border: 1px solid var(--border); padding: 4px 8px; }
 
+/* 待办面板（侧栏下半区） */
+#todo-panel {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  max-height: 35%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.todo-head { font-size: 13px; font-weight: 600; color: var(--muted); }
+#todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 4px;
+  font-size: 13px;
+  line-height: 1.45;
+  border-radius: 4px;
+}
+.todo-item.done span { color: var(--muted); text-decoration: line-through; }
+.todo-item input[type="checkbox"] { margin-top: 3px; accent-color: var(--accent); }
+#todo-input {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
 /* 任务视图（tasks.html） */
 .tasks-title { font-size: 18px; margin: 0 0 16px; }
 .task-item {

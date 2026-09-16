@@ -24,7 +24,14 @@ def _isolate_session_file(tmp_path, monkeypatch):
 
 
 def _make_ctx(reply: str = "你好！") -> AppContext:
-    # 最小 AppContext：ScriptedLLM 回纯文本（不点菜），registry 传 None 也可
+    # 最小 AppContext：ScriptedLLM 回纯文本（不点菜），registry 传 None 也可。
+    # todos 指到临时目录（mkdtemp 每次唯一，测试间不串）——避免调用 todos
+    # 端点的测试踩到 None 路径
+    import tempfile
+    from pathlib import Path
+
+    from agent.memory.todos import TodoStore
+
     return AppContext(
         provider="mock",
         ledger=None,
@@ -34,6 +41,7 @@ def _make_ctx(reply: str = "你好！") -> AppContext:
         kb=None,
         session=Session(),
         registry=None,
+        todos=TodoStore(Path(tempfile.mkdtemp()) / "todos.json"),
     )
 
 
@@ -251,6 +259,23 @@ def test_sessions_list_includes_current_on_top(tmp_path):
     assert items[0] == {"name": "active", "title": "正在聊的对话", "time": "", "current": True}
     assert items[1]["name"] == "20260915-230000.json"
     assert "current" not in items[1]
+
+
+def test_todos_api_roundtrip(tmp_path):
+    # 个人待办三端点：添加 201 → 列表 → 勾销 → 404（未知 id）
+    client = TestClient(create_app(_make_ctx()))
+
+    resp = client.post("/api/todos", json={"text": "查阳澄湖天气"})
+    assert resp.status_code == 201
+    todo_id = resp.json()["id"]
+
+    assert [t["text"] for t in client.get("/api/todos").json()] == ["查阳澄湖天气"]
+
+    done = client.post(f"/api/todos/{todo_id}/complete").json()
+    assert done["done"] is True
+    assert client.get("/api/todos").json()[0]["done"] is True
+
+    assert client.post("/api/todos/99/complete").status_code == 404
 
 
 def test_cancel_interrupts_running_run():

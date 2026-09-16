@@ -65,6 +65,12 @@ class CreateRunRequest(BaseModel):
     text: str
 
 
+class CreateTodoRequest(BaseModel):
+    """添加待办的请求体。"""
+
+    text: str
+
+
 def _run_worker(ctx: AppContext, run, user_text: str) -> None:
     """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。
 
@@ -262,6 +268,23 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             {"run_id": r.run_id, "status": r.status, "title": r.title, "preview": r.preview}
             for r in store.list_runs()
         ]
+
+    # 个人待办（014 语义：任务=个人待办）：UI 直连 store，与 agent 工具共用同一实例
+    @app.get("/api/todos")
+    def todos_list():
+        return [{"id": t.id, "text": t.text, "done": t.done} for t in ctx.todos.list()]
+
+    @app.post("/api/todos", status_code=201)
+    def todos_add(body: CreateTodoRequest):
+        todo = ctx.todos.add(body.text)
+        return {"id": todo.id, "text": todo.text, "done": todo.done}
+
+    @app.post("/api/todos/{todo_id}/complete")
+    def todos_complete(todo_id: int):
+        todo = ctx.todos.complete(todo_id)
+        if todo is None:
+            raise HTTPException(404, f"待办 #{todo_id} 不存在")
+        return {"id": todo.id, "text": todo.text, "done": todo.done}
 
     # 任务视图（S2 双视图的另一半，v1 最小版：运行记录+状态+交付摘要）
     @app.get("/tasks")

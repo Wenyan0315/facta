@@ -1,0 +1,5 @@
+# 决策记录 · 个人待办（2026-09-17）
+
+> 场景「个人助理」；语义裁定见 014 产品定位。返回 [architecture.md](../architecture.md)
+
+- **个人待办落地（2026-09-17，014 排期的「任务功能」兑现）**：语义=个人待办（UI 创建/勾销，agent 可读写），工程委派留 S4/S6。**①存储独立**：`data/todos.json`（gitignore 运行时数据），`memory/todos.py::TodoStore`——跨会话资产，不随 session 归档走（与 session.json 的分工边界）；store 级 threading.Lock 罩住「load→改→save」全序列（UI 勾销与 agent 添加并发安全）；id 自增（max+1，勾销引用键对模型友好——念不全时间戳）；重复勾销幂等（不覆盖首次完成时间）；损坏文件当空仓（待办非关键数据，不炸入口）。**②工具三件而非 Claude Code 式单工具 TodoWrite**：add_todo/list_todos(only_pending)/complete_todo——整体覆写语义对个人量级过重，三个浅参数工具模型点菜更准；「一次改十条」真实用法出现再并（触发信号）。complete 未知 id 返回提示让模型自纠（先 list 查编号）。**③装配**：TodoStore 恒构造（无外部依赖，不做条件注册——与 web 工具有 key 才上桌不同）；AppContext/ToolContext 各加 todos 字段，**同一实例注入工具与 Web API**（UI 加的 agent 看得见，agent 加的 UI 刷新可见——单真值源在内存）。**④Web API 三端点**：GET/POST /api/todos + POST /api/todos/{id}/complete；**⑤前端侧栏下半区**：勾选框直点、输入框直加、Run 结束自动刷新（agent 可能在对话里动了待办——onDone 包装挂 loadTodos）；已完成项 checkbox 置灰（勾销语义单向）。**⑥SYSTEM_PROMPT 同步**：待办工具清单+触发时机（「记一下/提醒我」→add，「做完了」→complete）。测试 187→195（id 自增/勾销幂等+持久化重读/未知 id/过滤/损坏容错/工具三件可用性/UI-agent 共享单实例/API 往返 404）。

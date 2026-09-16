@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.44（2026-09-16）｜随着里程碑推进持续迭代此文档
+> 版本：v0.45（2026-09-17）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.43 起）：见 [product.md](product.md)——通用个人 agent，场景优先级由真实使用数据排序
 
@@ -170,4 +170,5 @@
 | [013-docs-adr-split](decisions/013-docs-adr-split.md) | 文档治理 | ADR 拆分本身（触发信号兑现；57 条 sha256 校验零改写） |
 | [014-product-positioning](decisions/014-product-positioning.md) | 产品定位 | 通用个人 agent；三场景并列数据驱动排序；任务=个人待办；联网前置 S3（最低防护随行） |
 | [015-web-tools](decisions/015-web-tools.md) | 联网工具 | web_search+fetch_web；搜索 Provider 供应商化（Tavily 先行/双路由留位）；SSRF 栅栏（DNS 后逐 IP 检查）；条件注册；侧栏归档时间戳 |
+| [016-todos](decisions/016-todos.md) | 个人待办 | TodoStore 独立存储（跨会话资产+store 锁）；工具三件 vs TodoWrite 裁定；UI/API/agent 共用单实例；侧栏待办面板 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |

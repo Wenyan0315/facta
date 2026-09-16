@@ -24,17 +24,20 @@ from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.sync import sync_notes
 from agent.knowledge.vector_store import ChromaVectorStore
 from agent.memory.store import Session, load_session
+from agent.memory.todos import TodoStore
 from agent.orchestrator.loop import SYSTEM_PROMPT
 from agent.paths import NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 from agent.tools.mcp_config import assemble_servers, load_server_specs
 from agent.tools.registry import ToolRegistry
+from agent.tools.todo import register_todo_tools
 from agent.tools.web import get_web_search, register_web_tools
 
 # 组装层唯一真值源：CLI / Web 都从这里拿路径，不在各自入口重定义
 MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx）
 VECTOR_DB_DIR = Path("data/vector_db")           # M7：向量库落盘位置（运行时数据，.gitignore 已排除）
+TODOS_PATH = Path("data/todos.json")             # 个人待办（2026-09-17）：跨会话资产，独立于 session
 
 
 @dataclass
@@ -49,6 +52,7 @@ class AppContext:
     kb: KnowledgeBase
     session: Session
     registry: ToolRegistry
+    todos: TodoStore    # 个人待办仓库（2026-09-17）：工具与 Web API 共用同一实例
     mcp_clients: list = field(default_factory=list)   # 最终退出时统一 close，不留孤儿进程
 
 
@@ -133,6 +137,7 @@ def assemble(provider: str) -> AppContext:
     web_client = get_web_search()
     if web_client is not None:
         print(f"联网搜索：{web_client.name}")
+    todos = TodoStore(TODOS_PATH)   # 待办仓库：无外部依赖，恒构造（工具+API 共用）
     registry = ToolRegistry()
     ctx = ToolContext(
         notes_dir=NOTES_DIR,
@@ -140,9 +145,11 @@ def assemble(provider: str) -> AppContext:
         llm=internal_llm,
         history=session.messages,
         web=web_client,
+        todos=todos,
     )
     register_builtin(registry, ctx)
     register_web_tools(registry, ctx)
+    register_todo_tools(registry, todos)
 
     # 6) MCP 外部工具（MCP-config 配置化）：改 mcp_servers.json 加工具，零代码。
     #      命令型穿 stdio、URL 型穿 streamable HTTP；单台失败只警告不阻断；
@@ -164,5 +171,6 @@ def assemble(provider: str) -> AppContext:
         kb=kb,
         session=session,
         registry=registry,
+        todos=todos,
         mcp_clients=mcp_clients,
     )

@@ -34,6 +34,8 @@ SYSTEM_PROMPT = (
     "search_and_summarize、search_history、read_history；"
     "联网工具（有 key 时可用）：web_search（实时信息/天气/新闻/股价）、"
     "fetch_web（读网页全文）；"
+    "待办工具：add_todo（用户说「记一下」「提醒我」时落一条待办）、"
+    "list_todos（问「我有什么待办」时查）、complete_todo（用户说「做完了」时勾销）；"
     "另有 MCP 外部工具按配置接入（mcp__ 前缀）。"
     "会话记忆 JSON 持久化 + 滚动摘要压缩，跨会话沉淀进 data/learned/。"
     "分层：orchestrator 编排 / core 网关地基 / knowledge 检索 / memory 记忆 / "
