@@ -314,6 +314,20 @@ def test_todos_api_roundtrip():
     assert client.post("/api/todos/99/complete").status_code == 404
 
 
+def test_todos_update_and_delete_api():
+    # 修改（PUT）与删除（DELETE）端点
+    client = TestClient(create_app(_make_ctx()))
+
+    todo = client.post("/api/todos", json={"text": "写错的"}).json()
+    updated = client.put(f"/api/todos/{todo['id']}", json={"text": "改对的"}).json()
+    assert updated["text"] == "改对的"
+
+    assert client.delete(f"/api/todos/{todo['id']}").json()["deleted"] == todo["id"]
+    assert client.get("/api/todos").json() == []
+    assert client.delete("/api/todos/99").status_code == 404
+    assert client.put("/api/todos/99", json={"text": "x"}).status_code == 404
+
+
 def test_cancel_interrupts_running_run():
     # 用注入的 store 造一个正在运行的 Run——避免真线程跑太快、cancel 追不上的竞态
     from agent.server.run_store import STATUS_RUNNING, RunStore

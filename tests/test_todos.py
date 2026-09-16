@@ -36,6 +36,34 @@ def test_complete_unknown_id_returns_none(tmp_path):
     assert _store(tmp_path).complete(99) is None
 
 
+def test_delete_removes_and_keeps_id_gaps(tmp_path):
+    store = _store(tmp_path)
+    store.add("第一条")
+    store.add("要删的")
+    store.add("第三条")
+
+    deleted = store.delete(2)
+    assert deleted.text == "要删的"
+
+    remaining = store.list()
+    assert [t.id for t in remaining] == [1, 3]   # id 空洞不复用（引用键防悬垂）
+    next_one = store.add("新的")
+    assert next_one.id == 4                       # max+1 继续，不回填 2
+    assert store.delete(99) is None               # 删不存在的返回 None
+
+
+def test_update_text_keeps_status(tmp_path):
+    store = _store(tmp_path)
+    t = store.add("原文本")
+    store.complete(t.id)
+
+    updated = store.update_text(t.id, "改后的文本")
+    assert updated.text == "改后的文本"
+    assert updated.done is True                   # 改文本不动完成状态
+    assert _store(tmp_path).list()[0].text == "改后的文本"   # 落盘验证
+    assert store.update_text(99, "x") is None
+
+
 def test_list_filters_pending(tmp_path):
     store = _store(tmp_path)
     store.add("没做的")
@@ -66,6 +94,10 @@ def test_tools_registered_and_usable(tmp_path):
     assert "9/20 查天气" in listing and "○" in listing
     assert "已勾销 #1" in registry.execute("complete_todo", '{"todo_id": 1}')
     assert "不exist".replace("exist", "存在") in registry.execute("complete_todo", '{"todo_id": 9}')
+    # 修改与删除（2026-09-17 补）
+    assert "已修改 #1" in registry.execute("update_todo", '{"todo_id": 1, "text": "9/21 查天气"}')
+    assert "已删除 #1" in registry.execute("delete_todo", '{"todo_id": 1}')
+    assert "（无待办）" in registry.execute("list_todos", "{}")
 
 
 def test_boolean_param_passes_validation(tmp_path):

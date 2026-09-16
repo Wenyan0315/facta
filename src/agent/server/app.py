@@ -71,6 +71,12 @@ class CreateTodoRequest(BaseModel):
     text: str
 
 
+class UpdateTodoRequest(BaseModel):
+    """修改待办文本的请求体。"""
+
+    text: str
+
+
 def _run_worker(ctx: AppContext, run, user_text: str) -> None:
     """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。
 
@@ -289,6 +295,20 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     @app.post("/api/todos/{todo_id}/complete")
     def todos_complete(todo_id: int):
         todo = ctx.todos.complete(todo_id)
+        if todo is None:
+            raise HTTPException(404, f"待办 #{todo_id} 不存在")
+        return {"id": todo.id, "text": todo.text, "done": todo.done}
+
+    @app.delete("/api/todos/{todo_id}")
+    def todos_delete(todo_id: int):
+        todo = ctx.todos.delete(todo_id)
+        if todo is None:
+            raise HTTPException(404, f"待办 #{todo_id} 不存在")
+        return {"deleted": todo.id}
+
+    @app.put("/api/todos/{todo_id}")
+    def todos_update(todo_id: int, body: UpdateTodoRequest):
+        todo = ctx.todos.update_text(todo_id, body.text)
         if todo is None:
             raise HTTPException(404, f"待办 #{todo_id} 不存在")
         return {"id": todo.id, "text": todo.text, "done": todo.done}

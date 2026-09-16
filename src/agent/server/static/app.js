@@ -312,6 +312,7 @@ async function loadTodos() {
     for (const t of todos) {
       const li = document.createElement("li");
       li.className = "todo-item" + (t.done ? " done" : "");
+      li.dataset.id = t.id;
       const box = document.createElement("input");
       box.type = "checkbox";
       box.checked = t.done;
@@ -322,14 +323,56 @@ async function loadTodos() {
       });
       const label = document.createElement("span");
       label.textContent = t.text;
+      label.title = "双击编辑";
+      label.addEventListener("dblclick", () => startTodoEdit(li, t));
+      const del = document.createElement("button");
+      del.className = "todo-del";
+      del.textContent = "×";
+      del.title = "删除";
+      del.addEventListener("click", async () => {
+        await fetch(`/api/todos/${t.id}`, { method: "DELETE" });
+        loadTodos();
+      });
       li.appendChild(box);
       li.appendChild(label);
+      li.appendChild(del);
       todoListEl.appendChild(li);
     }
     if (!todos.length) {
       todoListEl.innerHTML = '<li class="muted" style="cursor:default;">（无待办）</li>';
     }
   } catch (_) { /* 面板加载失败静默——不该挡住聊天主功能 */ }
+}
+
+function startTodoEdit(li, todo) {
+  // 双击进入行内编辑：span 换成输入框，Enter 保存 / Esc 取消 / 失焦保存
+  const label = li.querySelector("span");
+  if (!label) return;
+  const editor = document.createElement("input");
+  editor.type = "text";
+  editor.className = "todo-edit";
+  editor.value = todo.text;
+  label.replaceWith(editor);
+  editor.focus();
+  editor.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    if (save && editor.value.trim() && editor.value.trim() !== todo.text) {
+      await fetch(`/api/todos/${todo.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: editor.value.trim() }),
+      });
+    }
+    loadTodos();   // 重新渲染（无论存否都还原为列表态）
+  };
+  editor.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  editor.addEventListener("blur", () => finish(true));
 }
 
 todoFormEl.addEventListener("submit", async (e) => {

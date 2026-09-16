@@ -80,6 +80,32 @@ class TodoStore:
                     return t
             return None
 
+    def delete(self, todo_id: int) -> Todo | None:
+        """删除：这条不该存在（写错了/不想要了），与勾销（做完了，保留历史）语义分离。
+
+        id 空洞不复用：删 #2 后下一条仍是 #3——模型/用户记忆里的旧编号
+        不指向错条目（id 是引用键，复用=悬垂引用）。
+        """
+        with self._lock:
+            todos = self._load()
+            for i, t in enumerate(todos):
+                if t.id == todo_id:
+                    del todos[i]
+                    self._save(todos)
+                    return t
+            return None
+
+    def update_text(self, todo_id: int, text: str) -> Todo | None:
+        """修改待办文本（错字/补充信息）；状态与时间戳不动。"""
+        with self._lock:
+            todos = self._load()
+            for t in todos:
+                if t.id == todo_id:
+                    t.text = text
+                    self._save(todos)
+                    return t
+            return None
+
     def list(self, only_pending: bool = False) -> list[Todo]:
         with self._lock:
             todos = self._load()

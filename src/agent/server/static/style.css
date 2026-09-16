@@ -210,6 +210,17 @@ body {
 }
 .todo-item.done span { color: var(--muted); text-decoration: line-through; }
 .todo-item input[type="checkbox"] { margin-top: 3px; accent-color: var(--accent); }
+.todo-item span { flex: 1; cursor: text; }
+.todo-del {
+  border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 14px; padding: 0 2px; line-height: 1; opacity: 0;   /* hover 才现身 */
+}
+.todo-item:hover .todo-del { opacity: 1; }
+.todo-del:hover { color: var(--danger); }
+.todo-edit {
+  flex: 1; border: 1px solid var(--accent); border-radius: 4px;
+  padding: 2px 4px; font-size: 13px; font-family: inherit;
+}
 #todo-input {
   border: 1px solid var(--border);
   border-radius: 6px;

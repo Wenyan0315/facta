@@ -67,3 +67,36 @@ def register_todo_tools(registry: ToolRegistry, store: TodoStore) -> None:
             else f"#{todo_id} 不存在，请先用 list_todos 查看现有编号"
         ),
     ))
+    registry.register(Tool(
+        name="update_todo",
+        description="修改待办文本（改错字、补充细节）。只改内容不动完成状态。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "todo_id": {"type": "integer", "description": "待办编号（#号后的数字），先用 list_todos 查"},
+                "text": {"type": "string", "description": "修改后的完整待办内容（全量替换，非追加）"},
+            },
+            "required": ["todo_id", "text"],
+        },
+        func=lambda todo_id, text: (
+            f"已修改 #{todo_id} → {text}"
+            if store.update_text(int(todo_id), text) is not None
+            else f"#{todo_id} 不存在，请先用 list_todos 查看现有编号"
+        ),
+    ))
+    registry.register(Tool(
+        name="delete_todo",
+        description="删除一条待办（这条不该存在：记错了、不要了）。做完了的事用 complete_todo 勾销而非删除。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "todo_id": {"type": "integer", "description": "待办编号（#号后的数字），先用 list_todos 查"},
+            },
+            "required": ["todo_id"],
+        },
+        func=lambda todo_id: (
+            f"已删除 #{todo_id}：{t.text}"
+            if (t := store.delete(int(todo_id))) is not None
+            else f"#{todo_id} 不存在，请先用 list_todos 查看现有编号"
+        ),
+    ))
