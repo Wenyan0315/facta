@@ -77,6 +77,12 @@ class UpdateTodoRequest(BaseModel):
     text: str
 
 
+class ConfirmRequest(BaseModel):
+    """L2 确认裁决的请求体（S4b）：approve=true 批准 / false 拒绝。"""
+
+    approve: bool
+
+
 def _run_worker(ctx: AppContext, run, user_text: str) -> None:
     """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。
 
@@ -97,6 +103,7 @@ def _run_worker(ctx: AppContext, run, user_text: str) -> None:
             on_text=lambda text: run.emit("text.delta", {"delta": text}),
             on_event=lambda type_, data: run.emit(_EVENT_MAP.get(type_, type_), data),
             should_cancel=lambda: run.cancel_requested,
+            on_confirm=lambda name, args: run.request_confirm(name, args),
         )
         # 终态判定：有最终回答 → completed；否则看是否因取消 → cancelled / failed
         if reply is not None:
@@ -223,6 +230,16 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         if run.request_cancel():
             return {"status": "cancelling"}
         raise HTTPException(409, "任务已结束，无法取消")
+
+    # L2 确认裁决（S4b）：前端弹窗的批准/拒绝落到这里，唤醒挂起的 worker
+    @app.post("/api/runs/{run_id}/confirm")
+    def confirm(run_id: str, body: ConfirmRequest):
+        run = store.get(run_id)
+        if run is None:
+            raise HTTPException(404, "run not found")
+        if run.resolve_confirm(body.approve):
+            return {"status": "approved" if body.approve else "rejected"}
+        raise HTTPException(409, "当前没有待确认的操作")
 
     # 会话列表与切回（S2 会话列表原料 = store.list_archived_sessions）
     # 列表 = 当前 active（置顶高亮，current: true）+ 归档历史——完整会话视图。

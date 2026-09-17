@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.47（2026-09-17）｜随着里程碑推进持续迭代此文档
+> 版本：v0.48（2026-09-17）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.43 起）：见 [product.md](product.md)——通用个人 agent，场景优先级由真实使用数据排序
 
@@ -94,12 +94,12 @@
 | 层 | 现状 | 建成后 |
 |---|------|--------|
 | core 地基 | ✅ types / llm 接口+实现 / 网关四件套 / 账本 / 向量数学——最底层不反认上层（S2a 依赖方向拨正） | 更多供应商 + 多模型路由 |
-| orchestrator 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb；streaming 流式消费（分片边收边打→merge 拼回复；内部调用照旧非流）；S2a 内核/外设分离：run_turn 零 input/print，I/O 走 on_text/on_event/should_cancel 三条缝；S2b 协作式取消两检查点 | 并行工具调用 / 更复杂的规划策略 |
+| orchestrator 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb；streaming 流式消费（分片边收边打→merge 拼回复；内部调用照旧非流）；S2a 内核/外设分离：run_turn 零 input/print，I/O 走 on_text/on_event/should_cancel/on_confirm 四条缝（S4b 加确认缝）；S2b 协作式取消两检查点 | 并行工具调用 / 更复杂的规划策略 |
 | LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/siliconflow) + 进程内网关(M7.5：记账/重试超时/精确+语义缓存/熔断三态/降级链+优雅兜底) | 更多供应商 + 多模型路由 |
 | knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集) | 知识图谱 |
 | memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘）+ 多会话管理（S1：active+archive，/new 归档重开）+ restore_session 原语（S2a：归档写回 active 后删除，move 语义） | 用户级记忆仓库外位置 |
-| tools | ✅ Tool+ToolRegistry+8内置工具(时间/清单/读/写/检索/检索+摘要/历史检索×2)；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型)；联网工具 web_search/fetch_web（015：Tavily Provider+SSRF 栅栏+条件注册）；MCP 外部工具配置化接入 | 更多工具 + skills |
-| server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + 静态三件零构建链；只绑 127.0.0.1。验收修复轮：人设保证（ensure_persona 装配不变量）、每轮落盘、取消检查点③（流中即时）、任务视图最小版（/tasks+GET /api/runs）、历史回放（GET /api/messages）、md 渲染（marked vendored）、Enter/Esc 键盘 | 任务视图完整版（S2 预留）；Run Store 外置（多实例触发） |
+| tools | ✅ Tool+ToolRegistry+内置工具按家族分件（time/history/notes 三族，S4a 拆分）；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型)；联网工具 web_search/fetch_web（015：Tavily Provider+SSRF 栅栏+条件注册）；MCP 外部工具配置化接入；文件四件 read_file/search_code/list_dir/write_file+diff（S4a，workspace 围栏：__file__ 锚定+敏感黑名单读都不行）；终端执行 run_command（S4b：白名单只读免确认/L2 确认缝 registry 收口/批准拒绝都落审） | 更多工具 + skills |
+| server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + 静态三件零构建链；只绑 127.0.0.1。验收修复轮：人设保证（ensure_persona 装配不变量）、每轮落盘、取消检查点③（流中即时）、任务视图最小版（/tasks+GET /api/runs）、历史回放（GET /api/messages）、md 渲染（marked vendored）、Enter/Esc 键盘。S4b：waiting_approval 挂起态（进单锁口径、取消视拒、confirm.request/resolved 事件断线重放重弹）+ confirm 裁决端点 + 前端确认弹窗 | 任务视图完整版（S2 预留）；Run Store 外置（多实例触发） |
 | evals | ✅ 检索评估(P/R@k, MRR, 双实现对比) + LLM-as-judge 回答质量(基线 13/13 合格, 0% 错误, 全轮 ¥0.011) | 更难的对抗题库 + 回答质量回归 |
 | data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据)；data/learned/*.md 项目级长时记忆(M6.4，进 git) | 长文档、多来源 |
 
@@ -130,7 +130,7 @@
 | S1 ✅ | 多会话管理：/new 会话隔离（active+archive：位置固定无指针、文件名=身份/标题=标签、先存后清、原地清不 rebind） | 状态管理 |
 | S2 ✅ | 产品骨架 v1 对话视图：S2a 清账（agent_loop 正名 orchestrator 编排层、run_turn 内核/外设分离、assemble 装配单一真值源）→ S2b Web 壳（FastAPI+SSE：Run 三接口分离、内存 Run Store 单锁状态机、断线重连重放、会话切回、零构建链前端三件）；任务视图按双视图预留未实现 | 前后端、SSE、Run 状态机 |
 | S3 ✅ | 安全底座：工具权限分级（L0 只读/L1 写/L2 确认留 S4）+ 注入界碑（外部内容包裹声明+免疫条款）+ 审计日志（registry 收口 append-only jsonl 按天滚动，分级截断） | 安全 |
-| S4 | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）。**S4a ✅ 文件四件（read/search_code/list_dir/write_file+diff）+ builtin 拆分（time/history/notes 三族）+ workspace 围栏（__file__ 锚定+敏感黑名单）**；S4b 待做：终端执行+L2 确认机制 | 文件系统、进程调度 |
+| S4 ✅ | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）。**S4a ✅ 文件四件（read/search_code/list_dir/write_file+diff）+ builtin 拆分（time/history/notes 三族）+ workspace 围栏（__file__ 锚定+敏感黑名单）**；**S4b ✅ 终端执行 run_command + L2 确认机制（只读白名单免确认/registry 确认缝第四条缝/waiting_approval 挂起/Web 弹窗+CLI input/批准拒绝都落审）** | 文件系统、进程调度 |
 | S5 | skill 系统：可复用技能包与装载（2026-09 需求点名）+ 规则文件（AGENTS.md 式，learned 的读取侧；含系统提示词外置——SYSTEM_PROMPT 迁出 loop.py，改行为不碰代码，2026-09-15 裁定并入本站） | 插件化 |
 | S6 | 多 agent 协作：subagent 编排（主线2 的终点；判据=噪声隔离，见调研记录；worktree 隔离机制） | 编排 |
 | S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止） | 结构化知识、图可视化 |
@@ -173,4 +173,5 @@
 | [016-todos](decisions/016-todos.md) | 个人待办 | TodoStore 独立存储（跨会话资产+store 锁）；工具三件 vs TodoWrite 裁定；UI/API/agent 共用单实例；侧栏待办面板 |
 | [017-s3-security](decisions/017-s3-security.md) | S3 安全 | 权限分级 L0/L1（L2 确认判据已定留 S4）；审计 registry 收口；注入界碑；威胁模型=不可信内容经模型之手变动作 |
 | [018-s4a-file-tools](decisions/018-s4a-file-tools.md) | S4a 文件工具 | 文件四件（write_file 带 diff）；workspace 围栏（__file__ 锚定+敏感黑名单读都不行）；builtin 按家族拆三件；note vs file 分工边界 |
+| [019-s4b-terminal-confirm](decisions/019-s4b-terminal-confirm.md) | S4b 终端+确认 | run_command（超时/截断/cwd 锚定）；白名单免确认双条件（用户拍板粒度）；确认缝 registry 收口（loop 第四条缝）；waiting_approval 挂起+断线重弹；拒绝回灌不炸会话；批准拒绝都落审 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |

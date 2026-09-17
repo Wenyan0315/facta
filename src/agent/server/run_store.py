@@ -24,14 +24,16 @@ from dataclasses import dataclass, field
 
 SCHEMA_VERSION = "1"   # 事件协议版本护栏：未知 type/字段出现时，旧客户端忽略而非崩溃
 
-# Run 状态机：两个活跃态 + 三个互斥终态
+# Run 状态机：三个活跃态 + 三个互斥终态
 STATUS_PENDING = "pending"       # 已创建，后台线程尚未真正启动
 STATUS_RUNNING = "running"       # 执行中
+STATUS_WAITING = "waiting_approval"   # S4b：挂起等用户裁决 L2 确认（活跃态，非终态）
 STATUS_COMPLETED = "completed"   # 正常终态
 STATUS_FAILED = "failed"         # 模型挂/异常终态
 STATUS_CANCELLED = "cancelled"   # 用户取消终态
 
 _TERMINAL = {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED}
+_IN_FLIGHT = {STATUS_PENDING, STATUS_RUNNING, STATUS_WAITING}   # 单锁口径：等待确认也算在跑
 
 
 @dataclass
@@ -61,8 +63,11 @@ class Run:
     preview: str = ""
     events: list[RunEvent] = field(default_factory=list)
     cancel_requested: bool = False
+    confirm_pending: bool = False   # S4b：是否正挂着一个待裁决的 L2 确认（confirm 端点判据）
     _queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
     _seq: int = 0
+    _confirm_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    _confirm_decision: bool | None = field(default=None, repr=False)
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -97,6 +102,39 @@ class Run:
         self.cancel_requested = True
         return True
 
+    def request_confirm(self, tool: str, arguments: dict) -> bool:
+        """S4b L2 裁决挂起：worker 线程内调用，阻塞到用户落子或取消。
+
+        状态翻转 running→waiting_approval→running；confirm.request /
+        confirm.resolved 都进 append-only 事件流——断线重放时，request
+        无对应 resolved 则前端重新弹窗（确认不随断线丢失）。
+        等待中取消视为拒绝：确认挂起不挡取消通道。
+        """
+        prev, self.status = self.status, STATUS_WAITING
+        self.confirm_pending = True
+        self._confirm_event.clear()
+        self._confirm_decision = None
+        self.emit("confirm.request", {"tool": tool, "arguments": arguments})
+        while True:
+            if self._confirm_event.wait(timeout=0.2):
+                approved = bool(self._confirm_decision)
+                break
+            if self.cancel_requested:
+                approved = False
+                break
+        self.confirm_pending = False
+        self.status = prev
+        self.emit("confirm.resolved", {"tool": tool, "approved": approved})
+        return approved
+
+    def resolve_confirm(self, approved: bool) -> bool:
+        """用户裁决落子（confirm 端点调用）；无 pending 确认时返回 False。"""
+        if not self.confirm_pending:
+            return False
+        self._confirm_decision = approved
+        self._confirm_event.set()
+        return True
+
 
 class RunStore:
     """内存版多 Run 容器（教学版）。
@@ -122,7 +160,7 @@ class RunStore:
         会互相踩 session.messages。多并发留给 S6（worktree/子 agent 隔离）。
         """
         with self._lock:
-            if any(r.status in (STATUS_PENDING, STATUS_RUNNING) for r in self._runs.values()):
+            if any(r.status in _IN_FLIGHT for r in self._runs.values()):
                 return None
             run = Run(run_id=uuid.uuid4().hex, title=title)
             self._runs[run.run_id] = run
@@ -145,6 +183,6 @@ class RunStore:
         """当前唯一 in-flight 的 Run（供诊断/测试；单锁由 create_if_idle 原子保证）。"""
         with self._lock:
             for run in self._runs.values():
-                if run.status in (STATUS_PENDING, STATUS_RUNNING):
+                if run.status in _IN_FLIGHT:
                     return run
             return None

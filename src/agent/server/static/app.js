@@ -95,9 +95,44 @@ function addToolCard(turn, name, rawArgs) {
 
 // ---- 事件源与 Run 生命周期 ----
 
+// ---- L2 确认弹窗（S4b）----
+const confirmModal = document.getElementById("confirm-modal");
+const confirmToolEl = document.getElementById("confirm-tool");
+const confirmArgsEl = document.getElementById("confirm-args");
+
+function showConfirm(runId, tool, args) {
+  confirmToolEl.textContent = "工具：" + tool;
+  // 事件里的 arguments 已是对象（SSE JSON 解析过）；字符串形态仅防御性兜底。
+  // 验收踩坑：拿对象去 JSON.parse → 异常 → catch 里对象直进 textContent →
+  // 弹窗显示 [object Object]，命令全文没露给用户（裁决依据缺失）
+  let obj = args;
+  if (typeof args === "string") {
+    try { obj = JSON.parse(args || "{}"); } catch (_) { obj = { command: args }; }
+  }
+  const pretty = (obj && obj.command) || JSON.stringify(obj ?? {}, null, 2);
+  confirmArgsEl.textContent = pretty;
+  confirmModal.classList.remove("hidden");
+  document.getElementById("confirm-approve").onclick = () => decideConfirm(runId, true);
+  document.getElementById("confirm-reject").onclick = () => decideConfirm(runId, false);
+}
+
+function hideConfirm() {
+  confirmModal.classList.add("hidden");
+}
+
+async function decideConfirm(runId, approve) {
+  hideConfirm();   // 先收窗：裁决已落子，后端 resolved 事件随后也会到（幂等）
+  await fetch(`/api/runs/${runId}/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approve }),
+  });
+}
+
 function onDone() {
   if (currentSource) { currentSource.close(); currentSource = null; }
   currentRunId = null;
+  hideConfirm();
   cancelEl.disabled = false;
   cancelEl.textContent = "取消";
   cancelEl.classList.add("hidden");
@@ -132,6 +167,14 @@ function setupEventSource(runId, turn) {
     turn.appendChild(el);
     scrollBottom();
   });
+
+  // L2 确认（S4b）：request 弹窗 → resolved 收窗。事件按 seq 序到达，
+  // 断线重放时 request 无 resolved 配对则弹窗自然重现（确认不丢）。
+  source.addEventListener("confirm.request", (e) => {
+    const d = JSON.parse(e.data).data;
+    showConfirm(runId, d.tool, d.arguments);
+  });
+  source.addEventListener("confirm.resolved", () => hideConfirm());
 
   source.addEventListener("error", (e) => {
     if (!e.data) return;   // 原生 EventSource 网络错误（无 data），交给 onerror

@@ -23,10 +23,10 @@ def _isolate_session_file(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "LEARNED_DIR", tmp_path / "learned")
 
 
-def _make_ctx(reply: str = "你好！") -> AppContext:
+def _make_ctx(reply: str = "你好！", llm=None, registry=None) -> AppContext:
     # 最小 AppContext：ScriptedLLM 回纯文本（不点菜），registry 传 None 也可。
     # todos 指到临时目录（mkdtemp 每次唯一，测试间不串）——避免调用 todos
-    # 端点的测试踩到 None 路径
+    # 端点的测试踩到 None 路径。llm/registry 可注入（S4b 确认流端到端用）
     import tempfile
     from pathlib import Path
 
@@ -36,11 +36,11 @@ def _make_ctx(reply: str = "你好！") -> AppContext:
         provider="mock",
         ledger=None,
         embedder=None,
-        llm=ScriptedLLM([Message(role="assistant", content=reply)]),
+        llm=llm or ScriptedLLM([Message(role="assistant", content=reply)]),
         internal_llm=ScriptedLLM([]),
         kb=None,
         session=Session(),
-        registry=None,
+        registry=registry,
         todos=TodoStore(Path(tempfile.mkdtemp()) / "todos.json"),
     )
 
@@ -347,3 +347,83 @@ def test_events_unknown_run_404():
 
 def test_cancel_unknown_run_404():
     assert _make_client().post("/api/runs/nope/cancel").status_code == 404
+
+
+# ---------- S4b：L2 确认端点 ----------
+
+def _confirm_llm(command: str, final_reply: str) -> ScriptedLLM:
+    # 剧本：先点菜 run_command（非白名单命令 → 挂起弹窗），收工具结果后收尾
+    return ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            {"id": "c1", "name": "run_command",
+             "arguments": json.dumps({"command": command})},
+        ]),
+        Message(role="assistant", content=final_reply),
+    ])
+
+
+def _resolve_confirm_when_pending(client, run_id: str, approve: bool):
+    # worker 到确认挂起点有毫秒级竞态：轮询到端点不再是 409（无挂起）
+    import time as _time
+
+    resp = None
+    for _ in range(100):   # 最多 5s
+        resp = client.post(f"/api/runs/{run_id}/confirm", json={"approve": approve})
+        if resp.status_code == 200:
+            return resp
+        _time.sleep(0.05)
+    return resp
+
+
+def test_confirm_endpoint_409_without_pending_404_unknown_run():
+    client = _make_client()
+    run_id = client.post("/api/runs", json={"text": "你好"}).json()["run_id"]
+    _read_events(client, run_id)   # 读完事件流 = 已收尾，无挂起确认
+
+    assert client.post(f"/api/runs/{run_id}/confirm", json={"approve": True}).status_code == 409
+    assert client.post("/api/runs/nope/confirm", json={"approve": True}).status_code == 404
+
+
+def test_confirm_approve_flow_end_to_end(tmp_path, monkeypatch):
+    # 全链路：worker 挂起 → POST confirm(approve) → 命令真执行 → run 完成
+    # 副作用验证（审计佐证思路）：看文件落没落地，不看模型嘴说
+    from agent.tools.registry import ToolRegistry
+    from agent.tools.terminal import register_terminal_tools
+
+    monkeypatch.setattr("agent.tools.terminal.WORKSPACE_ROOT", tmp_path)
+    registry = ToolRegistry()
+    register_terminal_tools(registry)
+    ctx = _make_ctx(llm=_confirm_llm("touch approved.txt", "已执行"), registry=registry)
+    client = TestClient(create_app(ctx))
+
+    run_id = client.post("/api/runs", json={"text": "建个文件"}).json()["run_id"]
+
+    assert _resolve_confirm_when_pending(client, run_id, approve=True).status_code == 200
+
+    events = _read_events(client, run_id)
+    types = [e["type"] for e in events]
+    assert "confirm.request" in types and "confirm.resolved" in types
+    assert types[-1] == "run.completed"
+    assert (tmp_path / "approved.txt").exists()   # 批准后命令真跑了
+
+
+def test_confirm_reject_flow_end_to_end(tmp_path, monkeypatch):
+    # 拒绝不炸会话：拒绝提示作为工具结果回灌，模型收尾回答，run 正常完成
+    from agent.tools.registry import ToolRegistry
+    from agent.tools.terminal import register_terminal_tools
+
+    monkeypatch.setattr("agent.tools.terminal.WORKSPACE_ROOT", tmp_path)
+    registry = ToolRegistry()
+    register_terminal_tools(registry)
+    ctx = _make_ctx(llm=_confirm_llm("touch pwned.txt", "好的，我换个方案"), registry=registry)
+    client = TestClient(create_app(ctx))
+
+    run_id = client.post("/api/runs", json={"text": "建个文件"}).json()["run_id"]
+
+    assert _resolve_confirm_when_pending(client, run_id, approve=False).status_code == 200
+
+    events = _read_events(client, run_id)
+    assert [e["type"] for e in events][-1] == "run.completed"   # 拒绝后仍正常收口
+    tool_results = [e["data"]["result"] for e in events if e["type"] == "tool.result"]
+    assert any("用户拒绝了" in r for r in tool_results)
+    assert not (tmp_path / "pwned.txt").exists()   # 拒绝 = 根本没执行

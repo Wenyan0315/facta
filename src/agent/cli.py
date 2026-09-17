@@ -49,6 +49,18 @@ def _cli_on_event(event_type: str, data: dict) -> None:
         print(f"[模型不可用] {data['message']}\n本轮到此为止，网络/额度恢复后重新提问即可。")
 
 
+def _cli_on_confirm(name: str, args: dict) -> bool:
+    """L2 确认缝的 CLI 实现（S4b）：命令全文上屏，input 裁决。
+
+    默认拒绝（空回车/任意非 y 输入都算拒）——高危操作的保守默认，
+    批准必须是显式动作。Ctrl+C 中断也算拒（异常沿既有中断通道上抛）。
+    """
+    print(f"\n  ⚠️ 高危操作待确认：{name}")
+    print(f"  {args.get('command', args)}")
+    answer = input("  批准执行？输入 y 确认，其余任意键拒绝：").strip().lower()
+    return answer == "y"
+
+
 def run_chat(
     llm: LLM,
     registry: ToolRegistry | None = None,
@@ -101,6 +113,7 @@ def run_chat(
                 summarizer=summarizer,
                 on_text=_STREAM_PRINT,
                 on_event=_cli_on_event,
+                on_confirm=_cli_on_confirm,
             )
             if reply is not None:
                 print()   # 回答收尾换行（模型挂时 error 事件已自带换行语义，不加）

@@ -33,6 +33,19 @@
     </form>
   </main>
 
+  <!-- L2 确认弹窗（S4b）：高危操作裁决，命令全文展示，批准/拒绝落后端 -->
+  <div id="confirm-modal" class="hidden">
+    <div class="confirm-box">
+      <div class="confirm-title">⚠️ agent 请求执行高危操作</div>
+      <div id="confirm-tool" class="confirm-tool"></div>
+      <pre id="confirm-args" class="confirm-args"></pre>
+      <div class="confirm-actions">
+        <button id="confirm-reject" type="button">拒绝</button>
+        <button id="confirm-approve" type="button">批准执行</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/vendor/marked.min.js"></script>
   <script src="/app.js"></script>
 </body>

@@ -1,9 +1,16 @@
-"""S2b Run Store 验收：状态机单一终态 + seq 自增 + 取消门 + 单锁。"""
+"""S2b Run Store 验收：状态机单一终态 + seq 自增 + 取消门 + 单锁。
+
+S4b 增补：waiting_approval 挂起——阻塞裁决 / 取消视为拒绝 / 单锁口径。
+"""
+
+import threading
+import time
 
 from agent.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_RUNNING,
+    STATUS_WAITING,
     Run,
     RunStore,
 )
@@ -64,3 +71,73 @@ def test_create_if_idle_rejects_while_inflight():
 
     first.finish(STATUS_COMPLETED)
     assert store.create_if_idle() is not None   # 终态后可再创建
+
+
+# ---------- S4b：waiting_approval 确认挂起 ----------
+
+def _start_confirm(run: Run) -> tuple[threading.Thread, dict]:
+    """后台线程发起确认挂起，等到 confirm_pending 生效（模拟 worker 阻塞）。"""
+    result: dict = {}
+
+    def worker():
+        result["approved"] = run.request_confirm("run_command", {"command": "rm x"})
+
+    t = threading.Thread(target=worker)
+    t.start()
+    deadline = time.time() + 2
+    while not run.confirm_pending and time.time() < deadline:
+        time.sleep(0.01)
+    return t, result
+
+
+def test_request_confirm_blocks_until_user_resolves():
+    run = Run(run_id="r1", status=STATUS_RUNNING)
+    t, result = _start_confirm(run)
+
+    assert run.confirm_pending is True
+    assert run.status == STATUS_WAITING                 # running → waiting
+    assert run.resolve_confirm(True) is True
+    t.join(timeout=2)
+
+    assert result["approved"] is True
+    assert run.status == STATUS_RUNNING                 # 裁决后回到原状态
+    # 两条事件进 append-only 流（断线重放的原料）
+    assert [e.type for e in run.events] == ["confirm.request", "confirm.resolved"]
+    assert run.events[0].data == {"tool": "run_command", "arguments": {"command": "rm x"}}
+    assert run.events[1].data == {"tool": "run_command", "approved": True}
+
+
+def test_request_confirm_reject_path():
+    run = Run(run_id="r1", status=STATUS_RUNNING)
+    t, result = _start_confirm(run)
+
+    assert run.resolve_confirm(False) is True
+    t.join(timeout=2)
+
+    assert result["approved"] is False
+    assert run.events[-1].data["approved"] is False
+
+
+def test_request_confirm_cancel_counts_as_reject():
+    run = Run(run_id="r1", status=STATUS_RUNNING)
+    t, result = _start_confirm(run)
+
+    assert run.request_cancel() is True                 # 等待中仍可取消
+    t.join(timeout=2)
+
+    assert result["approved"] is False                  # 取消视为拒绝
+    assert run.events[-1].data["approved"] is False
+
+
+def test_resolve_confirm_without_pending_is_noop():
+    run = Run(run_id="r1")
+    assert run.resolve_confirm(True) is False           # 没挂起 → confirm 端点 409 的判据
+
+
+def test_waiting_counts_as_inflight_for_single_lock():
+    store = RunStore()
+    first = store.create_if_idle()
+    first.status = STATUS_WAITING                       # 挂起等确认也算在跑
+
+    assert store.create_if_idle() is None               # 单锁不放行
+    assert store.active_run() is first

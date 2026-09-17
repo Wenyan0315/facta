@@ -71,7 +71,12 @@ class Tool:
 
     is_readonly（S3 权限分级）：True=只读（L0，结果截 100 字审计）；
     False=写类（L1，结果截 500 字）。默认 False 是保守选择——不声明的
-    工具按写类处理（审计多记不错，漏记才错）；L2 高危确认机制留 S4。
+    工具按写类处理（审计多记不错，漏记才错）。
+
+    needs_confirmation（S4b L2 高危确认）：True=每次调用都需用户裁决；
+    也可传 callable(args)->bool 按参数动态判定（run_command 的白名单：
+    只读命令免确认，其余弹窗）。裁决走 execute 的 confirm 缝；
+    无 confirm 通道时按拒绝处理（保守默认：没有眼睛就不动手）。
     """
 
     name: str                       # 工具名，模型用它"点菜"
@@ -79,6 +84,7 @@ class Tool:
     parameters: dict                # JSON Schema：参数结构
     func: Callable[..., str]        # 真正执行的 Python 函数
     is_readonly: bool = False       # S3 权限分级：只读 L0 / 写 L1（保守默认写类）
+    needs_confirmation: bool | Callable[[dict], bool] = False   # S4b L2 确认标记
 
 
 class ToolRegistry:
@@ -114,11 +120,20 @@ class ToolRegistry:
             for t in self._tools.values()
         ]
 
-    def execute(self, name: str, arguments_json: str) -> str:
+    def execute(
+        self,
+        name: str,
+        arguments_json: str,
+        confirm: Callable[[str, dict], bool] | None = None,
+    ) -> str:
         """执行模型点的菜。注意：错误也返回字符串，而不是抛异常。
 
         为什么？——错误信息回填给模型后，模型能自我纠正重试。
         崩溃没有意义；让模型看到"哪里错了"才有意义。这是 agent 的容错反馈环。
+
+        confirm（S4b L2 缝）：工具标了 needs_confirmation 时，裁决回调
+        （名字+参数 → 批准/拒绝）。拒绝不执行，回灌「用户拒绝」让模型换
+        方案；无 confirm 通道按拒绝处理（保守默认）。批准与拒绝都落审。
         """
         tool = self._tools.get(name)
         if tool is None:
@@ -135,6 +150,18 @@ class ToolRegistry:
         error = _validate_args(args, tool.parameters)
         if error:
             return f"错误：参数校验失败（{error}）"
+
+        # S4b L2 确认：裁决点在执行前。拒绝走同一审计收口（留痕可查）
+        needs = (
+            tool.needs_confirmation(args)
+            if callable(tool.needs_confirmation)
+            else tool.needs_confirmation
+        )
+        if needs and (confirm is None or not confirm(name, args)):
+            result = "用户拒绝了这次操作（未经确认不执行）。请换方案，或先向用户说明理由再重试。"
+            if self._audit is not None:
+                self._audit.record(name, args, result, tool.is_readonly)
+            return result
 
         try:
             result = tool.func(**args)

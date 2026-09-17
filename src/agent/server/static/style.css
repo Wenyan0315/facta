@@ -247,3 +247,30 @@ body {
 .task-badge.pending { background: var(--bg); color: var(--muted); }
 .task-badge.failed { background: #fee2e2; color: var(--danger); }
 .task-badge.cancelled { background: #f3e8ff; color: #7e22ce; }
+
+/* L2 确认弹窗（S4b）：遮罩 + 居中盒，命令全文等宽展示 */
+#confirm-modal {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex; align-items: center; justify-content: center;
+}
+#confirm-modal.hidden { display: none; }
+.confirm-box {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 18px 20px; width: min(520px, 90vw);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+}
+.confirm-title { font-size: 15px; font-weight: 600; margin-bottom: 10px; }
+.confirm-tool { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+.confirm-args {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px 12px; font-size: 13px; font-family: ui-monospace, monospace;
+  white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto;
+  margin: 0 0 14px;
+}
+.confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
+#confirm-approve { background: var(--danger); color: #fff; border: none; }
+#confirm-reject { background: var(--bg); }
+
+/* 任务视图：等待确认徽标（S4b 新状态） */
+.task-badge.waiting_approval { background: #fef3c7; color: #b45309; }

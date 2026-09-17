@@ -33,6 +33,7 @@ from agent.tools.context import ToolContext
 from agent.tools.files import register_file_tools
 from agent.tools.mcp_config import assemble_servers, load_server_specs
 from agent.tools.registry import ToolRegistry
+from agent.tools.terminal import register_terminal_tools
 from agent.tools.todo import register_todo_tools
 from agent.tools.web import get_web_search, register_web_tools
 
@@ -169,6 +170,7 @@ def assemble(provider: str) -> AppContext:
     )
     register_builtin(registry, ctx)
     register_file_tools(registry)   # S4a 文件四件：恒注册（workspace 围栏即安全边界）
+    register_terminal_tools(registry)   # S4b 终端执行：L2 确认缝裁决，白名单只读免确认
     register_web_tools(registry, ctx)
     register_todo_tools(registry, todos)
 
