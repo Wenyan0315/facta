@@ -30,6 +30,7 @@ from agent.orchestrator.loop import SYSTEM_PROMPT
 from agent.paths import NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
+from agent.tools.files import register_file_tools
 from agent.tools.mcp_config import assemble_servers, load_server_specs
 from agent.tools.registry import ToolRegistry
 from agent.tools.todo import register_todo_tools
@@ -167,6 +168,7 @@ def assemble(provider: str) -> AppContext:
         todos=todos,
     )
     register_builtin(registry, ctx)
+    register_file_tools(registry)   # S4a 文件四件：恒注册（workspace 围栏即安全边界）
     register_web_tools(registry, ctx)
     register_todo_tools(registry, todos)
 

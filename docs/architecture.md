@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.46（2026-09-17）｜随着里程碑推进持续迭代此文档
+> 版本：v0.47（2026-09-17）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.43 起）：见 [product.md](product.md)——通用个人 agent，场景优先级由真实使用数据排序
 
@@ -130,7 +130,7 @@
 | S1 ✅ | 多会话管理：/new 会话隔离（active+archive：位置固定无指针、文件名=身份/标题=标签、先存后清、原地清不 rebind） | 状态管理 |
 | S2 ✅ | 产品骨架 v1 对话视图：S2a 清账（agent_loop 正名 orchestrator 编排层、run_turn 内核/外设分离、assemble 装配单一真值源）→ S2b Web 壳（FastAPI+SSE：Run 三接口分离、内存 Run Store 单锁状态机、断线重连重放、会话切回、零构建链前端三件）；任务视图按双视图预留未实现 | 前后端、SSE、Run 状态机 |
 | S3 ✅ | 安全底座：工具权限分级（L0 只读/L1 写/L2 确认留 S4）+ 注入界碑（外部内容包裹声明+免疫条款）+ 审计日志（registry 收口 append-only jsonl 按天滚动，分级截断） | 安全 |
-| S4 | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）；**开工附带清账：builtin.py 拆分（工具数>10 触发）+ 补 knowledge_base/builtin 测试护栏** | 文件系统、进程调度 |
+| S4 | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）。**S4a ✅ 文件四件（read/search_code/list_dir/write_file+diff）+ builtin 拆分（time/history/notes 三族）+ workspace 围栏（__file__ 锚定+敏感黑名单）**；S4b 待做：终端执行+L2 确认机制 | 文件系统、进程调度 |
 | S5 | skill 系统：可复用技能包与装载（2026-09 需求点名）+ 规则文件（AGENTS.md 式，learned 的读取侧；含系统提示词外置——SYSTEM_PROMPT 迁出 loop.py，改行为不碰代码，2026-09-15 裁定并入本站） | 插件化 |
 | S6 | 多 agent 协作：subagent 编排（主线2 的终点；判据=噪声隔离，见调研记录；worktree 隔离机制） | 编排 |
 | S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止） | 结构化知识、图可视化 |
@@ -172,4 +172,5 @@
 | [015-web-tools](decisions/015-web-tools.md) | 联网工具 | web_search+fetch_web；搜索 Provider 供应商化（Tavily 先行/双路由留位）；SSRF 栅栏（DNS 后逐 IP 检查）；条件注册；侧栏归档时间戳 |
 | [016-todos](decisions/016-todos.md) | 个人待办 | TodoStore 独立存储（跨会话资产+store 锁）；工具三件 vs TodoWrite 裁定；UI/API/agent 共用单实例；侧栏待办面板 |
 | [017-s3-security](decisions/017-s3-security.md) | S3 安全 | 权限分级 L0/L1（L2 确认判据已定留 S4）；审计 registry 收口；注入界碑；威胁模型=不可信内容经模型之手变动作 |
+| [018-s4a-file-tools](decisions/018-s4a-file-tools.md) | S4a 文件工具 | 文件四件（write_file 带 diff）；workspace 围栏（__file__ 锚定+敏感黑名单读都不行）；builtin 按家族拆三件；note vs file 分工边界 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |

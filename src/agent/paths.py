@@ -17,3 +17,8 @@ from pathlib import Path
 NOTES_DIR = Path("data/notes")   # 知识库笔记目录（语料资产，进 git）
 LEARNED_DIR = Path("data/learned")   # M6.4 记忆固化目录（项目级记忆资产，进 git；用户级记忆另行住仓库外）
 SESSIONS_DIR = Path("data/memory/sessions")   # S1 多会话管理：历史会话归档仓库（active 仍是 data/memory/session.json，位置固定无指针）
+
+# S4 文件工具的 workspace 围栏根：项目仓库根（src/agent/paths.py 上两级）。
+# 用 __file__ 锚定而非 Path.cwd()——已知边界「依赖从仓库根启动」就治了一半：
+# 无论从哪个目录启动，agent 只碰得到本项目的文件（S4a 裁定：workspace=项目根）
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
