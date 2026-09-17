@@ -71,6 +71,7 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  position: relative;   # 会话行操作按钮的定位锚
 }
 
 #session-list li:hover { background: var(--bg); }
@@ -83,6 +84,35 @@ body {
 }
 #session-list li.current .session-time { color: var(--accent); }
 .muted { color: var(--muted); }
+
+/* 会话行内操作（2026-09-17 体验轮）：悬停浮现，不占布局 */
+.session-actions {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  display: none;
+  gap: 2px;
+}
+#session-list li:hover .session-actions { display: flex; }
+.session-actions button {
+  border: none;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 5px;
+  color: var(--muted);
+}
+.session-actions button:hover { color: var(--danger); background: #fff; }
+.session-edit {
+  width: 100%;
+  font-size: 14px;
+  padding: 2px 4px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font-family: inherit;
+}
 
 /* 主聊天区 */
 #chat {

@@ -175,3 +175,9 @@
 | [018-s4a-file-tools](decisions/018-s4a-file-tools.md) | S4a 文件工具 | 文件四件（write_file 带 diff）；workspace 围栏（__file__ 锚定+敏感黑名单读都不行）；builtin 按家族拆三件；note vs file 分工边界 |
 | [019-s4b-terminal-confirm](decisions/019-s4b-terminal-confirm.md) | S4b 终端+确认 | run_command（超时/截断/cwd 锚定）；白名单免确认双条件（用户拍板粒度）；确认缝 registry 收口（loop 第四条缝）；waiting_approval 挂起+断线重弹；拒绝回灌不炸会话；批准拒绝都落审 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
+
+## 已知问题（活清单）
+
+> 非阻塞但已登记的病灶，随里程碑推进逐个消除。
+
+- **任务视图偶发不切换**（2026-09-16 首次报告，09-17 S4b 验收复现一次）：点侧栏其他会话再点回时，主视图第一次不切换（多点一次恢复）。推测与 SSE 事件流消费 / DOM 状态竞争有关，未定位根因。触发信号=用户再次报告或前端框架化时一并排查。

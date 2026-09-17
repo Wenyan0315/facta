@@ -208,6 +208,7 @@ async function send() {
   const text = inputEl.value.trim();
   if (!text || currentRunId) return;
   inputEl.value = "";
+  inputEl.style.height = "";   // 高度复位到默认两行（auto-grow 的内联样式清掉）
 
   addUser(text);
   const turn = addAssistantTurn();
@@ -267,11 +268,67 @@ async function loadSessions() {
         timeEl.textContent = s.time;
         li.appendChild(timeEl);
       }
+      // 行内操作（2026-09-17 体验轮）：重命名（active/归档都可）、删除（仅归档——
+      // 活会话先归档再删）。按钮 stopPropagation，不触发 li 的切回
+      const actions = document.createElement("div");
+      actions.className = "session-actions";
+      const renameBtn = document.createElement("button");
+      renameBtn.type = "button";
+      renameBtn.textContent = "✎";
+      renameBtn.title = "重命名";
+      renameBtn.addEventListener("click", (e) => { e.stopPropagation(); startSessionRename(li, s); });
+      actions.appendChild(renameBtn);
+      if (!s.current) {
+        const delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.textContent = "×";
+        delBtn.title = "删除";
+        delBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          if (!confirm(`删除会话「${s.title}」？不可恢复。`)) return;
+          await fetch(`/api/sessions/${encodeURIComponent(s.name)}`, { method: "DELETE" });
+          loadSessions();
+        });
+        actions.appendChild(delBtn);
+      }
+      li.appendChild(actions);
       sessionListEl.appendChild(li);
     }
   } catch (_) {
     sessionListEl.innerHTML = '<li class="muted">加载会话失败</li>';
   }
+}
+
+function startSessionRename(li, s) {
+  // 行内编辑（与待办同款交互）：标题换成输入框，Enter 保存 / Esc 取消 / 失焦保存
+  const titleEl = li.querySelector(".session-title");
+  if (!titleEl) return;
+  const editor = document.createElement("input");
+  editor.type = "text";
+  editor.className = "session-edit";
+  editor.value = s.title;
+  titleEl.replaceWith(editor);
+  editor.focus();
+  editor.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const value = editor.value.trim();
+    if (save && value && value !== s.title) {
+      await fetch(`/api/sessions/${encodeURIComponent(s.name)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: value }),
+      });
+    }
+    loadSessions();   // 重新渲染（无论存否都还原为列表态）
+  };
+  editor.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  editor.addEventListener("blur", () => finish(true));
 }
 
 function emptyHint(text) {
@@ -340,6 +397,13 @@ inputEl.addEventListener("keydown", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && currentRunId) cancelEl.click();
+});
+
+// 多行自适应（2026-09-17 体验轮）：随内容长高，封顶后内部滚动。
+// 先 height:auto 再读 scrollHeight——不归零会取到旧高度的较大值，只增不减
+inputEl.addEventListener("input", () => {
+  inputEl.style.height = "auto";
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
 });
 
 // ---- 待办（014：任务=个人待办；与 agent 工具共用同一 store） ----

@@ -83,6 +83,12 @@ class ConfirmRequest(BaseModel):
     approve: bool
 
 
+class RenameSessionRequest(BaseModel):
+    """会话重命名的请求体（2026-09-17 体验轮）：只改 title 标签。"""
+
+    text: str
+
+
 def _run_worker(ctx: AppContext, run, user_text: str) -> None:
     """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。
 
@@ -255,10 +261,19 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             m = re.match(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})", name)
             return f"{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}" if m else ""
 
-        items = [{"name": "active", "title": derive_title(ctx.session), "time": "", "current": True}]
+        # active 置顶（正在聊的常驻可见）+ 归档新→旧（时间倒序，2026-09-17
+        # 体验轮：正序要把最近会话翻到底部，与「最近使用优先」直觉相悖）。
+        # 倒序在端点做而非 list_archived_sessions——那个函数的升序语义
+        # （字典序=时间序）是归档命名的底层契约，不随展示需求翻转
+        items = [{
+            "name": "active",
+            "title": ctx.session.title or derive_title(ctx.session),   # 重命名优先于首句派生
+            "time": "",
+            "current": True,
+        }]
         items.extend(
             {"name": path.name, "title": title, "time": _time_from_name(path.name)}
-            for path, title in list_archived_sessions(SESSIONS_DIR)
+            for path, title in reversed(list_archived_sessions(SESSIONS_DIR))
         )
         return items
 
@@ -269,6 +284,40 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
                 raise HTTPException(409, "有任务在运行，无法开新会话")
             _archive_current(ctx)
         return {"ok": True}
+
+    @app.put("/api/sessions/{name}")
+    def rename_session(name: str, body: RenameSessionRequest):
+        """重命名（2026-09-17 体验轮）：改的是 title 标签，身份（文件名）不动。"""
+        title = body.text.strip()
+        if not title:
+            raise HTTPException(400, "标题不能为空")
+        if name == "active":   # 当前会话：改内存 + 立即落盘（不等下一轮）
+            with _SESSION_LOCK:
+                ctx.session.title = title
+                save_session(ctx.session, MEMORY_PATH)
+            return {"ok": True}
+        if "/" in name or ".." in name:
+            raise HTTPException(400, "非法会话名")
+        path = SESSIONS_DIR / name
+        if not path.is_file():
+            raise HTTPException(404, "会话不存在")
+        session = load_session(path)
+        session.title = title
+        save_session(session, path)
+        return {"ok": True}
+
+    @app.delete("/api/sessions/{name}")
+    def delete_session(name: str):
+        """删除归档会话（2026-09-17 体验轮）。active 是活会话不删——先归档再删。"""
+        if name == "active":
+            raise HTTPException(400, "当前会话不能删除（先归档或切走再删）")
+        if "/" in name or ".." in name:
+            raise HTTPException(400, "非法会话名")
+        path = SESSIONS_DIR / name
+        if not path.is_file():
+            raise HTTPException(404, "会话不存在")
+        path.unlink()
+        return {"ok": True, "deleted": name}
 
     @app.post("/api/sessions/{name}/switch")
     def switch_session(name: str):
