@@ -16,6 +16,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from agent.core.audit import AuditLog
 from agent.core.types import Message
 from agent.core.gateway import SemanticCacheLLM
 from agent.core.llm import LLM, get_llm
@@ -38,6 +39,7 @@ from agent.tools.web import get_web_search, register_web_tools
 MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx）
 VECTOR_DB_DIR = Path("data/vector_db")           # M7：向量库落盘位置（运行时数据，.gitignore 已排除）
 TODOS_PATH = Path("data/todos.json")             # 个人待办（2026-09-17）：跨会话资产，独立于 session
+AUDIT_DIR = Path("data/audit")                   # S3 审计日志（2026-09-17）：工具调用 append-only jsonl 按天滚动
 
 
 @dataclass
@@ -154,7 +156,8 @@ def assemble(provider: str) -> AppContext:
     if web_client is not None:
         print(f"联网搜索：{web_client.name}")
     todos = TodoStore(TODOS_PATH)   # 待办仓库：无外部依赖，恒构造（工具+API 共用）
-    registry = ToolRegistry()
+    audit = AuditLog(AUDIT_DIR)     # S3 审计：registry 收口注入——所有工具调用自动落审
+    registry = ToolRegistry(audit=audit)
     ctx = ToolContext(
         notes_dir=NOTES_DIR,
         kb=kb,

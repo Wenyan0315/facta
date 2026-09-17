@@ -17,6 +17,8 @@ import json
 from dataclasses import dataclass
 from typing import Callable
 
+from agent.core.audit import AuditLog
+
 
 def _validate_args(args: dict, parameters: dict) -> str | None:
     """按 JSON Schema 最小子集校验参数结构；返回错误描述，合法返回 None。
@@ -66,19 +68,25 @@ class Tool:
 
     name/description/parameters 都是给模型看的"使用说明书"：
     模型能不能正确选用这个工具，全靠 description 写得好不好。
+
+    is_readonly（S3 权限分级）：True=只读（L0，结果截 100 字审计）；
+    False=写类（L1，结果截 500 字）。默认 False 是保守选择——不声明的
+    工具按写类处理（审计多记不错，漏记才错）；L2 高危确认机制留 S4。
     """
 
     name: str                       # 工具名，模型用它"点菜"
     description: str                # 说明书：什么时候该用这个工具
     parameters: dict                # JSON Schema：参数结构
     func: Callable[..., str]        # 真正执行的 Python 函数
+    is_readonly: bool = False       # S3 权限分级：只读 L0 / 写 L1（保守默认写类）
 
 
 class ToolRegistry:
     """登记工具 + 生成菜单 + 执行点单。"""
 
-    def __init__(self) -> None:
+    def __init__(self, audit: AuditLog | None = None) -> None:
         self._tools: dict[str, Tool] = {}
+        self._audit = audit   # S3 审计：None=不落盘（测试/教学路径）；装配层注入真 log
 
     def register(self, tool: Tool) -> None:
         """登记一个工具（名字重复时后者覆盖前者）。"""
@@ -131,8 +139,15 @@ class ToolRegistry:
         try:
             result = tool.func(**args)
         except TypeError as e:
-            return f"错误：参数不匹配（{e}）"
+            result = f"错误：参数不匹配（{e}）"
         except Exception as e:  # 兜底：工具内部任何异常都不让程序崩溃
-            return f"错误：工具执行失败（{type(e).__name__}: {e}）"
+            result = f"错误：工具执行失败（{type(e).__name__}: {e}）"
+        else:
+            result = str(result)
 
-        return str(result)
+        # S3 审计收口：所有工具调用（含失败）在这里落盘——单一必经点，
+        # 新工具零成本继承。失败也记（result 是错误串，事后可查）。
+        if self._audit is not None:
+            self._audit.record(name, args, result, tool.is_readonly)
+
+        return result

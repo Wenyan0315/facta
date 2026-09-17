@@ -19,6 +19,7 @@ venv/
 data/memory/
 data/vector_db/
 data/todos.json
+data/audit/
 servers/sandbox/
 
 # 系统文件

@@ -221,6 +221,7 @@ def register_builtin(registry: ToolRegistry, ctx: ToolContext) -> None:
             description="获取当前的日期、时间和星期。当用户询问现在几点、今天几号、今天星期几时使用。",
             parameters=_EMPTY_PARAMS,
             func=get_current_time,
+            is_readonly=True,
         )
     )
     registry.register(
@@ -229,6 +230,7 @@ def register_builtin(registry: ToolRegistry, ctx: ToolContext) -> None:
             description="列出个人知识库（data/notes 目录）里现有的全部笔记文件名清单。",
             parameters=_EMPTY_PARAMS,
             func=list_notes,
+            is_readonly=True,
         )
     )
     registry.register(
@@ -238,6 +240,7 @@ def register_builtin(registry: ToolRegistry, ctx: ToolContext) -> None:
             "文件名可先用 list_notes 查询。当用户想看某篇笔记的详细内容时使用。",
             parameters=_READ_NOTE_PARAMS,
             func=read_notes,
+            is_readonly=True,
         )
     )
     registry.register(
@@ -267,6 +270,7 @@ def register_builtin(registry: ToolRegistry, ctx: ToolContext) -> None:
                 ),
                 parameters=_SEARCH_NOTES_PARAMS,
                 func=search_notes,
+                is_readonly=True,
             )
         )
         if ctx.llm is not None:   # 复合工具需要双依赖：检索(kb)+摘要(llm)，缺一不上菜单
@@ -283,6 +287,7 @@ def register_builtin(registry: ToolRegistry, ctx: ToolContext) -> None:
                     ),
                     parameters=_SEARCH_AND_SUMMARIZE_PARAMS,
                     func=search_and_summarize,
+                    is_readonly=True,
                 )
             )
     if ctx.history is not None:   # 条件注册：会话记忆是核心依赖（无 history 此工具无意义）
@@ -306,6 +311,7 @@ def register_builtin(registry: ToolRegistry, ctx: ToolContext) -> None:
                 ),
                 parameters=_SEARCH_HISTORY_PARAMS,
                 func=search_history,
+                is_readonly=True,
             )
         )
         registry.register(
@@ -323,5 +329,6 @@ def register_builtin(registry: ToolRegistry, ctx: ToolContext) -> None:
                 ),
                 parameters=_READ_HISTORY_PARAMS,
                 func=read_history,
+                is_readonly=True,
             )
         )

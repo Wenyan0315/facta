@@ -185,5 +185,7 @@ def test_fetch_web_truncates_long_text(monkeypatch):
 
     monkeypatch.setattr(web.httpx, "Client", _FakeClient)
     out = _fetch_web("https://example.com/long")
-    assert len(out) <= web.MAX_TEXT_CHARS + 30
+    # 界碑（S3）包裹后总长 = 8000 正文 + 界碑声明 + 截断标记，上限放宽到 +300
+    assert len(out) <= web.MAX_TEXT_CHARS + 300
     assert "已截断" in out
+    assert out.startswith("〔以下为外部网络内容") and out.rstrip().endswith("〔外部网络内容结束〕")

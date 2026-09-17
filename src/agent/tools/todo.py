@@ -50,6 +50,7 @@ def register_todo_tools(registry: ToolRegistry, store: TodoStore) -> None:
             "required": [],
         },
         func=lambda only_pending=True: _fmt(store.list(only_pending=bool(only_pending))),
+        is_readonly=True,
     ))
     registry.register(Tool(
         name="complete_todo",
