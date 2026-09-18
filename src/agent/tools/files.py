@@ -195,7 +195,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
             },
             "required": ["pattern"],
         },
-        func=lambda pattern: _search_code(pattern),
+        func=_search_code,
         is_readonly=True,
     ))
     registry.register(Tool(
@@ -222,5 +222,5 @@ def register_file_tools(registry: ToolRegistry) -> None:
             },
             "required": ["path", "content"],
         },
-        func=lambda path, content: _write_file(path, content),
+        func=_write_file,
     ))

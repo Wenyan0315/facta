@@ -5,10 +5,14 @@
 
 provider 从参数进、不碰 sys.argv：sys.argv 是 CLI 的衣服，Web 的 provider
 可能来自环境变量或默认值。谁解析 provider 谁决定，assemble 只管装配。
+
+日志：内核库一律 logging.getLogger(__name__)，CLI 保留 print（用户界面）。
+Web 模式由 server/app.py 配置 logging，CLI 由 __main__.py 配置。
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,10 +21,10 @@ from typing import Any
 from dotenv import load_dotenv
 
 from agent.core.audit import AuditLog
-from agent.core.types import Message
 from agent.core.gateway import SemanticCacheLLM
 from agent.core.llm import LLM, get_llm
 from agent.core.telemetry import UsageLedger
+from agent.core.types import Message
 from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.sync import sync_notes
 from agent.knowledge.vector_store import ChromaVectorStore
@@ -30,6 +34,8 @@ from agent.orchestrator.loop import SYSTEM_PROMPT
 from agent.paths import NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
+
+logger = logging.getLogger(__name__)
 from agent.tools.files import register_file_tools
 from agent.tools.mcp_config import assemble_servers, load_server_specs
 from agent.tools.registry import ToolRegistry
@@ -127,7 +133,7 @@ def assemble(provider: str) -> AppContext:
     #        几乎不可能命中 0.92 阈值（白付 embed）
     internal_llm = get_llm(provider, ledger)
     llm = SemanticCacheLLM(internal_llm, embedder, ledger)
-    print(f"当前模型：{provider}")
+    logger.info("当前模型：%s", provider)
 
     # 3) 知识库（M7）：组装 embedder + store，索引走增量同步——
     #    只为真正新增/修改的笔记花 embedding 的钱；改过的自动删旧块重建
@@ -136,7 +142,7 @@ def assemble(provider: str) -> AppContext:
     else:
         kb = KnowledgeBase(embedder, ChromaVectorStore(VECTOR_DB_DIR))
     report = sync_notes(kb, NOTES_DIR)
-    print(f"知识库同步：新增 {report.added} / 删除 {report.removed} / 不变 {report.unchanged}")
+    logger.info("知识库同步：新增 %s / 删除 %s / 不变 %s", report.added, report.removed, report.unchanged)
 
     # 4) 会话记忆（M6）：启动时载入【完整会话状态】——底片(消息) + 压缩缓存(摘要游标)
     #    关键细节：必须在登记工具之前载入——search_history 的闭包要抓这个列表对象
@@ -144,7 +150,7 @@ def assemble(provider: str) -> AppContext:
     restored = len(session.messages)
     ensure_persona(session)   # 人设是装配不变量：CLI/Web 两个入口都必须带着开工
     if restored:
-        print(f"已恢复 {restored} 条历史消息（{MEMORY_PATH}）")
+        logger.info("已恢复 %s 条历史消息（%s）", restored, MEMORY_PATH)
 
     # 5) 工具（M5）：登记内置工具，交给主循环
     #    P1-2：依赖打包成 ToolContext——kb 给 search/write 查重检索、
@@ -156,7 +162,7 @@ def assemble(provider: str) -> AppContext:
     #      有 key 才上菜单（条件注册，与 kb=None 同语义——mock 路径不背联网依赖）
     web_client = get_web_search()
     if web_client is not None:
-        print(f"联网搜索：{web_client.name}")
+        logger.info("联网搜索：%s", web_client.name)
     todos = TodoStore(TODOS_PATH)   # 待办仓库：无外部依赖，恒构造（工具+API 共用）
     audit = AuditLog(AUDIT_DIR)     # S3 审计：registry 收口注入——所有工具调用自动落审
     registry = ToolRegistry(audit=audit)
@@ -180,10 +186,10 @@ def assemble(provider: str) -> AppContext:
     try:
         specs = load_server_specs(Path(os.environ.get("MCP_SERVERS", "mcp_servers.json")))
     except ValueError as e:
-        print(f"MCP 配置读取失败，本轮无外部工具：{e}")
+        logger.warning("MCP 配置读取失败，本轮无外部工具：%s", e)
         specs = []
     mcp_clients = assemble_servers(registry, specs)
-    print(f"已装载工具：{', '.join(registry.names())}")
+    logger.info("已装载工具：%s", ", ".join(registry.names()))
 
     return AppContext(
         provider=provider,

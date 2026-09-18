@@ -15,14 +15,18 @@ S2a 把它迁到编排层 orchestrator/，core/ 收缩为纯地基。
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable
+from enum import Enum
 
 from agent.core.llm import LLM, LLMUnavailableError, merge_stream_chunks
 from agent.core.types import Message
 from agent.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
 from agent.memory.store import Session
 from agent.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "你是一个 AI 学习助手（个人 agent），帮助我学习 AI Agent 开发。"
@@ -68,6 +72,19 @@ SYSTEM_PROMPT = (
 _MAX_TOOL_ROUNDS = 5
 
 _WEEKDAYS = "一二三四五六日"
+
+
+class RunResult(Enum):
+    """run_turn 的终态枚举——替代 None 二义性（S4 评审 #3）。
+
+    三个值互斥，调用方一眼看清本轮怎么结束的：
+    - COMPLETED  正常结束，reply 里有最终 assistant 回答
+    - CANCELLED  用户取消（should_cancel 命中），半截轮已掐
+    - FAILED     模型全挂（LLMUnavailableError），错误已发 error 事件
+    """
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
 
 
 class _RunCancelled(Exception):
@@ -122,7 +139,7 @@ def run_turn(
     on_event: Callable[[str, dict], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     on_confirm: Callable[[str, dict], bool] | None = None,
-) -> Message | None:
+) -> tuple[RunResult, Message | None]:
     """跑一轮对话：用户消息入底片 → 投影 →（摘要）→ 工具循环 → 收尾。
 
     参数：
@@ -138,7 +155,7 @@ def run_turn(
                         max_rounds    {}       保险丝熔断，强制收尾
                         error         {"message": str}  模型全挂，本轮无产出
         should_cancel 协作式取消检查点回调：返回 True 时在下一个检查点掐半截轮、
-                      返回 None（不发事件——cancelled 是 Run 级终态，归调用方）。
+                      返回 (CANCELLED, None)（不发事件——cancelled 是 Run 级终态，归调用方）。
                       检查点粒度 = 每次模型调用前（①）+ 流式生成中每块到手时（③，
                       即时生效）+ 每次工具执行前（②）。CLI 传 None 走键盘中断。
         on_confirm  L2 确认缝（S4b）：工具标了 needs_confirmation 时透传给
@@ -147,9 +164,11 @@ def run_turn(
                     工具一律按拒绝处理（保守默认）
 
     返回：
-        Message   本轮最终 assistant 回答（已入底片）
-        None      本轮无产出：模型不可用（已发 error 事件）或被取消（should_cancel
-                  返回 True）——两种情况都已在内部掐掉半截轮、user 消息留底片
+        (RunResult, Message | None)  终态 + 本轮最终 assistant 回答（仅 COMPLETED 时非 None）
+        三个终态互斥，调用方不再猜 None 的含义：
+        - COMPLETED  正常结束，reply 非 None
+        - CANCELLED  用户取消，reply=None
+        - FAILED     模型全挂（已发 error 事件），reply=None
 
     不碰文件、不碰 input/print：落盘归装配层，I/O 归调用方的两条缝。
     """
@@ -180,7 +199,7 @@ def run_turn(
             # 协作式取消检查点①：每次模型调用前。取消则掐半截轮、本轮无产出
             if should_cancel and should_cancel():
                 trim_incomplete_round(session.messages)
-                return None
+                return RunResult.CANCELLED, None
 
             # 流式消费：分片边收边喂 on_text，收完 merge 拼回完整回复。
             # 点菜轮 content 通常为空（不冒字），模型偶尔先冒半句再点菜
@@ -191,7 +210,9 @@ def run_turn(
 
             if not reply.tool_calls:   # 模型不点菜了 → 最终回答，退出循环
                 session.messages.append(reply)
-                return reply
+                return RunResult.COMPLETED, reply
+
+            assert registry is not None   # 菜单来自 registry；None 时无菜单可点，模型不应点菜
 
             # 双写：底片入史（落盘用）+ 投影同步（本轮内模型必须看得见）
             session.messages.append(reply)
@@ -201,7 +222,7 @@ def run_turn(
                 # 协作式取消检查点②：每次工具执行前
                 if should_cancel and should_cancel():
                     trim_incomplete_round(session.messages)
-                    return None
+                    return RunResult.CANCELLED, None
                 if on_event:
                     on_event("tool_started", {"name": tc["name"], "arguments": tc["arguments"]})
                 result = registry.execute(tc["name"], tc["arguments"], confirm=on_confirm)
@@ -211,23 +232,22 @@ def run_turn(
                 tool_msg = Message(role="tool", tool_call_id=tc["id"], content=result)
                 session.messages.append(tool_msg)
                 payload.append(tool_msg)
-        else:
-            # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
-            if on_event:
-                on_event("max_rounds", {})
-            # 最后一问不递菜单，逼它说话（同流式消费，同样罩检查点③）
-            reply = merge_stream_chunks(
-                _cancel_aware_stream(llm.generate_stream(payload, None), should_cancel),
-                on_text=on_text,
-            )
+        # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
+        if on_event:
+            on_event("max_rounds", {})
+        # 最后一问不递菜单，逼它说话（同流式消费，同样罩检查点③）
+        reply = merge_stream_chunks(
+            _cancel_aware_stream(llm.generate_stream(payload, None), should_cancel),
+            on_text=on_text,
+        )
 
         session.messages.append(reply)
-        return reply
+        return RunResult.COMPLETED, reply   # noqa: TRY300  # 紧贴 for 收尾段陈述「保险丝收尾也入史」，不挪 else
     except _RunCancelled:
         trim_incomplete_round(session.messages)
-        return None
+        return RunResult.CANCELLED, None
     except LLMUnavailableError as exc:
         trim_incomplete_round(session.messages)
         if on_event:
             on_event("error", {"message": str(exc)})
-        return None
+        return RunResult.FAILED, None

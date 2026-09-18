@@ -30,8 +30,8 @@ from agent.core.types import Message
 from agent.knowledge.knowledge_base import KnowledgeBase
 
 if TYPE_CHECKING:
-    from agent.tools.web import WebSearchClient   # 仅类型标注用，运行时不导入（防循环）
     from agent.memory.todos import TodoStore
+    from agent.tools.web import WebSearchClient  # 仅类型标注用，运行时不导入（防循环）
 
 
 @dataclass
@@ -52,5 +52,5 @@ class ToolContext:
     kb: KnowledgeBase | None = None
     llm: LLM | None = None
     history: list[Message] | None = None
-    web: "WebSearchClient | None" = None   # 联网搜索 client（2026-09-16）：None=web 工具不上菜单
-    todos: "TodoStore | None" = None       # 待办仓库（2026-09-17）：None=待办工具不上菜单
+    web: WebSearchClient | None = None   # 联网搜索 client（2026-09-16）：None=web 工具不上菜单
+    todos: TodoStore | None = None       # 待办仓库（2026-09-17）：None=待办工具不上菜单

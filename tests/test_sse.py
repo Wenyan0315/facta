@@ -2,13 +2,13 @@
 
 import json
 
-from agent.server.run_store import RunEvent, SCHEMA_VERSION
+from agent.server.run_store import SCHEMA_VERSION, RunEvent
 from agent.server.sse import encode_heartbeat, encode_sse
 
 
 def _decode_data_line(sse_text: str) -> dict:
     """从一帧 SSE 文本里取回 data 行的 JSON（编码正确性的反向验证）。"""
-    data_line = next(l for l in sse_text.split("\n") if l.startswith("data: "))
+    data_line = next(line for line in sse_text.split("\n") if line.startswith("data: "))
     return json.loads(data_line[len("data: "):])
 
 

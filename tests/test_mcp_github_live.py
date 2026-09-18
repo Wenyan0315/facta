@@ -28,7 +28,8 @@ def _gh_token() -> str:
     if shutil.which("gh") is None:
         pytest.skip("未安装 gh CLI")
     result = subprocess.run(
-        ["gh", "auth", "token"], capture_output=True, text=True, timeout=30
+        ["gh", "auth", "token"], capture_output=True, text=True, timeout=30,
+        check=False,   # 退出码自行判断（未登录 → skip）
     )
     if result.returncode != 0 or not result.stdout.strip():
         pytest.skip("gh 未登录或取不到 token")

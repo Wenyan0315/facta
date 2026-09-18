@@ -20,7 +20,6 @@ from agent.tools.terminal import (
     register_terminal_tools,
 )
 
-
 # ---------- needs_confirm：白名单免确认 ----------
 
 @pytest.mark.parametrize("command", [
@@ -37,6 +36,11 @@ from agent.tools.terminal import (
     "rg 'def run_turn' src/",
     "echo hello",
     "/usr/bin/git status",            # 绝对路径 → 取 basename 判白名单
+    # 参数级校验的回归侧（S4 评审 #17）：干净参数不误伤
+    "find . -name *.py",
+    "find tests/ -type f",
+    "sort data.txt",
+    "sort -n -r numbers.txt",
 ])
 def test_whitelisted_commands_skip_confirm(command):
     assert needs_confirm(command) is False
@@ -64,6 +68,12 @@ def test_whitelisted_commands_skip_confirm(command):
     "python -m http.server",
     "touch new_file.txt",
     "mkdir foo",
+    # 参数级绕过（S4 评审 #17）：只读命令名 + 危险参数 ≠ 只读
+    "find . -exec rm {} +",                # -exec 执行任意命令（无分号形式）
+    "find . -execdir rm {} +",
+    "find . -name *.pyc -delete",          # -delete 删文件
+    "sort -o /tmp/victim data.txt",        # sort -o 覆盖任意文件
+    "sort --output=/tmp/victim data.txt",  # 长选项等号形式
     # 环境变量前缀：语法不在白名单模型里 → 保守确认
     "FOO=1 ls",
     # 边界
@@ -192,7 +202,7 @@ def test_run_turn_passes_confirm_through(tmp_path, monkeypatch):
     from agent.core.llm import ScriptedLLM
     from agent.core.types import Message
     from agent.memory.store import Session
-    from agent.orchestrator.loop import run_turn
+    from agent.orchestrator.loop import RunResult, run_turn
 
     monkeypatch.setattr("agent.tools.terminal.WORKSPACE_ROOT", tmp_path)
     llm = ScriptedLLM([
@@ -206,11 +216,12 @@ def test_run_turn_passes_confirm_through(tmp_path, monkeypatch):
     session = Session()
     session.messages.append(Message(role="system", content="sys"))
 
-    reply = run_turn(
+    result, reply = run_turn(
         session, "建个文件", llm=llm, registry=registry,
         on_confirm=lambda name, args: False,
     )
 
+    assert result is RunResult.COMPLETED
     assert reply is not None and reply.content == "好的，我换个方案"
     assert not (tmp_path / "x.txt").exists()
     tool_msgs = [m for m in session.messages if m.role == "tool"]

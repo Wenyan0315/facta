@@ -16,9 +16,30 @@ InMemory 原生就是余弦；Chroma 的 cosine 空间返回的是「距离」�
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from agent.core.vector_math import cosine_similarity  # M7.5c：余弦搬到 core 地基，跨层消费
+from agent.core.vector_math import (
+    cosine_similarity,  # M7.5c：余弦搬到 core 地基，跨层消费
+)
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    """一次检索命中的完整结果（S4 评审 #R5：RAG 溯源）。
+
+    相比裸 tuple (块文本, 分数)：命名访问防位置漂移，metadata 让
+    检索结果自带出处——模型引用资料时能说清「出自哪篇笔记」。
+    """
+
+    chunk: str                       # 块文本
+    score: float                     # 相似度（越大越像）
+    metadata: dict = field(default_factory=dict)  # 来源面单：source=文件名, hash=内容指纹
+
+    @property
+    def source(self) -> str:
+        """来源文件名；老库/无溯源数据时标「未知来源」而不是炸。"""
+        return str(self.metadata.get("source", "未知来源"))
 
 
 class VectorStore(ABC):
@@ -39,8 +60,8 @@ class VectorStore(ABC):
         """按 id 删除，id 不存在则静默跳过。"""
 
     @abstractmethod
-    def query(self, vector: list[float], top_k: int) -> list[tuple[str, float]]:
-        """返回与查询向量最像的 top_k 个 (块文本, 相似度)，相似度越大越像。"""
+    def query(self, vector: list[float], top_k: int) -> list[SearchHit]:
+        """返回与查询向量最像的 top_k 个命中（文本+相似度+来源面单）。"""
 
     @abstractmethod
     def get_all(self) -> dict[str, dict]:
@@ -90,7 +111,10 @@ class InMemoryVectorStore(VectorStore):
             for id_, vec in self._vectors.items()
         ]
         scored.sort(key=lambda item: item[1], reverse=True)
-        return [(self._chunks[i], s) for i, s in scored[:top_k]]
+        return [
+            SearchHit(chunk=self._chunks[i], score=s, metadata=self._metas.get(i, {}))
+            for i, s in scored[:top_k]
+        ]
 
     def get_all(self):
         return {id_: dict(meta) for id_, meta in self._metas.items()}
@@ -148,16 +172,23 @@ class ChromaVectorStore(VectorStore):
         res = self._col.query(
             query_embeddings=[vector],
             n_results=n,
-            include=["documents", "distances"],
+            include=["documents", "distances", "metadatas"],
         )
         docs = res["documents"][0] or []
         dists = res["distances"][0] or []
+        metas = res["metadatas"][0] or []
         # cosine 空间下 Chroma 吐的是「距离」= 1 - 余弦相似度，换算回相似度
-        return [(doc, 1.0 - dist) for doc, dist in zip(docs, dists)]
+        return [
+            SearchHit(chunk=doc, score=1.0 - dist, metadata=meta or {})
+            for doc, dist, meta in zip(docs, dists, metas, strict=True)  # Chroma 三列表必须对齐
+        ]
 
     def get_all(self):
         res = self._col.get(include=["metadatas"])
-        return {id_: meta or {} for id_, meta in zip(res["ids"], res["metadatas"])}
+        return {
+            id_: meta or {}
+            for id_, meta in zip(res["ids"], res["metadatas"], strict=True)  # 两列表必须对齐
+        }
 
     def count(self):
         return self._col.count()

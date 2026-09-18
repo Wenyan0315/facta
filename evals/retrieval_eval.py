@@ -71,7 +71,7 @@ def evaluate(embedder: Embedder, label: str) -> None:
     print("-" * 60)
 
     for question, expected in CASES:
-        retrieved = [chunk for chunk, _ in kb.search(question, top_k=TOP_K, min_score=0.0)]
+        retrieved = [hit.chunk for hit in kb.search(question, top_k=TOP_K, min_score=0.0)]
 
         if expected:
             p = precision_at_k(retrieved, expected, TOP_K)
@@ -84,7 +84,7 @@ def evaluate(embedder: Embedder, label: str) -> None:
             print(f"{question:<16}{p:>6.2f}{r:>6.2f}{m:>6.2f}   期望命中 {len(expected)} 条")
         else:
             # 无答案问题：检验最高分是否低于闸门（低了 = min_score 能拦住）
-            top_score = kb.search(question, top_k=1, min_score=0.0)[0][1]
+            top_score = kb.search(question, top_k=1, min_score=0.0)[0].score
             ok = top_score < gate
             gate_pass += ok
             gate_all += 1

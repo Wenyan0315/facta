@@ -76,14 +76,16 @@ def test_assemble_url_server_into_registry(tmp_path):
         module.stop(server, thread)
 
 
-def test_dead_server_does_not_block_others(tmp_path, capsys):
+def test_dead_server_does_not_block_others(tmp_path, caplog):
     """一台起不来（不存在的命令）→ 警告并跳过，装配循环不崩。"""
+    import logging
     path = _write(tmp_path, {"servers": [{"name": "ghost", "command": ["/definitely/not/a/binary"]}]})
     registry = ToolRegistry()
-    clients = assemble_servers(registry, load_server_specs(path))
+    with caplog.at_level(logging.WARNING):
+        clients = assemble_servers(registry, load_server_specs(path))
     assert clients == []
     assert "ghost" not in registry.names()
-    assert "失败" in capsys.readouterr().out
+    assert "失败" in caplog.text
 
 
 def test_python_placeholder_resolves_to_current_interpreter(tmp_path):

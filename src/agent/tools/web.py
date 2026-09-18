@@ -72,6 +72,8 @@ class WebSearchClient(Protocol):
     已清洗的摘要（Tavily 原生提供；博查届时在实现类里做同样清洗）。
     """
 
+    name: str   # Provider 展示名（装配层日志认人用，如 "tavily"/"bocha"）
+
     def search(self, query: str) -> list[dict]:
         ...
 
@@ -147,7 +149,7 @@ class BochaSearch:
         return _parse_bocha(resp.json())
 
 
-def get_web_search() -> "WebSearchClient | None":
+def get_web_search() -> WebSearchClient | None:
     """搜索 client 工厂（组装层唯一真值源的 web 版）。
 
     优先级：BOCHA_API_KEY > TAVILY_API_KEY > None（不上菜单）。
@@ -212,18 +214,18 @@ def _fetch_web(url: str) -> str:
     # 大小上限：流式读，超限即停（不把 2MB+ 的响应整个搬进内存再截）
     chunks: list[bytes] = []
     total = 0
-    with httpx.Client(timeout=FETCH_TIMEOUT, follow_redirects=True) as http:
-        with http.stream("GET", url) as resp:
-            resp.raise_for_status()
-            for chunk in resp.iter_bytes(64 * 1024):
-                chunks.append(chunk)
-                total += len(chunk)
-                if total >= MAX_BYTES:
-                    break
+    with httpx.Client(timeout=FETCH_TIMEOUT, follow_redirects=True) as http, \
+            http.stream("GET", url) as resp:
+        resp.raise_for_status()
+        for chunk in resp.iter_bytes(64 * 1024):
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= MAX_BYTES:
+                break
     html = b"".join(chunks).decode("utf-8", errors="replace")
 
     try:
-        import html2text   # 延迟导入：缺依赖时报清晰错误而非 import 期炸整包
+        import html2text  # 延迟导入：缺依赖时报清晰错误而非 import 期炸整包
     except ImportError as exc:
         raise ImportError("fetch_web 需要 html2text：pip install -e '.[rag]'") from exc
     converter = html2text.HTML2Text()
@@ -245,12 +247,13 @@ def register_web_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     """
     if ctx.web is None:
         return
+    web = ctx.web   # 守卫后绑局部：闭包捕获窄化类型，mypy 不再看到 None
 
     registry.register(Tool(
         name="web_search",
         description="联网搜索：获取实时信息（天气、新闻、股价、近期事件）或个人知识库没有的内容。返回若干条结果的标题、链接与摘要。",
         parameters=_SEARCH_PARAMS,
-        func=lambda query: _web_search(ctx.web, query),
+        func=lambda query: _web_search(web, query),
         is_readonly=True,
     ))
     registry.register(Tool(

@@ -14,8 +14,8 @@ ToolRegistry：登记所有工具，对外提供两件事——
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from agent.core.audit import AuditLog
 

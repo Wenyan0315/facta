@@ -158,7 +158,7 @@ def test_fetch_web_rejects_domain_resolving_to_private(monkeypatch):
 
 def test_fetch_web_truncates_long_text(monkeypatch):
     # 假 HTTP 层：返回超长正文 → 截到 8000 + 标记
-    import agent.tools.web as web
+    from agent.tools import web
 
     class _FakeResp:
         def __enter__(self): return self

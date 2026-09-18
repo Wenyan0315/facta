@@ -8,7 +8,6 @@
 
 import pytest
 
-from agent.paths import WORKSPACE_ROOT
 from agent.tools.files import (
     _list_dir,
     _read_file,
@@ -17,7 +16,6 @@ from agent.tools.files import (
     register_file_tools,
 )
 from agent.tools.registry import ToolRegistry
-
 
 # ---------- workspace 围栏 ----------
 

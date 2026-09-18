@@ -24,7 +24,6 @@ from agent.core.llm import (
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
 
-
 # ---------- 假组件 ----------
 
 class StreamingFake(LLM):
@@ -228,7 +227,8 @@ def test_robust_stream_reads_cache_as_single_chunk():
 
 # ---------- FallbackLLM 流式降级 ----------
 
-def test_fallback_stream_switches_before_first_chunk(capsys):
+def test_fallback_stream_switches_before_first_chunk(caplog):
+    import logging
     ledger = UsageLedger()
     chain = FallbackLLM(
         [
@@ -237,9 +237,10 @@ def test_fallback_stream_switches_before_first_chunk(capsys):
         ],
         ledger,
     )
-    reply = merge_stream_chunks(_ask_stream(chain, "你好"))
+    with caplog.at_level(logging.WARNING):
+        reply = merge_stream_chunks(_ask_stream(chain, "你好"))
     assert reply.content == "你好！"
-    assert "[降级]" in capsys.readouterr().out   # 诚实声明照旧
+    assert "[降级]" in caplog.text   # 诚实声明照旧
 
 
 def test_fallback_stream_locks_candidate_after_first_chunk(capsys):

@@ -10,9 +10,13 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
+
+if TYPE_CHECKING:  # 仅类型检查期导入：运行期由 get_llm 函数内导入（避免循环依赖）
+    from agent.core.gateway import GatewayConfig
 
 
 class LLMUnavailableError(RuntimeError):
@@ -107,6 +111,9 @@ class LLM(ABC):
         {"id": "调用编号", "name": "工具名", "arguments": "参数JSON字符串"}
     """
 
+    # 展示名（降级链打印/审计认人用）：默认空串，get_llm 装配时按供应商赋值
+    name: str = ""
+
     @abstractmethod
     def generate(
         self, messages: list[Message], tools: list[dict] | None = None
@@ -135,9 +142,15 @@ class MockLLM(LLM):
 
     它不智能，但「输入消息 -> 输出回复」的行为和真模型一致，
     刚好用来验证调用链路的正确性。
+
+    降级兜底（S4 评审 #5）：作为 FallbackLLM 的最后一名候选时，
+    回复自带「⚠️ 真模型暂时不可用」前缀——诚实降级，不装正常。
     """
 
     name = "mock"
+
+    def __init__(self, degraded: bool = False) -> None:
+        self._degraded = degraded
 
     def generate(
         self, messages: list[Message], tools: list[dict] | None = None
@@ -147,6 +160,8 @@ class MockLLM(LLM):
             f"[mock] 本轮共收到 {len(messages)} 条历史，最新一句：「{last}」"
             "—— 接上真模型后，这里才是真正的回答。"
         )
+        if self._degraded:
+            reply = "⚠️ 真模型暂时不可用，这是降级回复。\n\n" + reply
         return Message(role="assistant", content=reply)
 
 class EchoLLM(LLM):
@@ -406,7 +421,7 @@ PROVIDERS: dict[str, dict[str, str | float]] = {
 def get_llm(
     provider: str = "mock",
     ledger: UsageLedger | None = None,
-    config: "GatewayConfig | None" = None,
+    config: GatewayConfig | None = None,
     with_mock_fallback: bool = True,
 ) -> LLM:
     """工厂 = 进程内网关（M7.5d 起是降级链组装器）。
@@ -418,7 +433,11 @@ def get_llm(
     with_mock_fallback=False（评测用）：不挂 mock 兜底——评估时主模型
     失败就大声抛异常，而不是被 mock 顶替静默污染分数。
     """
-    from agent.core.gateway import FallbackLLM, GatewayConfig, RobustLLM  # 函数内导入：gateway 依赖本模块，避免循环
+    from agent.core.gateway import (  # 函数内导入：gateway 依赖本模块，避免循环
+        FallbackLLM,
+        GatewayConfig,
+        RobustLLM,
+    )
 
     if ledger is None:
         ledger = UsageLedger()
@@ -448,10 +467,11 @@ def get_llm(
         if name != provider and os.environ.get(f"{backup_cfg['prefix']}_API_KEY"):
             chain.append(_wrapped(_build_openai(backup_cfg), name))
 
-    # mock 兜底（用户拍板）：全挂也保对话可用；降级时 FallbackLLM 会打印声明。
+    # mock 兜底（用户拍板）：全挂也保对话可用；降级时 FallbackLLM 会打印声明，
+    # 回复自带「⚠️ 真模型暂时不可用」前缀——诚实降级，不装正常（S4 评审 #5）。
     # 评测场景传 with_mock_fallback=False 关掉（失败须大声，不被 mock 顶替）
     if with_mock_fallback:
-        chain.append(_wrapped(MockLLM(), "mock"))
+        chain.append(_wrapped(MockLLM(degraded=True), "mock"))
     if len(chain) == 1:
         return chain[0]  # 无备用无兜底：单候选，省一个 Fallback 包装层
     return FallbackLLM(chain, ledger)

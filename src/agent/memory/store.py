@@ -57,7 +57,7 @@ def save_session(session: Session, path: Path) -> None:
 def load_session(path: Path) -> Session:
     """读回会话状态。文件不存在 → 空会话（第一次跑很正常，别报错）；旧列表格式 → 自动迁移。"""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             raw = json.load(f)
     except FileNotFoundError:
         return Session()

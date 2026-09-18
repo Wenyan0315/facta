@@ -14,10 +14,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 安装依赖（含 dev 测试件 + rag 向量库）
+      - name: 安装依赖（dev 静态检查件 + rag 向量库 + web 壳——mypy 要看全 import 面）
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,rag]"
+          pip install -e ".[dev,rag,web]"
+
+      - name: Lint（ruff，S4 评审 R6）
+        run: ruff check src/ evals/ tests/
+
+      - name: 类型检查（mypy，S4 评审 R6——首轮就抓到 rename 端点漏 import 的真 bug）
+        run: mypy
 
       - name: 跑全量测试（pipefail 防管道吞退出码——血案教训的自动化防线）
         run: |

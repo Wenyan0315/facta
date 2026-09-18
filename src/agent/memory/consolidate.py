@@ -87,7 +87,7 @@ def _transcript(session: Session, window: int) -> str:
     parts = []
     if session.summary:
         parts.append(f"【滚动摘要】{session.summary}")
-    start = session.summarized_upto if session.summarized_upto < len(session.messages) else len(session.messages)
+    start = min(len(session.messages), session.summarized_upto)
     tail = session.messages[start:][-window:]
     parts.extend(f"{m.role}: {m.content}" for m in tail)
     return "\n".join(parts)
@@ -114,8 +114,7 @@ def _parse_json_array(text: str) -> tuple[list[dict], bool]:
     stripped = text.strip()
     if stripped.startswith("```"):
         stripped = stripped.strip("`")
-        if stripped.startswith("json"):
-            stripped = stripped[4:]
+        stripped = stripped.removeprefix("json")
     try:
         data = json.loads(stripped)
     except json.JSONDecodeError:

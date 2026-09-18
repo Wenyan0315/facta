@@ -92,7 +92,8 @@ def test_breaker_half_open_failure_reopens(monkeypatch):
         _ask(llm)  # 又打开了
 
 
-def test_fallback_switches_to_next(capsys):
+def test_fallback_switches_to_next(caplog):
+    import logging
     ledger = UsageLedger()
     chain = FallbackLLM(
         [
@@ -101,9 +102,10 @@ def test_fallback_switches_to_next(capsys):
         ],
         ledger,
     )
-    reply = _ask(chain, "PHP")
+    with caplog.at_level(logging.WARNING):
+        reply = _ask(chain, "PHP")
     assert reply.content == "echo:PHP"
-    assert "[降级]" in capsys.readouterr().out  # 切换时的诚实声明
+    assert "[降级]" in caplog.text  # 切换时的诚实声明
 
 
 def test_fallback_exhaustion_raises_llm_unavailable():

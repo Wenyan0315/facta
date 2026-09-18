@@ -29,8 +29,12 @@ import queue
 import subprocess
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from agent.tools.registry import Tool, ToolRegistry
+
+if TYPE_CHECKING:  # 仅类型检查期导入：HttpMcpClient 与 stdio 版接口同构（运行期鸭子类型）
+    from agent.tools.mcp_http import HttpMcpClient
 
 
 class McpError(RuntimeError):
@@ -85,7 +89,7 @@ class McpClient:
             raise McpError(
                 f"MCP 服务器启动失败（退出码 {self._proc.returncode}）：{' '.join(command)}"
             )
-        self._queue: "queue.Queue[dict | None]" = queue.Queue()
+        self._queue: queue.Queue[dict | None] = queue.Queue()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
         self._next_id = 1
@@ -111,8 +115,8 @@ class McpClient:
     def _read_loop(self) -> None:
         """后台读线程：每行一个 JSON 入队；管道 EOF 时放哨兵 None。"""
         assert self._proc.stdout is not None
-        for line in self._proc.stdout:
-            line = line.strip()
+        for raw in self._proc.stdout:
+            line = raw.strip()
             if not line:
                 continue
             try:
@@ -141,7 +145,7 @@ class McpClient:
             try:
                 msg = self._queue.get(timeout=self._timeout)
             except queue.Empty:
-                raise McpError(f"MCP 调用超时（{method}，>{self._timeout}s 无响应）")
+                raise McpError(f"MCP 调用超时（{method}，>{self._timeout}s 无响应）") from None
             if msg is None:
                 raise McpError(f"MCP 服务器已断开连接（{method} 在途）")
             if msg.get("id") != req_id:
@@ -191,7 +195,7 @@ DEAD_TOOL_EVICT_AFTER = 2   # 同一工具连续碰到「服务器已死」几�
 
 def register_mcp_tools(
     registry: ToolRegistry,
-    client: McpClient,
+    client: "McpClient | HttpMcpClient",   # 两种传输接口同构（stdio / streamable HTTP）
     prefix: str = DEFAULT_PREFIX,
 ) -> None:
     """把服务器交出的工具登记进 ToolRegistry——与内置工具同等待遇。

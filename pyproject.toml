@@ -16,6 +16,8 @@ dependencies = [
 dev = [
     "pytest>=7",
     "mcp>=2.0",   # MCP 互操作验收的裁判服务器（servers/sdk_server.py）；将来写真实服务器也用
+    "mypy>=1.11",   # S4 评审 R6：类型检查进 CI——首轮跑就抓到 rename 端点漏 import 的真 bug
+    "ruff>=0.6",    # S4 评审 R6：lint 进 CI
 ]
 rag = [
     "chromadb>=1.5",   # M7 工业向量库：下限取实测验证版本（1.5.9），教学版不需要，按需 pip install -e ".[rag]"
@@ -33,3 +35,40 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]   # ".": evals/ 在仓库根目录，接线测试需要 import 它
 testpaths = ["tests"]
+
+# ---- S4 评审 R6：静态检查进 CI（mypy + ruff）----
+# 策略：宽松起步不 strict——先抓真 bug（漏 import / 签名不匹配 / None 滥用），
+# 标注严格度随代码库成熟逐步拧紧（方向提前定，细节临期定）。
+[tool.mypy]
+# 不钉 python_version：跟随运行解释器（numpy 等新 stub 用 3.12+ 语法，钉旧版会误报）
+files = ["src/agent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "."]
+
+[tool.ruff.lint]
+# 显式钉死规则集：不随 ruff 版本默认值漂移（2026 版默认集已比经典 E/F 宽很多）
+select = [
+    "E", "F", "W",     # pycodestyle / pyflakes 核心
+    "I",               # import 排序
+    "UP",              # pyupgrade 语法现代化
+    "B",               # bugbear 常见坑
+    "SIM", "FURB",     # 简化建议
+    "PL",              # pylint 子集
+    "TRY",             # 异常处理习惯
+    "DTZ", "BLE",      # 时区 / 宽捕获（见下方 ignore：两者都有项目级豁免理由）
+]
+ignore = [
+    "BLE001",                    # 宽捕获是设计：降级链/工具层要捕住所有异常才能优雅降级、回灌错误而非炸会话
+    "DTZ001", "DTZ005", "DTZ011",  # naive 本地时间是契约：会话时间戳/时间锚点注入「今天：…」用 Asia/Shanghai 本地时间
+    "TRY004",                    # 配置解析的类型不符用 ValueError：数据内容错，不是 Python 类型系统错
+    "SIM103",                    # needs_confirm 等安全函数逐条展开返回值：可读性优先于高尔夫
+    "E501",                      # 行长：中文注释/文档串天然宽，靠 review 把关不靠硬折行
+    "E402",                      # 模块内 import 不在顶部：app.py 刻意先 basicConfig 再 import agent（日志先于内核加载）
+    "PLC0415",                   # 函数内 import：项目惯例——可选依赖延迟导入（chromadb/openai）+ 破循环依赖
+    "PLR2004",                   # 魔法值比较：测试断言与校准阈值（min_score 0.85 等）用字面量是常态
+    "TRY003",                    # raise 带长消息字符串：项目错误消息风格（中文自述式），不引入错误类层级
+    "PLR0911", "PLR0913", "PLR0915", "PLR0917",  # 复杂度门：安全函数逐条 return / 依赖注入缝参数多是项目风格
+]

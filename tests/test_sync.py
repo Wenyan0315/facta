@@ -69,8 +69,8 @@ def test_modified_note_replaces_chunks(tmp_path):
     assert report.removed == 1 and report.added == 1
     assert kb.store.count() == 1  # 删旧 + 增新，块数不变
     # 用精确向量当探针：旧块必须死亡、新块必须活着
-    assert kb.store.query([4.0, 4.0, 0.0, 0.0], 1)[0][0] != "AAAA"
-    assert kb.store.query([6.0, 0.0, 0.0, 0.0], 1)[0][0] == "BBBBBB"
+    assert kb.store.query([4.0, 4.0, 0.0, 0.0], 1)[0].chunk != "AAAA"
+    assert kb.store.query([6.0, 0.0, 0.0, 0.0], 1)[0].chunk == "BBBBBB"
 
 
 def test_deleted_note_removes_chunks(tmp_path):
@@ -151,7 +151,8 @@ def test_bow_falls_back_to_full_rebuild(tmp_path):
     assert kb.store.count() == 2
     # 词袋必须真能用：搜 PHP 排第一的应是 PHP 那条（fit 没被漏掉）
     top = kb.search("PHP", top_k=1, min_score=0.0)
-    assert top[0][0] == "PHP 是最好的语言"
+    assert top[0].chunk == "PHP 是最好的语言"
+    assert top[0].source == "php.md"   # 溯源不变量：命中必须自带出处（S4 评审 #R5）
 
 
 def test_empty_dir_raises(tmp_path):

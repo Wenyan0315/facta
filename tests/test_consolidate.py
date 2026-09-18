@@ -10,7 +10,6 @@
 """
 
 import json
-from pathlib import Path
 
 from agent.core.llm import ScriptedLLM
 from agent.core.types import Message

@@ -21,6 +21,7 @@ Context7 实战验收的产物（2026-09-13）：手写客户端长出第 8 层�
 register_mcp_tools 一行不改（接口同构、实现异构——换件不换衣服的第三件衣服）。
 """
 
+import contextlib
 import json
 
 import httpx
@@ -76,7 +77,7 @@ class HttpMcpClient:
         except httpx.HTTPError as exc:
             # 连接级失败（DNS/拒连/超时）：服务器死没死不知道，先按死处理
             self._healthy = False
-            raise McpError(f"HTTP 连接失败（{type(exc).__name__}: {exc}）")
+            raise McpError(f"HTTP 连接失败（{type(exc).__name__}: {exc}）") from exc
 
         sid = resp.headers.get("mcp-session-id")
         if sid:
@@ -98,8 +99,8 @@ class HttpMcpClient:
             return []
         try:
             return [resp.json()]
-        except json.JSONDecodeError:
-            raise McpError(f"响应不是合法 JSON：{resp.text[:200]}")
+        except json.JSONDecodeError as exc:
+            raise McpError(f"响应不是合法 JSON：{resp.text[:200]}") from exc
 
     @staticmethod
     def _parse_sse(text: str) -> list[dict]:
@@ -109,10 +110,9 @@ class HttpMcpClient:
 
         def flush() -> None:
             if data_lines:
-                try:
+                # 心跳/注释帧解析失败：忽略，别让一条坏帧杀掉通道
+                with contextlib.suppress(json.JSONDecodeError):
                     messages.append(json.loads("\n".join(data_lines)))
-                except json.JSONDecodeError:
-                    pass   # 心跳/注释帧：忽略，别让一条坏帧杀掉通道
                 data_lines.clear()
 
         for line in text.splitlines():
@@ -166,8 +166,7 @@ class HttpMcpClient:
 
     def close(self) -> None:
         """发 DELETE 通知服务器收摊（尽力而为），再关连接。"""
-        try:
+        # 服务器已经死了还讲什么礼貌——收反射动作别较真
+        with contextlib.suppress(httpx.HTTPError):
             self._http.request("DELETE", self._url)
-        except httpx.HTTPError:
-            pass   # 服务器已经死了还讲什么礼貌——收反射动作别较真
         self._http.close()

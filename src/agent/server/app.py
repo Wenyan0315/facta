@@ -6,10 +6,13 @@
 - Run Store 给事实编号、留存、可重放（承载状态机 + 取消标志）
 
 内核 run_turn 一行不改——它产语义事实，本层负责事实的传输与生命周期。
+
+日志：Web 入口在此配置 logging——内核库的 logger 输出进 uvicorn 日志流。
 """
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 from pathlib import Path
@@ -19,17 +22,24 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
 from agent.memory.consolidate import consolidate
 from agent.memory.store import (
     archive_session,
     derive_title,
     list_archived_sessions,
+    load_session,
     restore_session,
     save_session,
 )
 from agent.memory.title import summarize_title
-from agent.orchestrator.assemble import MEMORY_PATH, AppContext, ensure_persona
-from agent.orchestrator.loop import run_turn
+from agent.orchestrator.assemble import (
+    MEMORY_PATH,
+    AppContext,
+    ensure_persona,
+)
+from agent.orchestrator.loop import RunResult, run_turn
 from agent.paths import LEARNED_DIR, SESSIONS_DIR
 from agent.server.run_store import (
     STATUS_CANCELLED,
@@ -100,7 +110,7 @@ def _run_worker(ctx: AppContext, run, user_text: str) -> None:
     run.emit("run.started", {})
     status = STATUS_FAILED
     try:
-        reply = run_turn(
+        result, reply = run_turn(
             ctx.session,
             user_text,
             llm=ctx.llm,
@@ -109,13 +119,13 @@ def _run_worker(ctx: AppContext, run, user_text: str) -> None:
             on_text=lambda text: run.emit("text.delta", {"delta": text}),
             on_event=lambda type_, data: run.emit(_EVENT_MAP.get(type_, type_), data),
             should_cancel=lambda: run.cancel_requested,
-            on_confirm=lambda name, args: run.request_confirm(name, args),
+            on_confirm=run.request_confirm,
         )
-        # 终态判定：有最终回答 → completed；否则看是否因取消 → cancelled / failed
-        if reply is not None:
+        # 终态判定：RunResult 枚举替代 None 二义性（S4 评审 #3）
+        if result is RunResult.COMPLETED and reply is not None:
             run.preview = (reply.content or "")[:300]   # 任务视图的交付摘要
             status = STATUS_COMPLETED
-        elif run.cancel_requested:
+        elif result is RunResult.CANCELLED:
             status = STATUS_CANCELLED
     except Exception as exc:   # 防御性兜底：run_turn 已捕获 LLMUnavailableError，这里是意外
         run.emit("error", {"message": str(exc)})

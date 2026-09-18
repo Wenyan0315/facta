@@ -14,7 +14,7 @@ import math
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """余弦相似度：两个向量夹角的余弦，越接近 1 越相似。"""
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=True))   # 维度不同是调用方 bug，该炸
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
     if norm_a == 0 or norm_b == 0:

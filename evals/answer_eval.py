@@ -71,7 +71,10 @@ def evaluate_once(
 ) -> tuple[dict | None, str]:
     """单题全链路：检索 → 有依据生成 → 裁判打分。返回 (裁判 dict|None, 回答)。"""
     hits = kb.search(question, top_k=5)  # 默认闸门，与生产 search_notes 同参
-    chunks = "\n".join(f"- {c}" for c, _ in hits) or "（资料为空）"
+    chunks = (
+        "\n".join(f"- {hit.chunk}（出处：{hit.source}）" for hit in hits)
+        or "（资料为空）"
+    )
 
     answer_msg = candidate.generate(
         [
@@ -101,7 +104,7 @@ def main() -> None:
     judge = get_llm(JUDGE_MODEL, ledger, with_mock_fallback=False)
     kb = build_kb(get_embedder("siliconflow", ledger))
 
-    print(f"===== 回答质量评估（LLM-as-judge）=====")
+    print("===== 回答质量评估（LLM-as-judge）=====")
     print(f"被评模型: {CANDIDATE_MODEL} ｜ 裁判: {JUDGE_MODEL} ｜ 题目: {len(CASES)}\n")
 
     scores: list[int] = []

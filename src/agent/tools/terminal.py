@@ -32,12 +32,23 @@ _GIT_READONLY = frozenset({"status", "log", "diff", "show"})
 # shell 元字符：出现一个即弹窗（防 cat x; rm y / git status && evil / $(…) 绕过）
 _SHELL_META = frozenset(";&|><`$()\n")
 
+# 参数级危险参数（S4 评审 #17）：只读命令名 + 危险参数仍可执行任意代码
+# 或覆盖文件。只收有真实危险面的参数——grep -x 是整行匹配（纯只读），
+# 评审提及但不成立，误报确认正是白名单要防的疲劳源。
+_DANGEROUS_ARGS: dict[str, frozenset[str]] = {
+    "find": frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete"}),
+    "sort": frozenset({"-o", "--output"}),  # -o/--output 可覆盖任意文件
+}
+
 
 def needs_confirm(command: str) -> bool:
-    """保守判定：白名单命令 且 无 shell 元字符 → 免确认；其余一律确认。
+    """保守判定：白名单命令 且 无 shell 元字符 且 无危险参数 → 免确认；其余一律确认。
 
     纯函数，绕过用例的测试靶子。拿不准就确认——误弹窗的代价是一次点击，
     误放行的代价不可控（保守默认与 Tool.is_readonly 同一哲学）。
+
+    参数级校验（S4 评审 #17）：find -exec / sort -o 等只读命令名+
+    危险参数仍可执行任意代码或覆盖文件，必须拦截。
     """
     if any(ch in _SHELL_META for ch in command):
         return True
@@ -46,6 +57,13 @@ def needs_confirm(command: str) -> bool:
         return True
     head = tokens[0].rsplit("/", 1)[-1]      # /usr/bin/git → git
     if "=" in head:                          # FOO=1 cmd 环境变量前缀 → 保守确认
+        return True
+    # 参数级拦截：白名单命令带危险参数 → 确认（S4 评审 #17）
+    # split("=") 兼容长选项等号形式（sort --output=file）
+    dangerous = _DANGEROUS_ARGS.get(head)
+    if dangerous is not None and any(
+        arg.split("=", 1)[0] in dangerous for arg in tokens[1:]
+    ):
         return True
     if head in _WHITELIST_SIMPLE:
         return False
@@ -70,6 +88,7 @@ def _run_command(command: str) -> str:
             capture_output=True,
             text=True,
             timeout=TIMEOUT_SECONDS,
+            check=False,   # 非零退出码是回传给模型的信息，不是异常
         )
     except subprocess.TimeoutExpired:
         return f"错误：命令超时（>{TIMEOUT_SECONDS}s），已终止。命令：{command[:200]}"

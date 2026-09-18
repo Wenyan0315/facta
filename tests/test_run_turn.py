@@ -8,7 +8,7 @@ error 已由内核发事件。
 from agent.core.llm import LLM, ScriptedLLM, StreamChunk
 from agent.core.types import Message
 from agent.memory.store import Session
-from agent.orchestrator.loop import run_turn
+from agent.orchestrator.loop import RunResult, run_turn
 
 
 class _SlowStreamLLM(LLM):
@@ -36,15 +36,16 @@ class _SlowStreamLLM(LLM):
 
 
 def test_should_cancel_immediately_keeps_user_and_returns_none():
-    # 检查点①（首次模型调用前）就取消 → 不调模型、返回 None、user 留底片
+    # 检查点①（首次模型调用前）就取消 → 不调模型、返回 CANCELLED、user 留底片
     session = Session()
     session.messages.append(Message(role="system", content="sys"))
 
-    reply = run_turn(
+    result, reply = run_turn(
         session, "嗨", llm=ScriptedLLM([]), registry=None,
         should_cancel=lambda: True,
     )
 
+    assert result is RunResult.CANCELLED
     assert reply is None
     assert [m.role for m in session.messages] == ["system", "user"]   # 无假回复
 
@@ -62,11 +63,12 @@ def test_should_cancel_mid_round_trims_half_tool_round():
     # 检查点① 放行（False）、检查点② 取消（True）
     should_cancel = iter([False, True]).__next__
 
-    reply = run_turn(
+    result, reply = run_turn(
         session, "现在几点", llm=llm, registry=None,
         should_cancel=should_cancel,
     )
 
+    assert result is RunResult.CANCELLED
     assert reply is None
     # trim 掐掉「没配工具结果的点菜消息」，孤儿 tool 不落盘
     assert [m.role for m in session.messages] == ["system", "user"]
@@ -74,7 +76,7 @@ def test_should_cancel_mid_round_trims_half_tool_round():
 
 def test_should_cancel_mid_stream_closes_underlying_generator():
     # 检查点③（流式中途）：第一块到手后取消 → 底层流被 close、只外发
-    # 取消前的块、掐半截轮、返回 None——模型长生成不必等自然边界
+    # 取消前的块、掐半截轮、返回 CANCELLED——模型长生成不必等自然边界
     llm = _SlowStreamLLM()
     session = Session()
     session.messages.append(Message(role="system", content="sys"))
@@ -83,12 +85,13 @@ def test_should_cancel_mid_stream_closes_underlying_generator():
     # 检查点①放行 + 第一块检查放行，第二块检查时取消
     should_cancel = iter([False, False, True]).__next__
 
-    reply = run_turn(
+    result, reply = run_turn(
         session, "讲个长故事", llm=llm, registry=None,
         on_text=texts.append,
         should_cancel=should_cancel,
     )
 
+    assert result is RunResult.CANCELLED
     assert reply is None
     assert texts == ["第一块 "]                        # 只收到取消前的块
     assert llm.closed is True                          # 底层生成器被主动 close

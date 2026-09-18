@@ -6,6 +6,7 @@
     python -m agent echo     # 其他测试模型（只读第一个参数）
 """
 
+import logging
 import sys
 
 from agent.cli import EXIT_NEW, run_chat
@@ -19,6 +20,8 @@ VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号�
 
 
 def main() -> None:
+    # CLI 入口：配置 logging——内核库的 logger.info 在此可见（Web 由 server/app.py 配）
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     print(f"Personal Agent v{VERSION}")
 
     # 命令行第一个参数 = 用哪个模型，不传默认 deepseek

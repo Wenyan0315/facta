@@ -13,8 +13,12 @@
    回答再触发摘要"的无限递归（与 search_and_summarize 同款防线）
 """
 
+import logging
+
 from agent.core.llm import LLM
 from agent.core.types import Message
+
+logger = logging.getLogger(__name__)
 
 # 原文窗口大小：最近 6 条（约 3 轮对话）逐字进 payload
 KEEP_LAST = 6
@@ -102,9 +106,9 @@ def maybe_compress(
     fresh = messages[summarized_upto:start]    # 窗口外、尚未进摘要的积压
     if len(fresh) < margin:
         return summary, summarized_upto        # 缓存复用：本轮零成本
-    print(f"  [记忆压缩] 窗口外积压 {len(fresh)} 条 → 滚动摘要（一次内部 LLM 调用）")
+    logger.debug("记忆压缩：窗口外积压 %s 条 → 滚动摘要（一次内部 LLM 调用）", len(fresh))
     summary = _summarize(llm, summary, fresh)
-    print(f"  [摘要完成] {summary}")   # 可观测性：摘要不再是黑箱，当场查验保真度
+    logger.debug("摘要完成：%s", summary)   # 可观测性：摘要不再是黑箱，当场查验保真度
     return summary, start
 
 

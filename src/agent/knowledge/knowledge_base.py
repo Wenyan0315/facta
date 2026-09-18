@@ -15,7 +15,7 @@ import re
 from abc import ABC, abstractmethod
 from collections import Counter
 
-from agent.knowledge.vector_store import InMemoryVectorStore, VectorStore
+from agent.knowledge.vector_store import InMemoryVectorStore, SearchHit, VectorStore
 
 
 def tokenize(text: str) -> list[str]:
@@ -71,7 +71,7 @@ class Embedder(ABC):
     def embed(self, texts: list[str]) -> list[list[float]]:
         """把一批文字映射成一批向量，返回顺序与输入一致。"""
 
-    def fit(self, corpus: list[str]) -> None:
+    def fit(self, corpus: list[str]) -> None:  # noqa: B027  # 可选钩子：默认空实现正是本设计（见 docstring）
         """（可选）先看一遍全部语料。
 
         词袋需要先建词表才能定维度；神经网络版不需要，默认空实现——
@@ -175,9 +175,9 @@ def get_embedder(name: str = "bow", ledger=None) -> Embedder:
     if name in EMBED_PROVIDERS:
         cfg = EMBED_PROVIDERS[name]
         return OpenAICompatibleEmbedder(
-            cfg["prefix"],
-            cfg["base_url"],
-            cfg["model"],
+            str(cfg["prefix"]),
+            str(cfg["base_url"]),
+            str(cfg["model"]),
             float(cfg["min_score"]),
             float(cfg.get("price", 0.0)),
             ledger,
@@ -205,8 +205,8 @@ class KnowledgeBase:
 
     def search(
         self, query: str, top_k: int = 3, min_score: float | None = None
-    ) -> list[tuple[str, float]]:
-        """返回与问题最相似的 top_k 个文本块及相似度（越大越像）。
+    ) -> list[SearchHit]:
+        """返回与问题最相似的 top_k 个命中（文本+相似度+来源面单，越大越像）。
 
         min_score：低于该分数的结果丢弃（防止 top_k 硬凑垃圾结果）。
         不传时用 embedder 的默认及格线——分数量纲跟着实现走。
@@ -215,12 +215,14 @@ class KnowledgeBase:
             min_score = self.embedder.default_min_score
         qvec = self.embedder.embed([query])[0]
         results = self.store.query(qvec, top_k)
-        return [(chunk, score) for chunk, score in results if score >= min_score]
+        return [hit for hit in results if hit.score >= min_score]
 
 
 def demo() -> None:
     from agent.knowledge.sync import sync_notes  # 函数内导入：sync 依赖本模块，避免循环
-    from agent.paths import NOTES_DIR          # P1-3 血案同款修复：demo 入口跑起来才炸的 NameError
+    from agent.paths import (
+        NOTES_DIR,  # P1-3 血案同款修复：demo 入口跑起来才炸的 NameError
+    )
 
     kb = KnowledgeBase()
     report = sync_notes(kb, NOTES_DIR)
@@ -231,11 +233,11 @@ def demo() -> None:
 
     results = kb.search(question, top_k=3)
     print("检索到的最相关片段：")
-    for i, (chunk, score) in enumerate(results, 1):
-        print(f"  [{i}] score={score:.3f}  {chunk}")
+    for i, hit in enumerate(results, 1):
+        print(f"  [{i}] {hit.source}  score={hit.score:.3f}  {hit.chunk}")
 
     # 组装「增强后的 prompt」：把检索到的片段拼进上下文
-    context = "\n".join(f"- {chunk}" for chunk, _ in results)
+    context = "\n".join(f"- {hit.chunk}（出处：{hit.source}）" for hit in results)
     print("\n===== 发送给模型的『增强 prompt』(节选) =====")
     print("system: 你是学习助手，请只依据下面资料回答。")
     print("资料：")

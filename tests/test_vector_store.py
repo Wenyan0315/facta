@@ -7,7 +7,11 @@ Chroma 内部是「距离」（= 1 - 相似度），换算封装在实现里—�
 
 import pytest
 
-from agent.knowledge.vector_store import ChromaVectorStore, InMemoryVectorStore
+from agent.knowledge.vector_store import (
+    ChromaVectorStore,
+    InMemoryVectorStore,
+    SearchHit,
+)
 
 
 def _sample_data():
@@ -29,7 +33,12 @@ def test_inmemory_roundtrip():
     store.upsert(d["ids"], d["chunks"], d["vectors"], d["metadatas"])
     assert store.count() == 2
     # 分数契约第一血：完全相同的向量 → 相似度 1.0
-    assert store.query([1.0, 0.0], top_k=1) == [("PHP 是最好的语言", 1.0)]
+    hits = store.query([1.0, 0.0], top_k=1)
+    assert hits[0].chunk == "PHP 是最好的语言"
+    assert hits[0].score == pytest.approx(1.0)
+    # 溯源契约：query 必须带回 upsert 时写的面单（S4 评审 #R5）
+    assert hits[0].source == "php.md"
+    assert isinstance(hits[0], SearchHit)
     assert store.get_all()["n1"]["source"] == "php.md"
     store.delete(["n1"])
     assert store.count() == 1
@@ -52,14 +61,16 @@ def test_chroma_score_conversion_and_persistence(tmp_path):
     store.upsert(d["ids"], d["chunks"], d["vectors"], d["metadatas"])
 
     results = store.query([1.0, 0.0], top_k=1)
-    assert results[0][0] == "PHP 是最好的语言"
+    assert results[0].chunk == "PHP 是最好的语言"
     # 距离 → 相似度换算：Chroma 内部吐 0.0 距离，这里必须变回 1.0 相似度
-    assert results[0][1] == pytest.approx(1.0, abs=0.01)
+    assert results[0].score == pytest.approx(1.0, abs=0.01)
+    # 溯源契约对工业版同样成立（S4 评审 #R5）
+    assert results[0].source == "php.md"
 
     # 关库重开：数据还在——这是「重启不重算」成立的物理前提
     store2 = ChromaVectorStore(tmp_path / "db")
     assert store2.count() == 2
-    assert store2.query([0.0, 1.0], top_k=1)[0][0] == "Python 是脚本语言"
+    assert store2.query([0.0, 1.0], top_k=1)[0].chunk == "Python 是脚本语言"
 
 
 def test_chroma_clear(tmp_path):
@@ -82,6 +93,10 @@ def test_inmemory_vs_chroma_same_ranking(tmp_path):
     chroma.upsert(d["ids"], d["chunks"], d["vectors"], d["metadatas"])
     query_vector = [0.6, 0.8]
     # 两个实现给出相同的排序——双实现行为一致是「换件不换衣服」的证明
-    assert [c for c, _ in mem.query(query_vector, 2)] == [
-        c for c, _ in chroma.query(query_vector, 2)
+    assert [h.chunk for h in mem.query(query_vector, 2)] == [
+        h.chunk for h in chroma.query(query_vector, 2)
+    ]
+    # 溯源面单也要一致：工业版不比教学版少带信息
+    assert [h.source for h in mem.query(query_vector, 2)] == [
+        h.source for h in chroma.query(query_vector, 2)
     ]

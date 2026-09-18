@@ -98,8 +98,7 @@ def test_is_readonly_defaults_to_write():
 
 def test_web_results_wrapped_in_boundary_marker(tmp_path):
     # 联网结果（不可信输入）必须被界碑包裹——开头声明 + 结束标记
-    from agent.tools.context import ToolContext
-    from agent.tools.web import _fetch_web, _web_search, register_web_tools
+    from agent.tools.web import _web_search
 
     class _Fake:
         def search(self, q):

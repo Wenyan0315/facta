@@ -56,7 +56,7 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     def read_notes(filename: str) -> str:
         """读取知识库目录下的指定笔记文件。"""
         try:
-            with open(ctx.notes_dir / filename, "r", encoding="utf-8") as f:
+            with open(ctx.notes_dir / filename, encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError:
             return f"知识库里没有 {filename} 这个笔记。"
@@ -72,14 +72,13 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         if "/" in filename:
             return "拒绝：暂不支持子目录"
         # 查重闸门：内容与已有笔记高度相似则拒绝（治理第 1 层）。
-        # KB 只存文本块不记"块来自哪个文件"（溯源缺口，M8 图谱补），
-        # 所以用最相似块的开头片段代替文件名。
+        # S4 评审 #R5 起 search 自带 source——重复时能报出「撞了哪篇」。
         if ctx.kb is not None:
             hits = ctx.kb.search(content, top_k=3, min_score=0.85)
             if hits:
-                top_snippet = hits[0][0][:30]
                 return (
-                    f"拒绝：与已有笔记高度重复（相似内容开头：「{top_snippet}…」），"
+                    f"拒绝：与已有笔记《{hits[0].source}》高度重复"
+                    "（相似内容开头：「" + hits[0].chunk[:30] + "…」），"
                     "建议先读原文合并，而不是新建重复笔记"
                 )
         if path.exists():
@@ -92,23 +91,27 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
 
     def search_notes(query: str) -> str:
         """在个人知识库中语义检索，返回最相关的笔记片段。"""
+        assert ctx.kb is not None   # 注册守卫（见下方 if ctx.kb is not None）保证非 None
         results = ctx.kb.search(query, top_k=3)   # 不传 min_score → 用 embedder 自带阈值
         if not results:
             return "知识库中没有检索到相关内容。"
-        # (片段, 分数) 列表 → 给模型看的编号文本。
-        # 分数展示给模型：让它能自行判断检索质量——分数偏低意味着"资料可能不够相关"，
-        # 它可以换关键词再查一次，或者放弃检索直接回答。
+        # 命中 → 给模型看的编号文本。
+        # 分数+来源都展示给模型：分数让它判断检索质量（偏低=可换关键词再查），
+        # 来源让它引用资料时能说清出处（RAG 溯源，S4 评审 #R5）。
         return "\n".join(
-            f"{i+1}. {snippet}（相关度 {score:.2f}）"
-            for i, (snippet, score) in enumerate(results)
+            f"{i+1}. {hit.chunk}（出处：{hit.source}，相关度 {hit.score:.2f}）"
+            for i, hit in enumerate(results)
         )
 
     def search_and_summarize(query: str) -> str:
         """检索 + 二次摘要：工具内部再调一次 LLM（Sub-agent 模式的原型）。"""
+        assert ctx.kb is not None and ctx.llm is not None   # 双依赖注册守卫保证
         results = ctx.kb.search(query, top_k=3)
         if not results:
             return "知识库中没有检索到相关内容，无法生成摘要。"
-        context = "\n".join(f"- {snippet}" for snippet, _ in results)
+        context = "\n".join(
+            f"- {hit.chunk}（出处：{hit.source}）" for hit in results
+        )
 
         # 关键安全设计：内部这次调用【绝不传 tools】——
         # ① 传了就可能出现"工具调工具"的无限递归（套娃）；

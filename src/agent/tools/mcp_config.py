@@ -21,6 +21,7 @@ register_mcp_tools 通吃两者（接口同构、实现异构）。
 """
 
 import json
+import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,8 @@ from pathlib import Path
 from agent.tools.mcp_client import McpClient, McpError, register_mcp_tools
 from agent.tools.mcp_http import HttpMcpClient
 from agent.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -50,7 +53,7 @@ def load_server_specs(path: Path) -> list[ServerSpec]:
     except FileNotFoundError:
         return []
     except json.JSONDecodeError as exc:
-        raise ValueError(f"MCP 配置不是合法 JSON（{path}）：{exc}")
+        raise ValueError(f"MCP 配置不是合法 JSON（{path}）：{exc}") from exc
     servers = raw.get("servers")
     if not isinstance(servers, list):
         raise ValueError(f"MCP 配置缺少 servers 列表（{path}）")
@@ -82,7 +85,7 @@ def assemble_servers(registry: ToolRegistry, specs: list[ServerSpec]) -> list:
     clients = []
     for spec in specs:
         if not spec.enabled:
-            print(f"MCP 服务器已禁用，跳过：{spec.name}")
+            logger.info("MCP 服务器已禁用，跳过：%s", spec.name)
             continue
         try:
             if spec.command is not None:
@@ -94,20 +97,23 @@ def assemble_servers(registry: ToolRegistry, specs: list[ServerSpec]) -> list:
                     command, timeout=spec.timeout
                 )
             else:
+                if not spec.url:   # 畸形配置（command/url 双缺）：跳过而非喂 None 给 httpx
+                    logger.warning("MCP 服务器配置缺 url/command，跳过：%s", spec.name)
+                    continue
                 client = HttpMcpClient(
                     spec.url, timeout=spec.timeout, headers=spec.headers or None
                 )
         except (McpError, OSError) as exc:
             # OSError：命令路径不存在（FileNotFoundError）这类启动层面的失败
-            print(f"MCP 服务器接入失败，跳过：{spec.name}（{exc}）")
+            logger.warning("MCP 服务器接入失败，跳过：%s（%s）", spec.name, exc)
             continue
         try:
             register_mcp_tools(registry, client, prefix=spec.prefix)
         except McpError as exc:
             # 撞名（前缀重复等）：拒绝而不是静默覆盖——静默覆盖等于把菜单卖给外部进程
-            print(f"MCP 服务器登记失败，跳过：{spec.name}（{exc}）")
+            logger.warning("MCP 服务器登记失败，跳过：%s（%s）", spec.name, exc)
             client.close()
             continue
         clients.append(client)
-        print(f"MCP 服务器已接入：{spec.name}")
+        logger.info("MCP 服务器已接入：%s", spec.name)
     return clients

@@ -15,6 +15,7 @@
 
 import hashlib
 import json
+import logging
 import time
 from collections import OrderedDict
 from collections.abc import Iterator
@@ -24,6 +25,8 @@ from agent.core.llm import LLM, LLMUnavailableError, StreamChunk, merge_stream_c
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
 from agent.core.vector_math import cosine_similarity
+
+logger = logging.getLogger(__name__)
 
 # 值得重试的 HTTP 状态：限流 + 服务器侧暂时性错误
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -64,8 +67,6 @@ class RobustLLM(LLM):
       记账横切所有出口（命中/成功/失败/重试都有账）。
     """
 
-    name = "robust"
-
     def __init__(
         self,
         inner: LLM,
@@ -73,10 +74,13 @@ class RobustLLM(LLM):
         config: GatewayConfig | None = None,
     ) -> None:
         self._inner = inner
+        # 对外报内层模型的名字（降级链打印认得清谁是谁）；
+        # 空 label 兜底类名——与旧版 getattr property 同语义
+        self.name = inner.name or inner.__class__.__name__
         self._ledger = ledger or UsageLedger()
         self._cfg = config or GatewayConfig()
         # 进程级 LRU 精确缓存，不落盘——重启清零没损失，下次重新算就是了
-        self._cache: "OrderedDict[str, Message]" = OrderedDict()
+        self._cache: OrderedDict[str, Message] = OrderedDict()
         # d 衣熔断状态：closed（计数中）→ open（冷却中）→ half_open（放行一次试探）
         self._consecutive_failures = 0
         self._opened_at: float | None = None
@@ -86,11 +90,6 @@ class RobustLLM(LLM):
     def inner(self) -> LLM:
         """露出被包的原模型——测试断言与调试用。"""
         return self._inner
-
-    @property
-    def name(self) -> str:
-        """对外报内层模型的名字——降级链打印时认得清谁是谁。"""
-        return getattr(self._inner, "name", self._inner.__class__.__name__)
 
     def generate(
         self, messages: list[Message], tools: list[dict] | None = None
@@ -191,7 +190,7 @@ class RobustLLM(LLM):
                         if chunk.usage:
                             usage = chunk.usage
                         yield chunk
-                except Exception as exc:
+                except Exception:
                     # 中途失败：字已外流，重试=重复说话，降级也一样——只能上抛
                     self._ledger.record_llm_failure()
                     self._on_failure()
@@ -426,7 +425,7 @@ class FallbackLLM(LLM):
         errors: list[str] = []
         for index, candidate in enumerate(self._candidates):
             if index > 0:
-                print(f"[降级] 前面的模型不可用，已切换到 {candidate.name}")
+                logger.warning(f"[降级] 前面的模型不可用，已切换到 {candidate.name}")
             try:
                 return candidate.generate(messages, tools)
             except Exception as exc:
@@ -445,7 +444,7 @@ class FallbackLLM(LLM):
         errors: list[str] = []
         for index, candidate in enumerate(self._candidates):
             if index > 0:
-                print(f"[降级] 前面的模型不可用，已切换到 {candidate.name}")
+                logger.warning(f"[降级] 前面的模型不可用，已切换到 {candidate.name}")
             try:
                 stream = candidate.generate_stream(messages, tools)
                 first = next(stream)

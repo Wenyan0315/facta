@@ -15,7 +15,7 @@ from agent.core.llm import LLM
 from agent.core.types import Message
 from agent.memory.compressor import trim_incomplete_round
 from agent.memory.store import Session
-from agent.orchestrator.loop import SYSTEM_PROMPT, run_turn
+from agent.orchestrator.loop import SYSTEM_PROMPT, RunResult, run_turn
 from agent.tools.registry import ToolRegistry
 
 # 用户输入这些词就结束对话
@@ -31,8 +31,9 @@ EXIT_QUIT = "quit"
 EXIT_NEW = "new"
 EXIT_INTERRUPT = "interrupt"
 
-# 流式打印回调：块一到就上屏。打印是副作用，从 on_text 缝注入
-_STREAM_PRINT = lambda text: print(text, end="", flush=True)
+def _stream_print(text: str) -> None:
+    """流式打印回调：块一到就上屏。打印是副作用，从 on_text 缝注入。"""
+    print(text, end="", flush=True)
 
 
 def _cli_on_event(event_type: str, data: dict) -> None:
@@ -104,18 +105,18 @@ def run_chat(
                 continue
 
             # 一轮交给内核跑：用户消息入底片、投影、工具循环、收尾全在 run_turn 内。
-            # 返回 None = 模型不可用（内核已掐半截轮 + 发 error 事件），本轮跳过。
-            reply = run_turn(
+            # COMPLETED = 正常结束；CANCELLED/FAILED = 本轮无产出（内核已处理）
+            result, reply = run_turn(
                 session,
                 user_input,
                 llm=llm,
                 registry=registry,
                 summarizer=summarizer,
-                on_text=_STREAM_PRINT,
+                on_text=_stream_print,
                 on_event=_cli_on_event,
                 on_confirm=_cli_on_confirm,
             )
-            if reply is not None:
+            if result is RunResult.COMPLETED and reply is not None:
                 print()   # 回答收尾换行（模型挂时 error 事件已自带换行语义，不加）
     except (KeyboardInterrupt, EOFError):
         # M6.2：修掉 M6.1 的 tradeoff②——Ctrl+C / Ctrl+D 不再丢历史。
