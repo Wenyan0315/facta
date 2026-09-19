@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.52（2026-09-19）｜随着里程碑推进持续迭代此文档
+> 版本：v0.53（2026-09-19）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [product.md](product.md) v2）：个人执行助手——执行主轴 + 记忆护城河 + 通用外延（[021](decisions/021-direction-decisions.md)）
 
@@ -100,7 +100,7 @@
 | memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘）+ 多会话管理（S1：active+archive，/new 归档重开）+ restore_session 原语（S2a：归档写回 active 后删除，move 语义） | 用户级记忆仓库外位置 |
 | tools | ✅ Tool+ToolRegistry+内置工具按家族分件（time/history/notes 三族，S4a 拆分）；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型)；联网工具 web_search/fetch_web（015：Tavily Provider+SSRF 栅栏+条件注册）；MCP 外部工具配置化接入；文件四件 read_file/search_code/list_dir/write_file+diff（S4a，workspace 围栏：__file__ 锚定+敏感黑名单读都不行）；终端执行 run_command（S4b：白名单只读免确认/L2 确认缝 registry 收口/批准拒绝都落审；评审修复轮加参数级拦截——find -exec/sort -o 等「只读命令名+危险参数」也弹确认） | 更多工具 + skills |
 | server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + 静态三件零构建链；只绑 127.0.0.1。验收修复轮：人设保证（ensure_persona 装配不变量）、每轮落盘、取消检查点③（流中即时）、任务视图最小版（/tasks+GET /api/runs）、历史回放（GET /api/messages）、md 渲染（marked vendored）、Enter/Esc 键盘。S4b：waiting_approval 挂起态（进单锁口径、取消视拒、confirm.request/resolved 事件断线重放重弹）+ confirm 裁决端点 + 前端确认弹窗 | 任务视图完整版（S2 预留）；Run Store 外置（多实例触发） |
-| evals | ✅ 检索评估三路并评+miss 归因（vector/grep/union，30 题形态分层，8 万字混合语料 data/notes+evals/corpus，2026-09-19 混合检索裁定不立项见 022）+ LLM-as-judge 回答质量(基线 13/13 合格, 0% 错误, 全轮 ¥0.011) | 更难的对抗题库 + 回答质量回归 |
+| evals | ✅ **evalkit 内核**（src/agent/evalkit：指标/指纹判定/归因/judge 解析纯函数，零依赖可拿走，024）+ evals 壳（三路并评+miss 归因，30 题形态分层，8 万字混合语料，022 混合检索裁定不立项）+ LLM-as-judge 回答质量(基线 13/13 合格, 0% 错误, 全轮 ¥0.011) | 更难的对抗题库 + 回答质量回归 |
 | data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据)；data/learned/*.md 项目级长时记忆(M6.4，进 git) | 长文档、多来源 |
 
 ## 三、两条演进主线
@@ -179,6 +179,7 @@
 | [021-direction-decisions](decisions/021-direction-decisions.md) | 方向定稿 | 定位 v2（执行主轴+记忆护城河+通用外延）；S5 重定义（Agent 对象吸收 SYSTEM_PROMPT 外置+learned 读取侧，+plan-then-act+spawn_subagent）；编排文本编辑+mermaid 阅读（拖拽否决）；前端框架化翻案（Preact+Vite，任务视图试点） |
 | [022-hybrid-retrieval-eval](decisions/022-hybrid-retrieval-eval.md) | 混合检索评估 | 三路并评+miss 归因（8 万字混合语料，30 题形态分层）；BGE 生产 miss 5/26、grep 补救率 0% → 不立项；洞察：grep 增量随向量能力增强而衰减、中×英 query 语料是 grep 死区、miss 主因是闸门截断 |
 | [023-fw-preact-pilot](decisions/023-fw-preact-pilot.md) | FW 前端基建 | Preact+Vite 脚手架（frontend/→static/fw/，产物进 git）；任务视图 v2 试点（状态驱动）；构建链第一课：子路径 base:"/fw/"；dev 工作流（uvicorn+HMR proxy） |
+| [024-evalkit](decisions/024-evalkit.md) | evalkit 评测内核化 | 评测纯函数抽 src/agent/evalkit（指标/指纹/归因/judge 解析，零依赖拷走即用）；不引 Ragas/DeepEval 的裁定（原理件手写，工程件可引，触发信号记档）；搬家当天 mypy 抓出 re.search 潜伏 bug；升格触发信号=第二个真实消费者 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）

@@ -26,6 +26,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from agent.evalkit import (
+    attribute_miss,
+    is_relevant,
+    precision_at_k,
+    recall_at_k,
+    reciprocal_rank,
+)
 from agent.knowledge.knowledge_base import (
     BagOfWordsEmbedder,
     Embedder,
@@ -49,31 +56,6 @@ STOPWORDS = frozenset({
     "能", "和", "与", "及", "我", "你", "他", "它", "在", "了", "个",
     "这", "那", "要", "会", "着", "就", "还", "被", "把", "给", "对",
 })
-
-
-def is_relevant(chunk: str, expected: list[str]) -> bool:
-    """chunk 是否命中了期望笔记（用标注的"指纹"文字做子串匹配）。"""
-    return any(exp in chunk for exp in expected)
-
-
-def precision_at_k(retrieved: list[str], expected: list[str], k: int) -> float:
-    hits = sum(1 for c in retrieved[:k] if is_relevant(c, expected))
-    return hits / k
-
-
-def recall_at_k(retrieved: list[str], expected: list[str], k: int) -> float:
-    if not expected:
-        return 0.0  # 没有期望命中时无意义，调用侧会跳过
-    hits = sum(1 for c in retrieved[:k] if is_relevant(c, expected))
-    return hits / len(expected)
-
-
-def reciprocal_rank(retrieved: list[str], expected: list[str]) -> float:
-    """MRR 的单条版本：第一条命中的排名 r，得分 1/r；全不命中得 0。"""
-    for rank, chunk in enumerate(retrieved, 1):
-        if is_relevant(chunk, expected):
-            return 1.0 / rank
-    return 0.0
 
 
 def merged_corpus(tmp: Path) -> Path:
@@ -166,14 +148,16 @@ def evaluate(embedder: Embedder, label: str, merged: Path, grep) -> None:
         grep_ok = any(is_relevant(c, expected) for c in grep_hits)
         union_ok = any(is_relevant(c, expected) for c in union_hits)
 
-        if prod_ok:
-            attribution = ""
-        elif grep_ok:
+        # 归因判定走 evalkit（内核化的意义：壳消费内核，API 被真实使用验证）
+        kind = attribute_miss(prod_ok, grep_ok)
+        if kind == "bc":
             attribution = "b/c：grep 可补救"
             miss_bc += 1
-        else:
+        elif kind == "a":
             attribution = "a：语义鸿沟"
             miss_a += 1
+        else:
+            attribution = ""
 
         print(
             f"{question:<24}{form:<12}{p:>6.2f}"

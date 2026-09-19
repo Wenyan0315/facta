@@ -18,14 +18,12 @@
 SILICONFLOW API key；账单在结尾打印——评测本身的花费也入账）
 """
 
-import json
-import re
-
 from dotenv import load_dotenv
 
 from agent.core.llm import get_llm
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
+from agent.evalkit import parse_judge_json  # 裁判输出解析自 evalkit 内核化（024）
 from agent.knowledge.knowledge_base import get_embedder
 from evals.dataset import CASES
 from evals.retrieval_eval import build_kb
@@ -51,19 +49,6 @@ JUDGE_PROMPT = """你是严格的评审员。评估候选回答的质量。
 - 评分 1-5：5 完全正确且忠于资料；4 基本正确有小瑕疵；3 部分正确或轻微脱离资料；2 明显错误或大量编造；1 答非所问或纯编造
 - 只输出 JSON，不要任何其他文字：{{"score": 数字, "reason": "一句话理由"}}
 """
-
-
-def parse_judge_json(text: str) -> dict | None:
-    """裁判输出解析：先试整段 JSON，再试正则抠 {..} 块；都失败返回 None。"""
-    text = (text or "").strip()
-    for candidate in (text, re.search(r"\{[^{}]*\}", text).group() if "{" in text else ""):
-        try:
-            data = json.loads(candidate)
-            if isinstance(data, dict) and isinstance(data.get("score"), int):
-                return data
-        except (json.JSONDecodeError, AttributeError):
-            continue
-    return None
 
 
 def evaluate_once(
