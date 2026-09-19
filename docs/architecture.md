@@ -1,8 +1,8 @@
 # Personal Agent 架构图
 
-> 版本：v0.49（2026-09-18）｜随着里程碑推进持续迭代此文档
+> 版本：v0.50（2026-09-18）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
-> 产品定位（v0.43 起）：见 [product.md](product.md)——通用个人 agent，场景优先级由真实使用数据排序
+> 产品定位（v0.50 起，见 [product.md](product.md) v2）：个人执行助手——执行主轴 + 记忆护城河 + 通用外延（[021](decisions/021-direction-decisions.md)）
 
 ## 设计原则
 
@@ -131,8 +131,9 @@
 | S2 ✅ | 产品骨架 v1 对话视图：S2a 清账（agent_loop 正名 orchestrator 编排层、run_turn 内核/外设分离、assemble 装配单一真值源）→ S2b Web 壳（FastAPI+SSE：Run 三接口分离、内存 Run Store 单锁状态机、断线重连重放、会话切回、零构建链前端三件）；任务视图按双视图预留未实现 | 前后端、SSE、Run 状态机 |
 | S3 ✅ | 安全底座：工具权限分级（L0 只读/L1 写/L2 确认留 S4）+ 注入界碑（外部内容包裹声明+免疫条款）+ 审计日志（registry 收口 append-only jsonl 按天滚动，分级截断） | 安全 |
 | S4 ✅ | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）。**S4a ✅ 文件四件（read/search_code/list_dir/write_file+diff）+ builtin 拆分（time/history/notes 三族）+ workspace 围栏（__file__ 锚定+敏感黑名单）**；**S4b ✅ 终端执行 run_command + L2 确认机制（只读白名单免确认/registry 确认缝第四条缝/waiting_approval 挂起/Web 弹窗+CLI input/批准拒绝都落审）** | 文件系统、进程调度 |
-| S5 | skill 系统：可复用技能包与装载（2026-09 需求点名）+ 规则文件（AGENTS.md 式，learned 的读取侧；含系统提示词外置——SYSTEM_PROMPT 迁出 loop.py，改行为不碰代码，2026-09-15 裁定并入本站） | 插件化 |
-| S6 | 多 agent 协作：subagent 编排（主线2 的终点；判据=噪声隔离，见调研记录；worktree 隔离机制） | 编排 |
+| FW | 前端基建（2026-09-18 裁定，[021](decisions/021-direction-decisions.md)）：Preact+Vite 框架化——任务视图重写作试点（独立页+带 bug 半成品+定位后的重投主战场，验证声明式渲染对 DOM 竞争的结构性治疗）；试点成→记忆面板（护城河可视化，高优）等新前端需求上新栈，主聊天视图渐进迁移。排 S5 前（记忆面板等需求压在它上面） | 声明式渲染、状态驱动 |
+| S5 | 执行架构（2026-09-18 重定义，[021](decisions/021-direction-decisions.md)）：**Agent 对象抽象**（独立 system prompt/工具子集/预算/记忆——吸收原 skill 站的 SYSTEM_PROMPT 外置与 AGENTS.md 式 learned 读取侧，二者本就是 Agent 对象的属性）+ **plan-then-act**（轻量规划，plan 即 Human on the Loop 掌舵点；plan 载体倾向独立最小结构，草案定）+ **spawn_subagent**（子 agent 只回传结论=噪声隔离，S6 判据提前兑现）；技能包格式后置并入 S6 | 执行架构、规划 |
+| S6 | 多 agent 协作：worktree 隔离机制 + 真编排（技能包格式自 S5 后置并入；spawn_subagent 已在 S5 兑现噪声隔离判据） | 编排 |
 | S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止） | 结构化知识、图可视化 |
 | S8 | 多入口 Gateway：IM 渠道（飞书/Telegram 等）消息归一化接入 agent_loop，与 headless 合并（gateway 常驻进程——重审「不 daemon 化」原则） | 事件驱动、常驻服务 |
 | 〔另排期〕 L1 | 本地模型接入：Ollama（OpenAI 兼容端点零代码接入，Qwen3 档起步；触发信号=需要零成本/离线验收链路时排期） | 本地推理 |
@@ -175,6 +176,7 @@
 | [018-s4a-file-tools](decisions/018-s4a-file-tools.md) | S4a 文件工具 | 文件四件（write_file 带 diff）；workspace 围栏（__file__ 锚定+敏感黑名单读都不行）；builtin 按家族拆三件；note vs file 分工边界 |
 | [019-s4b-terminal-confirm](decisions/019-s4b-terminal-confirm.md) | S4b 终端+确认 | run_command（超时/截断/cwd 锚定）；白名单免确认双条件（用户拍板粒度）；确认缝 registry 收口（loop 第四条缝）；waiting_approval 挂起+断线重弹；拒绝回灌不炸会话；批准拒绝都落审 |
 | [020-s4-review-hardening](decisions/020-s4-review-hardening.md) | S4 评审修复轮 | 外部评审 38 条分类消化（6 硬伤即修/12 已知边界按触发信号/3 方向分歧入待讨论）；结构化日志分层；RunResult 三态；降级显式化；参数级白名单；SearchHit 溯源；mypy+ruff 进 CI（首轮抓到 rename 端点漏 import 真 bug） |
+| [021-direction-decisions](decisions/021-direction-decisions.md) | 方向定稿 | 定位 v2（执行主轴+记忆护城河+通用外延）；S5 重定义（Agent 对象吸收 SYSTEM_PROMPT 外置+learned 读取侧，+plan-then-act+spawn_subagent）；编排文本编辑+mermaid 阅读（拖拽否决）；前端框架化翻案（Preact+Vite，任务视图试点） |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
@@ -186,9 +188,7 @@
 ## 待讨论（产品方向，未定档）
 
 > 来自日常使用与外部评审的方向性议题，尚未展开设计评审。记录在此避免遗忘，临期讨论时补草案。
+> 2026-09-18 方向定稿会出清四条（定位/S5 投法/编排形态/前端框架化），裁定见 [021](decisions/021-direction-decisions.md)；余混合检索一条。
 
 - **混合检索**（2026-09-17 提出）：当前向量检索效果未知（无量化评估），拟讨论向量 + grep 混合模式——向量管语义近似、grep 管精确命中，两路召回再合并排序。触发信号=S5 评估体系搭好后用数据说话，或向量检索 miss 率到了不可接受的程度。
-- **前端配置界面**（2026-09-17 提出三件）：①MCP 粘贴配置（替换手动编辑 JSON）②Skill 配置 ③Agent 编排（拖拽式 + agent.md 可视化编辑）。这三件共享同一设计问题——配置从「写文件」升级到「填表单」，需要前端框架化支撑（当前 vanilla JS 复杂度已接近上限，进否决档案的条件可能触发）。依赖 S5（skill 系统）和 S8（多入口 Gateway）的进展，排阶段二后段。
-- **产品定位：三场景并列 vs 单场景楔子**（外部评审 2026-09-17）：评审主张「三场景并列=没有定位」——单用户资源有限，三场景平摊每个 60 分，不如押最成熟的知识伴侣（RAG+记忆+固化）到 90 分，以「可信问答」为价值主张；并质疑使用数据台账样本量（个位数）撑不起「数据驱动排序」的说法。与 014 号决策（三场景并列、优先级由使用数据动态排序）正面冲突。张力实质：兴趣驱动的学习项目逻辑 vs 场景聚焦的产品逻辑，两种都对、取决于目标定义。触发信号=product.md 层面的定位讨论重新开启，或任一场景使用数据真正攒够规模。
-- **S5 投法：skill 系统 vs Agent 对象抽象 + plan-then-act**（外部评审 2026-09-17）：评审建议把 run_turn 的「带工具的 LLM 循环」提炼成一等公民 Agent 对象（独立 system prompt/工具子集/预算/记忆），主 agent 经 spawn_subagent 派生、子 agent 只回传结论（噪声隔离的 S6 判据提前兑现）；同时引入轻量 plan-then-act（复用 TodoStore 作计划载体，plan 即 Human on the Loop 的掌舵点）。与现行 S5（skill/规则文件，读取侧）是同一时段的两种投法——前者赌「多 agent 结构」，后者赌「能力沉淀格式」。触发信号=S5 开工时二选一定夺。
-- **前端框架化是否提前**（外部评审 2026-09-17）：评审开出的体验药方——工具调用的人类可读叙事、记忆面板（查看/编辑 agent 记住了什么）、引用溯源 UI 跳转、配置表单化——全部指向同一地基问题：vanilla JS 复杂度上限。否决档案「前端框架化暂缓，触发信号=复杂度超限」的条件可能已被这批需求集体触发（R5 只做了溯源的数据层，UI 跳转正是欠账之一）。触发信号=上述任一前端需求正式开工前，先裁决框架化与否——它影响所有前端工作的地基。
+- **前端配置界面**（2026-09-17 提出，编排部分已定稿见 [021](decisions/021-direction-decisions.md)）：①MCP 粘贴配置（替换手动编辑 JSON）②Skill 配置。共享同一设计问题——配置从「写文件」升级到「填表单」，前端框架化已裁定（Preact+Vite，FW 站）扫清地基障碍；③编排已定稿为「文本编辑 + mermaid 阅读」（拖拽进否决档案）。剩余两件依赖 S5（Agent 对象定型后 skill 才有配置对象）与 FW 站进展，排阶段二后段。
