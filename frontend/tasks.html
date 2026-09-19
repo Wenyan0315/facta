@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>任务视图 · Personal Agent</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <button id="new-session" onclick="location.href='/'">← 返回对话</button>
+      <span class="muted" style="font-size:12px;">本次服务进程内的运行记录（重启后清空）</span>
+    </div>
+    <ul id="session-list"><li class="muted">任务视图</li></ul>
+  </aside>
+
+  <main id="chat">
+    <div id="messages">
+      <h2 class="tasks-title">任务运行</h2>
+      <!-- FW 站 v2：容器空着，内容由 Preact 状态驱动渲染（对照 v1 的 innerHTML 拼接） -->
+      <div id="run-list"></div>
+    </div>
+  </main>
+
+  <script type="module" src="/src/tasks/main.jsx"></script>
+</body>
+</html>

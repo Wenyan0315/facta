@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.51（2026-09-19）｜随着里程碑推进持续迭代此文档
+> 版本：v0.52（2026-09-19）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [product.md](product.md) v2）：个人执行助手——执行主轴 + 记忆护城河 + 通用外延（[021](decisions/021-direction-decisions.md)）
 
@@ -131,7 +131,7 @@
 | S2 ✅ | 产品骨架 v1 对话视图：S2a 清账（agent_loop 正名 orchestrator 编排层、run_turn 内核/外设分离、assemble 装配单一真值源）→ S2b Web 壳（FastAPI+SSE：Run 三接口分离、内存 Run Store 单锁状态机、断线重连重放、会话切回、零构建链前端三件）；任务视图按双视图预留未实现 | 前后端、SSE、Run 状态机 |
 | S3 ✅ | 安全底座：工具权限分级（L0 只读/L1 写/L2 确认留 S4）+ 注入界碑（外部内容包裹声明+免疫条款）+ 审计日志（registry 收口 append-only jsonl 按天滚动，分级截断） | 安全 |
 | S4 ✅ | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）。**S4a ✅ 文件四件（read/search_code/list_dir/write_file+diff）+ builtin 拆分（time/history/notes 三族）+ workspace 围栏（__file__ 锚定+敏感黑名单）**；**S4b ✅ 终端执行 run_command + L2 确认机制（只读白名单免确认/registry 确认缝第四条缝/waiting_approval 挂起/Web 弹窗+CLI input/批准拒绝都落审）** | 文件系统、进程调度 |
-| FW | 前端基建（2026-09-18 裁定，[021](decisions/021-direction-decisions.md)）：Preact+Vite 框架化——任务视图重写作试点（独立页+带 bug 半成品+定位后的重投主战场，验证声明式渲染对 DOM 竞争的结构性治疗）；试点成→记忆面板（护城河可视化，高优）等新前端需求上新栈，主聊天视图渐进迁移。排 S5 前（记忆面板等需求压在它上面） | 声明式渲染、状态驱动 |
+| FW ✅ | 前端基建（021 裁定兑现，见 [023](decisions/023-fw-preact-pilot.md)）：Preact+Vite 脚手架（frontend/ 源码 → static/fw/ 产物，产物进 git）；任务视图 v2 试点完成（状态驱动替代 innerHTML 同步矩阵，JSX 自动转义结构性免疫注入）；构建链第一课：子路径部署必须 base:"/fw/"。下一步：记忆面板（护城河可视化，高优）上新栈，主聊天视图渐进迁移 | 声明式渲染、状态驱动 |
 | S5 | 执行架构（2026-09-18 重定义，[021](decisions/021-direction-decisions.md)）：**Agent 对象抽象**（独立 system prompt/工具子集/预算/记忆——吸收原 skill 站的 SYSTEM_PROMPT 外置与 AGENTS.md 式 learned 读取侧，二者本就是 Agent 对象的属性）+ **plan-then-act**（轻量规划，plan 即 Human on the Loop 掌舵点；plan 载体倾向独立最小结构，草案定）+ **spawn_subagent**（子 agent 只回传结论=噪声隔离，S6 判据提前兑现）；技能包格式后置并入 S6 | 执行架构、规划 |
 | S6 | 多 agent 协作：worktree 隔离机制 + 真编排（技能包格式自 S5 后置并入；spawn_subagent 已在 S5 兑现噪声隔离判据） | 编排 |
 | S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止） | 结构化知识、图可视化 |
@@ -178,6 +178,7 @@
 | [020-s4-review-hardening](decisions/020-s4-review-hardening.md) | S4 评审修复轮 | 外部评审 38 条分类消化（6 硬伤即修/12 已知边界按触发信号/3 方向分歧入待讨论）；结构化日志分层；RunResult 三态；降级显式化；参数级白名单；SearchHit 溯源；mypy+ruff 进 CI（首轮抓到 rename 端点漏 import 真 bug） |
 | [021-direction-decisions](decisions/021-direction-decisions.md) | 方向定稿 | 定位 v2（执行主轴+记忆护城河+通用外延）；S5 重定义（Agent 对象吸收 SYSTEM_PROMPT 外置+learned 读取侧，+plan-then-act+spawn_subagent）；编排文本编辑+mermaid 阅读（拖拽否决）；前端框架化翻案（Preact+Vite，任务视图试点） |
 | [022-hybrid-retrieval-eval](decisions/022-hybrid-retrieval-eval.md) | 混合检索评估 | 三路并评+miss 归因（8 万字混合语料，30 题形态分层）；BGE 生产 miss 5/26、grep 补救率 0% → 不立项；洞察：grep 增量随向量能力增强而衰减、中×英 query 语料是 grep 死区、miss 主因是闸门截断 |
+| [023-fw-preact-pilot](decisions/023-fw-preact-pilot.md) | FW 前端基建 | Preact+Vite 脚手架（frontend/→static/fw/，产物进 git）；任务视图 v2 试点（状态驱动）；构建链第一课：子路径 base:"/fw/"；dev 工作流（uvicorn+HMR proxy） |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）

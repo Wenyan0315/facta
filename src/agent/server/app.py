@@ -389,10 +389,11 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             raise HTTPException(404, f"待办 #{todo_id} 不存在")
         return {"id": todo.id, "text": todo.text, "done": todo.done}
 
-    # 任务视图（S2 双视图的另一半，v1 最小版：运行记录+状态+交付摘要）
+    # 任务视图（S2 双视图的另一半）：FW 站 v2（Preact，021 裁定）——
+    # 源码 frontend/，构建产物 static/fw/（进 git）；v1 vanilla 版已删（git 史可查）
     @app.get("/tasks")
     def tasks():
-        return FileResponse(static_dir / "tasks.html")
+        return FileResponse(static_dir / "fw" / "tasks.html")
 
     # 前端静态文件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）。
     # no-cache（每次 revalidate，未变时 304 也快）：浏览器对无 Cache-Control 的
