@@ -108,7 +108,7 @@ def main() -> None:
     print(f"被评模型: {CANDIDATE_MODEL} ｜ 裁判: {JUDGE_MODEL} ｜ 题目: {len(CASES)}\n")
 
     scores: list[int] = []
-    for i, (question, _expected) in enumerate(CASES, 1):
+    for i, (question, _expected, _form) in enumerate(CASES, 1):
         verdict, answer = evaluate_once(candidate, judge, kb, question)
         if verdict is None:
             score = None

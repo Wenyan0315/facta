@@ -9,7 +9,7 @@
       "name": "ctx7",
       "url": "https://mcp.context7.com/mcp",
       "prefix": "ctx7__",
-      "enabled": false
+      "enabled": true
     }
   ]
 }
