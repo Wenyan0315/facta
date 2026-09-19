@@ -304,3 +304,35 @@ body {
 
 /* 任务视图：等待确认徽标（S4b 新状态） */
 .task-badge.waiting_approval { background: #fef3c7; color: #b45309; }
+
+/* 记忆面板（025「护城河可视化」，FW 新栈页面复用本表） */
+.memory-group { margin-bottom: 24px; }
+.memory-group-title {
+  font-size: 14px; color: var(--muted); border-bottom: 1px solid var(--border);
+  padding-bottom: 6px; margin-bottom: 4px;
+}
+.memory-entry {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 8px 4px; border-bottom: 1px solid var(--border);
+}
+.memory-entry:last-child { border-bottom: none; }
+.memory-date {
+  font-size: 11px; color: var(--muted); white-space: nowrap;
+  padding-top: 3px; font-family: ui-monospace, monospace;
+}
+.memory-content { flex: 1; font-size: 14px; line-height: 1.5; word-break: break-all; }
+.memory-actions {
+  display: none; gap: 6px; white-space: nowrap;
+}
+.memory-entry:hover .memory-actions,
+.memory-actions.visible { display: inline-flex; }   /* 编辑态常显 */
+.memory-actions button {
+  font-size: 12px; padding: 2px 8px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--muted); border-radius: 4px; cursor: pointer;
+}
+.memory-actions button:hover { color: var(--text); border-color: var(--accent); }
+.memory-actions button.danger:hover { color: var(--danger); border-color: var(--danger); }
+.memory-entry textarea {
+  flex: 1; border: 1px solid var(--accent); border-radius: 6px;
+  padding: 6px 8px; font-size: 14px; font-family: inherit; resize: vertical;
+}

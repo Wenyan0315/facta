@@ -24,7 +24,8 @@ from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-from agent.memory.consolidate import consolidate
+from agent.memory.consolidate import CATEGORIES, consolidate
+from agent.memory.learned import delete_line, read_learned, update_line
 from agent.memory.store import (
     archive_session,
     derive_title,
@@ -97,6 +98,12 @@ class RenameSessionRequest(BaseModel):
     """会话重命名的请求体（2026-09-17 体验轮）：只改 title 标签。"""
 
     text: str
+
+
+class LearnedUpdateRequest(BaseModel):
+    """记忆条目编辑的请求体（记忆面板 v1）：只改正文，日期归程序管。"""
+
+    content: str
 
 
 def _run_worker(ctx: AppContext, run, user_text: str) -> None:
@@ -389,11 +396,59 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             raise HTTPException(404, f"待办 #{todo_id} 不存在")
         return {"id": todo.id, "text": todo.text, "done": todo.done}
 
+    # 记忆面板（021「护城河可视化」）：learned 三桶的读/改/删——固化管线的
+    # 产出不再是黑箱。行号定位协议见 memory/learned.py 模块注释。
+    @app.get("/api/learned")
+    def learned_list():
+        out = []
+        for category in CATEGORIES:
+            for entry in read_learned(LEARNED_DIR / f"{category}.md"):
+                out.append({
+                    "category": category,
+                    "line": entry.line,
+                    "date": entry.date,
+                    "content": entry.content,
+                })
+        return out
+
+    @app.put("/api/learned/{category}/{line}")
+    def learned_update(category: str, line: int, body: LearnedUpdateRequest):
+        if category not in CATEGORIES:
+            raise HTTPException(400, "未知记忆类别")
+        if not body.content.strip():
+            raise HTTPException(400, "内容不能为空")
+        path = LEARNED_DIR / f"{category}.md"
+        if not path.is_file():
+            raise HTTPException(404, "该类别暂无记忆")
+        try:
+            update_line(path, line, body.content.strip())
+        except IndexError:
+            raise HTTPException(404, "条目不存在") from None
+        return {"ok": True}
+
+    @app.delete("/api/learned/{category}/{line}")
+    def learned_delete(category: str, line: int):
+        if category not in CATEGORIES:
+            raise HTTPException(400, "未知记忆类别")
+        path = LEARNED_DIR / f"{category}.md"
+        if not path.is_file():
+            raise HTTPException(404, "该类别暂无记忆")
+        try:
+            delete_line(path, line)
+        except IndexError:
+            raise HTTPException(404, "条目不存在") from None
+        return {"ok": True}
+
     # 任务视图（S2 双视图的另一半）：FW 站 v2（Preact，021 裁定）——
     # 源码 frontend/，构建产物 static/fw/（进 git）；v1 vanilla 版已删（git 史可查）
     @app.get("/tasks")
     def tasks():
         return FileResponse(static_dir / "fw" / "tasks.html")
+
+    # 记忆面板页面（FW 新栈第二入口，025）：与 /tasks 同款伺服
+    @app.get("/memory")
+    def memory_page():
+        return FileResponse(static_dir / "fw" / "memory.html")
 
     # 前端静态文件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）。
     # no-cache（每次 revalidate，未变时 304 也快）：浏览器对无 Cache-Control 的

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>记忆面板 · Personal Agent</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <button id="new-session" onclick="location.href='/'">← 返回对话</button>
+      <span class="muted" style="font-size:12px;">agent 跨会话记住的项目级记忆（固化管线产物）</span>
+    </div>
+    <ul id="session-list"><li class="muted">记忆面板</li></ul>
+  </aside>
+
+  <main id="chat">
+    <div id="messages">
+      <h2 class="tasks-title">记忆面板</h2>
+      <div id="memory-root"></div>
+    </div>
+  </main>
+
+  <script type="module" src="/src/memory/main.jsx"></script>
+</body>
+</html>

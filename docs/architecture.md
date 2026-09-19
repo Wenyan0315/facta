@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.53（2026-09-19）｜随着里程碑推进持续迭代此文档
+> 版本：v0.54（2026-09-19）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [product.md](product.md) v2）：个人执行助手——执行主轴 + 记忆护城河 + 通用外延（[021](decisions/021-direction-decisions.md)）
 
@@ -131,7 +131,7 @@
 | S2 ✅ | 产品骨架 v1 对话视图：S2a 清账（agent_loop 正名 orchestrator 编排层、run_turn 内核/外设分离、assemble 装配单一真值源）→ S2b Web 壳（FastAPI+SSE：Run 三接口分离、内存 Run Store 单锁状态机、断线重连重放、会话切回、零构建链前端三件）；任务视图按双视图预留未实现 | 前后端、SSE、Run 状态机 |
 | S3 ✅ | 安全底座：工具权限分级（L0 只读/L1 写/L2 确认留 S4）+ 注入界碑（外部内容包裹声明+免疫条款）+ 审计日志（registry 收口 append-only jsonl 按天滚动，分级截断） | 安全 |
 | S4 ✅ | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）。**S4a ✅ 文件四件（read/search_code/list_dir/write_file+diff）+ builtin 拆分（time/history/notes 三族）+ workspace 围栏（__file__ 锚定+敏感黑名单）**；**S4b ✅ 终端执行 run_command + L2 确认机制（只读白名单免确认/registry 确认缝第四条缝/waiting_approval 挂起/Web 弹窗+CLI input/批准拒绝都落审）** | 文件系统、进程调度 |
-| FW ✅ | 前端基建（021 裁定兑现，见 [023](decisions/023-fw-preact-pilot.md)）：Preact+Vite 脚手架（frontend/ 源码 → static/fw/ 产物，产物进 git）；任务视图 v2 试点完成（状态驱动替代 innerHTML 同步矩阵，JSX 自动转义结构性免疫注入）；构建链第一课：子路径部署必须 base:"/fw/"。下一步：记忆面板（护城河可视化，高优）上新栈，主聊天视图渐进迁移 | 声明式渲染、状态驱动 |
+| FW ✅ | 前端基建（021 裁定兑现，见 [023](decisions/023-fw-preact-pilot.md)）：Preact+Vite 脚手架（frontend/ 源码 → static/fw/ 产物，产物进 git）；任务视图 v2 试点完成（状态驱动替代 innerHTML 同步矩阵，JSX 自动转义结构性免疫注入）；构建链第一课：子路径部署必须 base:"/fw/"。**记忆面板 v1 ✅（[025](decisions/025-memory-panel.md)，护城河可视化）：learned 三桶查看/编辑/删除 + 行号定位协议 + 坏行宽容（幻觉清理入口）**。下一步：主聊天视图渐进迁移 | 声明式渲染、状态驱动 |
 | S5 | 执行架构（2026-09-18 重定义，[021](decisions/021-direction-decisions.md)）：**Agent 对象抽象**（独立 system prompt/工具子集/预算/记忆——吸收原 skill 站的 SYSTEM_PROMPT 外置与 AGENTS.md 式 learned 读取侧，二者本就是 Agent 对象的属性）+ **plan-then-act**（轻量规划，plan 即 Human on the Loop 掌舵点；plan 载体倾向独立最小结构，草案定）+ **spawn_subagent**（子 agent 只回传结论=噪声隔离，S6 判据提前兑现）；技能包格式后置并入 S6 | 执行架构、规划 |
 | S6 | 多 agent 协作：worktree 隔离机制 + 真编排（技能包格式自 S5 后置并入；spawn_subagent 已在 S5 兑现噪声隔离判据） | 编排 |
 | S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止） | 结构化知识、图可视化 |
@@ -180,6 +180,7 @@
 | [022-hybrid-retrieval-eval](decisions/022-hybrid-retrieval-eval.md) | 混合检索评估 | 三路并评+miss 归因（8 万字混合语料，30 题形态分层）；BGE 生产 miss 5/26、grep 补救率 0% → 不立项；洞察：grep 增量随向量能力增强而衰减、中×英 query 语料是 grep 死区、miss 主因是闸门截断 |
 | [023-fw-preact-pilot](decisions/023-fw-preact-pilot.md) | FW 前端基建 | Preact+Vite 脚手架（frontend/→static/fw/，产物进 git）；任务视图 v2 试点（状态驱动）；构建链第一课：子路径 base:"/fw/"；dev 工作流（uvicorn+HMR proxy） |
 | [024-evalkit](decisions/024-evalkit.md) | evalkit 评测内核化 | 评测纯函数抽 src/agent/evalkit（指标/指纹/归因/judge 解析，零依赖拷走即用）；不引 Ragas/DeepEval 的裁定（原理件手写，工程件可引，触发信号记档）；搬家当天 mypy 抓出 re.search 潜伏 bug；升格触发信号=第二个真实消费者 |
+| [025-memory-panel](decisions/025-memory-panel.md) | 记忆面板 v1 | learned 三桶查看/编辑/删除（护城河可视化）；行号定位协议（append-only 下稳定）+ 坏行宽容（幻觉清理入口）+ 编辑保留日期（时间戳归程序管）；FW 新栈第二入口，多入口共享 chunk |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）

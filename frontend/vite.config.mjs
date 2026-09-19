@@ -16,6 +16,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         tasks: resolve(import.meta.dirname, "tasks.html"),
+        memory: resolve(import.meta.dirname, "memory.html"),
       },
       output: {
         entryFileNames: "assets/[name].js",
