@@ -158,7 +158,8 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                 "闲聊、寒暄、与个人知识无关的常识问题不必检索。"
                 "查询词应自行提炼：用户说'继续''那再讲讲'等指代性话语时，"
                 "要结合对话上文改写成完整、明确的查询词再检索。"
-                "若返回的相关度分数普遍偏低，可换更精准的关键词重试一次。"
+                "若返回的相关度分数普遍偏低，可换更精准的关键词重试一次；"
+                "检索英文技术文档时，用英文关键词（工具名、命令、参数名等专名）重试。"
             ),
             parameters=_SEARCH_NOTES_PARAMS,
             func=search_notes,
