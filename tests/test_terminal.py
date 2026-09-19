@@ -15,6 +15,7 @@ import pytest
 from agent.core.audit import AuditLog
 from agent.tools.registry import ToolRegistry
 from agent.tools.terminal import (
+    WORKSPACE_ROOT,
     _run_command,
     needs_confirm,
     register_terminal_tools,
@@ -89,9 +90,11 @@ def test_run_command_echo_and_exit_code():
     out = _run_command("echo hello")
     assert "exit code: 0" in out and "hello" in out
 
-    # 非零退出码如实回传（模型可据此自纠）
-    out = _run_command("ls /definitely/not/exist")
-    assert "exit code: 1" in out
+    # 非零退出码如实回传（模型可据此自纠）。用 shell 内建 exit 3 定码——
+    # ls 不存在路径的退出码跨平台不同（BSD=1 / GNU=2），不可断言具体值
+    # （CI 15 连红的根因之一：本地 macOS 全绿掩盖了 Linux runner 的差异）
+    out = _run_command("exit 3")
+    assert "exit code: 3" in out
 
 
 def test_run_command_timeout(monkeypatch):
@@ -107,7 +110,10 @@ def test_run_command_truncates_long_output(monkeypatch):
 
 
 def test_run_command_cwd_is_workspace_root():
-    assert "my_project1" in _run_command("pwd")
+    # cwd 锚定的行为验证 = pwd 输出就是 WORKSPACE_ROOT 本身。
+    # 不断言目录名（本地 my_project1 / CI checkout 到 cortex-from-scratch——
+    # 目录名假设是 CI 15 连红的另一个根因）
+    assert str(WORKSPACE_ROOT) in _run_command("pwd")
 
 
 # ---------- registry confirm 流 ----------
