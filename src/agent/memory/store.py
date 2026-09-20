@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agent.core.types import Message
+from agent.memory.plan import PlanBoard
 
 SESSION_VERSION = 1
 
@@ -30,12 +31,15 @@ class Session:
 
     这是「状态」的完整定义——不仅消息是状态，消息之上的摘要游标也是状态。
     只存消息不存游标，重启后游标归零，滚动摘要等于白做。
+    plan（S5b）：会话级任务计划棋盘（单活跃 + 归档 + 事件史）——复杂任务
+    跨多轮对话，计划生命周期=会话，跟底片/缓存同进同出。
     """
 
     messages: list[Message] = field(default_factory=list)
     summary: str | None = None
     summarized_upto: int = 1
     title: str | None = None   # S2 验收修复轮：归档展示标签（LLM 提炼，None=尚未提炼）
+    plan: PlanBoard = field(default_factory=PlanBoard)   # S5b：plan-then-act 状态（空板=无活跃计划）
 
 
 def save_session(session: Session, path: Path) -> None:
@@ -49,6 +53,9 @@ def save_session(session: Session, path: Path) -> None:
             "summary": session.summary,
             "summarized_upto": session.summarized_upto,
         },
+        # S5b：计划棋盘整体落盘（事件史全量在——「为什么跳步」重启后仍可查；
+        # 传输队列 _pending 不落盘：它是本轮 Run 的传输状态，不属于会话）
+        "plan": session.plan.to_dict(),
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)   # ensure_ascii=False：中文原样存，不变 \u 天书
@@ -75,6 +82,7 @@ def load_session(path: Path) -> Session:
         summary=memory.get("summary"),
         summarized_upto=max(1, min(summarized_upto, len(messages))),
         title=raw.get("title"),   # 旧归档无此字段 → None，list 时 fallback 首句
+        plan=PlanBoard.from_dict(raw.get("plan", {})),   # S5b：老文件无 plan 段 → 空板宽进
     )
 
 

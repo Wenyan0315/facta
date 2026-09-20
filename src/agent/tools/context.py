@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from agent.core.llm import LLM
 from agent.core.types import Message
 from agent.knowledge.knowledge_base import KnowledgeBase
+from agent.memory.store import Session
 
 if TYPE_CHECKING:
     from agent.memory.todos import TodoStore
@@ -43,6 +44,11 @@ class ToolContext:
     notes_dir 不给默认值——默认值就是第二个真值源，路径必须由组装层显式
     给出，绝不藏在类型定义里。
 
+    session（S5b）：计划工具的操作载体（session.plan 是 PlanBoard）。传入的
+    必须是 assemble 持有的同一 Session 对象——与 history 的列表身份契约
+    同理（history 抓 messages 列表、session 抓整体，run_turn 原地变异时
+    工具看得见）。纪律：plan 家族只碰 session.plan，别的字段不碰。
+
     ⚠ List identity trap：history 必须传 session.messages 对象本身，
     绝不 .copy()——run_chat 在原列表上原地 append，工具闭包抓的是同一
     个对象才能实时看到全部历史；传副本 = 工具安静变瞎，不报错。
@@ -54,3 +60,4 @@ class ToolContext:
     history: list[Message] | None = None
     web: WebSearchClient | None = None   # 联网搜索 client（2026-09-16）：None=web 工具不上菜单
     todos: TodoStore | None = None       # 待办仓库（2026-09-17）：None=待办工具不上菜单
+    session: Session | None = None       # 会话状态（S5b）：None=计划工具不上菜单（测试最小装配）

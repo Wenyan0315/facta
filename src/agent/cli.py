@@ -49,6 +49,22 @@ def _cli_on_event(event_type: str, data: dict) -> None:
         print("  [已达到工具调用轮数上限，强制结束本轮]")
     elif event_type == "error":
         print(f"[模型不可用] {data['message']}\n本轮到此为止，网络/额度恢复后重新提问即可。")
+    elif event_type == "plan.created":
+        print("  [计划创建]")
+        print(f"  {format_plan_event_steps(data)}")
+    elif event_type == "plan.revised":
+        print(f"  [计划修订] {data.get('reason', '')}")
+        print(f"  {format_plan_event_steps(data)}")
+    elif event_type == "plan.step_updated":
+        note = f" —— {data['note']}" if data.get("note") else ""
+        print(f"  [计划] 步骤 #{data['id']} → {data['status']}{note}")
+    elif event_type == "plan.finished":
+        print(f"  [计划] 任务收官：{data.get('summary', '')}")
+
+
+def format_plan_event_steps(data: dict) -> str:
+    """计划创建/修订事件的步骤表渲染（CLI 版；来源 data['steps']）。"""
+    return " → ".join(f"{s['id']}.{s['title']}" for s in data.get("steps", []))
 
 
 def _cli_on_confirm(name: str, args: dict) -> bool:

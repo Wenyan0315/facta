@@ -23,8 +23,10 @@ from enum import Enum
 from agent.core.llm import LLM, LLMUnavailableError, merge_stream_chunks
 from agent.core.types import Message
 from agent.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
+from agent.memory.plan import PlanBoard
 from agent.memory.store import Session
 from agent.orchestrator.agent import Agent
+from agent.tools.plan import format_view
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,41 @@ def _cancel_aware_stream(chunks, should_cancel):
             chunks.close()
             raise _RunCancelled()
         yield chunk
+
+
+def _plan_stamp(board: PlanBoard) -> Message | None:
+    """活跃计划注入投影（S5b 针①，时间戳同款手法：进投影不进底片）。
+
+    位置固定：时间戳之后、摘要/对话之前——「今天几号」和「任务进行到哪」
+    都属于本轮视野。无活跃计划返回 None：不注入任何东西，简单任务的
+    上下文零开销（轮首快照——同轮内多步导航靠 update_plan_step 的
+    工具结果回灌带最新视图，双视图分工）。
+    """
+    view = board.view()
+    if view is None:
+        return None
+
+    return Message(
+        role="system",
+        content=(
+            "【当前任务计划】以下任务正在进行，按计划继续执行；"
+            "步骤状态变化用 update_plan_step 回写（终态必带 note），"
+            "计划过时用 make_plan 修订（reason 必填），全部终态后 finish_plan 收官。\n"
+            + format_view(view)
+        ),
+    )
+
+
+def _forward_plan_events(board: PlanBoard, on_event: Callable[[str, dict], None] | None) -> None:
+    """drain 计划事件并转发（S5b 针②的函数体）。
+
+    无 on_event 也 drain——清队列防陈旧事件跨轮堆积（测试/纯文本场景
+    产生的 plan 事件不能攒到下次有监听时一起冒出来）。
+    """
+    events = board.drain()
+    if on_event is not None:
+        for ev in events:
+            on_event(ev.type, ev.data)
 
 
 def _time_stamp(now: datetime | None = None) -> Message:
@@ -161,6 +198,11 @@ def run_turn(
         # 时间锚点注入投影（不入底片）：位置固定在第 2 条（system 之后、
         # 摘要/对话之前）；本轮工具循环共享同一个时间戳
         payload.insert(1, _time_stamp())
+        # 活跃计划注入投影（S5b 针①，不入底片）：时间戳之后；无活跃计划
+        # 返回 None 不注入——简单任务上下文零开销
+        plan_msg = _plan_stamp(session.plan)
+        if plan_msg is not None:
+            payload.insert(2, plan_msg)
 
         for _round in range(agent.max_tool_rounds):
             # 协作式取消检查点①：每次模型调用前。取消则掐半截轮、本轮无产出
@@ -197,6 +239,10 @@ def run_turn(
                 if on_event:
                     on_event("tool_started", {"name": tc["name"], "arguments": tc["arguments"]})
                 result = agent.execute(tc["name"], tc["arguments"], confirm=on_confirm)
+                # S5b 针②：工具执行后立刻 drain 计划事件——在 tool_result 之前
+                # 转发（plan.* 是这次执行的一部分，因果序在前）。事件走既有
+                # on_event 缝，零新缝；server 侧点分命名默认透传，前端免费收到
+                _forward_plan_events(session.plan, on_event)
                 if on_event:
                     on_event("tool_result", {"name": tc["name"], "result": result})
                 # 结果以 role="tool" 回填，tool_call_id 对应是哪次调用

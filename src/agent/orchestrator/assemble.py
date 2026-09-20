@@ -36,8 +36,10 @@ from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 
 logger = logging.getLogger(__name__)
-from agent.tools.files import register_file_tools
+
+from agent.tools.files import register_file_tools  # noqa: E402  # 历史结构：logger 居中，保持原样
 from agent.tools.mcp_config import assemble_servers, load_server_specs
+from agent.tools.plan import register_plan_tools
 from agent.tools.registry import ToolRegistry
 from agent.tools.terminal import register_terminal_tools
 from agent.tools.todo import register_todo_tools
@@ -178,12 +180,14 @@ def assemble(provider: str) -> AppContext:
         history=session.messages,
         web=web_client,
         todos=todos,
+        session=session,   # S5b：计划工具的操作载体（传 Session 对象本身，与 history 同款身份契约）
     )
     register_builtin(registry, ctx)
     register_file_tools(registry)   # S4a 文件四件：恒注册（workspace 围栏即安全边界）
     register_terminal_tools(registry)   # S4b 终端执行：L2 确认缝裁决，白名单只读免确认
     register_web_tools(registry, ctx)
     register_todo_tools(registry, todos)
+    register_plan_tools(registry, ctx)   # S5b 计划三件：恒注册（无外部依赖）
 
     # 6) MCP 外部工具（MCP-config 配置化）：改 mcp_servers.json 加工具，零代码。
     #      命令型穿 stdio、URL 型穿 streamable HTTP；单台失败只警告不阻断；
