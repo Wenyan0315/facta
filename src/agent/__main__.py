@@ -31,7 +31,7 @@ def main() -> None:
     # 全在 assemble 里，本入口只解析 provider 再拿结果
     ctx = assemble(provider)
     session = ctx.session
-    llm, registry, internal_llm = ctx.llm, ctx.registry, ctx.internal_llm
+    llm, agent, internal_llm = ctx.llm, ctx.agent, ctx.internal_llm
 
     # 多会话主循环（S1）：run_chat 归还 (会话, 退出原因)。
     #    quit/interrupt → 收官；new → 先存后清再开一轮。
@@ -40,7 +40,7 @@ def main() -> None:
     try:
         while True:
             loaded_len = len(session.messages)   # M6.4 复盘起点（每轮重取：/new 后新会话从 0 起）
-            session, reason = run_chat(llm, registry, session, summary_llm=internal_llm)
+            session, reason = run_chat(llm, agent, session, summary_llm=internal_llm)
 
             # S2 验收修复轮：归档前提炼标题（写进 session.title）——save 落盘、
             # archive 复制都带它，列表读取零 LLM 调用。提炼失败 fallback 首句派生，
@@ -69,7 +69,7 @@ def main() -> None:
             session.summary = None
             session.summarized_upto = 1
             session.title = None
-            ensure_persona(session)   # clear 连 system 一起清——补种，新 active 落盘即带人设（与 Web 同款修复）
+            ensure_persona(session, agent)   # clear 连 system 一起清——补种，新 active 落盘即带人设（与 Web 同款修复）
             save_session(session, MEMORY_PATH)   # active 立即反映为新空会话
             print(f"已归档「{title}」→ {archived.name}，新会话开始")
     finally:

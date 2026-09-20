@@ -88,6 +88,9 @@ def _client(monkeypatch, tmp_path):
     from agent.server.app import create_app
 
     monkeypatch.setattr("agent.server.app.LEARNED_DIR", tmp_path)
+    from agent.orchestrator.agent import Agent
+    from agent.tools.registry import ToolRegistry
+
     ctx = AppContext(
         provider="mock",
         ledger=None,
@@ -97,6 +100,9 @@ def _client(monkeypatch, tmp_path):
         kb=None,
         session=Session(),
         registry=None,
+        agent=Agent(
+            name="test", system_prompt="测试人设", registry=ToolRegistry()
+        ),
         todos=None,
     )
     return TestClient(create_app(ctx))

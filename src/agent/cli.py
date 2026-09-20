@@ -15,7 +15,8 @@ from agent.core.llm import LLM
 from agent.core.types import Message
 from agent.memory.compressor import trim_incomplete_round
 from agent.memory.store import Session
-from agent.orchestrator.loop import SYSTEM_PROMPT, RunResult, run_turn
+from agent.orchestrator.agent import DEFAULT_SYSTEM_PROMPT, Agent
+from agent.orchestrator.loop import RunResult, run_turn
 from agent.tools.registry import ToolRegistry
 
 # 用户输入这些词就结束对话
@@ -64,7 +65,7 @@ def _cli_on_confirm(name: str, args: dict) -> bool:
 
 def run_chat(
     llm: LLM,
-    registry: ToolRegistry | None = None,
+    agent: Agent | None = None,
     session: Session | None = None,
     summary_llm: LLM | None = None,
 ) -> tuple[Session, str]:
@@ -74,11 +75,19 @@ def run_chat(
     用户敲 quit 还是 /new 只有它知道——于是把原因编码进返回值，让装配层
     按原因决定「收官」还是「先存后清再开一轮」。
 
+    agent（S5a）：执行单元。None=裸会话兜底（无工具 + 默认人设）——壳层
+    舒适原则，测试传 None 照常工作；内核 run_turn 仍要求显式 agent。
+
     summary_llm（拆链）：摘要压缩的内部 LLM 调用走这条链，默认沿用 llm——
     语义档只该服务用户聊天流量，内部调用的（提示词, 回复）进缓存池有串味
     路径，且内部 prompt 几乎不可能命中阈值（白付 embed）。
     """
     summarizer = summary_llm or llm
+    if agent is None:
+        # 裸会话兜底：无工具 + 默认人设（与旧 registry=None 语义等价）
+        agent = Agent(
+            name="bare", system_prompt=DEFAULT_SYSTEM_PROMPT, registry=ToolRegistry()
+        )
     # 会话状态：从外部注入（__main__ 从 session.json 载入 Session 后传入），
     # 底片（messages）+ 压缩缓存（summary/summarized_upto）整体进出。
     # 人设两段式：Session.messages 永远是个列表（可能是空），空则原地种人设。
@@ -88,7 +97,7 @@ def run_chat(
     if session is None:
         session = Session()
     if not session.messages:
-        session.messages.append(Message(role="system", content=SYSTEM_PROMPT))
+        session.messages.append(Message(role="system", content=agent.system_prompt))
     print("输入 quit / exit / 退出 可结束对话；/new 开新会话。")
 
     try:
@@ -109,8 +118,8 @@ def run_chat(
             result, reply = run_turn(
                 session,
                 user_input,
+                agent=agent,
                 llm=llm,
-                registry=registry,
                 summarizer=summarizer,
                 on_text=_stream_print,
                 on_event=_cli_on_event,

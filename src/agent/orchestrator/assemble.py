@@ -30,8 +30,8 @@ from agent.knowledge.sync import sync_notes
 from agent.knowledge.vector_store import ChromaVectorStore
 from agent.memory.store import Session, load_session
 from agent.memory.todos import TodoStore
-from agent.orchestrator.loop import SYSTEM_PROMPT
-from agent.paths import NOTES_DIR
+from agent.orchestrator.agent import Agent, build_default_agent
+from agent.paths import LEARNED_DIR, NOTES_DIR
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 
@@ -62,12 +62,13 @@ class AppContext:
     kb: KnowledgeBase
     session: Session
     registry: ToolRegistry
+    agent: Agent        # 主 agent（S5a）：行为定义收口——prompt/菜单/预算/learned 快照
     todos: TodoStore    # 个人待办仓库（2026-09-17）：工具与 Web API 共用同一实例
     mcp_clients: list = field(default_factory=list)   # 最终退出时统一 close，不留孤儿进程
 
 
-def ensure_persona(session: Session) -> None:
-    """人设保证（装配不变量，S2 验收修复轮）：会话必须带着 SYSTEM_PROMPT 开工。
+def ensure_persona(session: Session, agent: Agent) -> None:
+    """人设保证（装配不变量，S2 验收修复轮）：会话必须带着 agent 的 system_prompt 开工。
 
     「空会话种人设」原本只住在 CLI 壳——Web 入口曾跑过无人设会话（真实使用
     踩中：语言漂移、信息政策失效、自我认知靠模型编）。两分支：
@@ -75,10 +76,12 @@ def ensure_persona(session: Session) -> None:
     - 历史遗留的无 system 会话（早期 Web 保存的文件）：头部补插；
       摘要游标随位移 +1 对齐（summarized_upto 数的是消息位置）
 
-    调用时机（S2 验收修复轮#4 补）：①服务启动（assemble 内）②归档清空后
-    （Web _archive_current / CLI /new）③切回换血后（_switch_session）——
-    清空/换血动作发生在运行时，本函数只在启动跑一次的话，新会话=裸会话
-    （真实复踩：英文回复再现）。幂等，多处调用无副作用。
+    调用时机（S2 验收修复轮#4 补）：①服务启动（assemble 内，S5a 起挪到
+    agent 构建后——人设来自 agent.system_prompt，而 agent 要等 registry
+    装完；不变量语义不变）②归档清空后（Web _archive_current / CLI /new）
+    ③切回换血后（_switch_session）——清空/换血动作发生在运行时，本函数
+    只在启动跑一次的话，新会话=裸会话（真实复踩：英文回复再现）。
+    幂等，多处调用无副作用。
 
     自愈（浏览器验收补）：头部连续多条 system（换血 bug 时期的残留）合并为
     一条——保留第一条，删其余；摘要游标随删除数左移。
@@ -97,9 +100,9 @@ def ensure_persona(session: Session) -> None:
                 session.summarized_upto = max(1, session.summarized_upto - dup)
 
     if not session.messages:
-        session.messages.append(Message(role="system", content=SYSTEM_PROMPT))
+        session.messages.append(Message(role="system", content=agent.system_prompt))
     elif session.messages[0].role != "system":
-        session.messages.insert(0, Message(role="system", content=SYSTEM_PROMPT))
+        session.messages.insert(0, Message(role="system", content=agent.system_prompt))
         if session.summarized_upto:
             session.summarized_upto += 1
 
@@ -148,7 +151,9 @@ def assemble(provider: str) -> AppContext:
     #    关键细节：必须在登记工具之前载入——search_history 的闭包要抓这个列表对象
     session = load_session(MEMORY_PATH)
     restored = len(session.messages)
-    ensure_persona(session)   # 人设是装配不变量：CLI/Web 两个入口都必须带着开工
+    # （S5a）人设种入挪到 agent 构建后：ensure_persona 需要 agent.system_prompt，
+    # 而 agent 要等 registry 装完——顺序：载入 → 工具 → MCP → agent → 人设。
+    # 不变量语义不变（启动时装一次）；restored 口径反而更准（纯载入条数）
     if restored:
         logger.info("已恢复 %s 条历史消息（%s）", restored, MEMORY_PATH)
 
@@ -191,6 +196,12 @@ def assemble(provider: str) -> AppContext:
     mcp_clients = assemble_servers(registry, specs)
     logger.info("已装载工具：%s", ", ".join(registry.names()))
 
+    # 7) Agent 对象（S5a）：主 agent = 默认全量工具 + learned 快照注入
+    #    （AGENTS.md 式：装配时读盘一次拼 prompt 尾部，会话中途固化不热刷新）。
+    #    人设保证（装配不变量）随 agent 到位：CLI/Web 两个入口都带着开工
+    agent = build_default_agent(registry, LEARNED_DIR)
+    ensure_persona(session, agent)
+
     return AppContext(
         provider=provider,
         ledger=ledger,
@@ -200,6 +211,7 @@ def assemble(provider: str) -> AppContext:
         kb=kb,
         session=session,
         registry=registry,
+        agent=agent,
         todos=todos,
         mcp_clients=mcp_clients,
     )

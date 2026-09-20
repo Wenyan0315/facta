@@ -120,8 +120,8 @@ def _run_worker(ctx: AppContext, run, user_text: str) -> None:
         result, reply = run_turn(
             ctx.session,
             user_text,
+            agent=ctx.agent,
             llm=ctx.llm,
-            registry=ctx.registry,
             summarizer=ctx.internal_llm,
             on_text=lambda text: run.emit("text.delta", {"delta": text}),
             on_event=lambda type_, data: run.emit(_EVENT_MAP.get(type_, type_), data),
@@ -167,7 +167,7 @@ def _archive_current(ctx: AppContext) -> bool:
     ctx.session.summary = None
     ctx.session.summarized_upto = 1
     ctx.session.title = None
-    ensure_persona(ctx.session)   # 清空连 system 一起清了——第二场会话前必须补种，否则裸会话（语言/画像/政策全失效）
+    ensure_persona(ctx.session, ctx.agent)   # 清空连 system 一起清了——第二场会话前必须补种，否则裸会话（语言/画像/政策全失效）
     save_session(ctx.session, MEMORY_PATH)   # 收尾落盘（与 CLI /new 同款）：active 立即反映为新空会话——不落盘则磁盘残留旧会话，服务被杀后重启会「复活」已归档对话
     return True
 
@@ -188,7 +188,7 @@ def _switch_session(ctx: AppContext, archive_path) -> None:
     ctx.session.summarized_upto = restored.summarized_upto
     ctx.session.title = restored.title
     # 旧归档可能无 system（人设保证上线前的文件）——幂等补插+游标对齐
-    ensure_persona(ctx.session)
+    ensure_persona(ctx.session, ctx.agent)
 
 
 def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:

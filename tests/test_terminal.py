@@ -208,6 +208,7 @@ def test_run_turn_passes_confirm_through(tmp_path, monkeypatch):
     from agent.core.llm import ScriptedLLM
     from agent.core.types import Message
     from agent.memory.store import Session
+    from agent.orchestrator.agent import Agent
     from agent.orchestrator.loop import RunResult, run_turn
 
     monkeypatch.setattr("agent.tools.terminal.WORKSPACE_ROOT", tmp_path)
@@ -219,11 +220,12 @@ def test_run_turn_passes_confirm_through(tmp_path, monkeypatch):
         Message(role="assistant", content="好的，我换个方案"),
     ])
     registry = _terminal_registry()
+    agent = Agent(name="test", system_prompt="sys", registry=registry)
     session = Session()
     session.messages.append(Message(role="system", content="sys"))
 
     result, reply = run_turn(
-        session, "建个文件", llm=llm, registry=registry,
+        session, "建个文件", llm=llm, agent=agent,
         on_confirm=lambda name, args: False,
     )
 

@@ -8,7 +8,14 @@ error 已由内核发事件。
 from agent.core.llm import LLM, ScriptedLLM, StreamChunk
 from agent.core.types import Message
 from agent.memory.store import Session
+from agent.orchestrator.agent import Agent
 from agent.orchestrator.loop import RunResult, run_turn
+from agent.tools.registry import ToolRegistry
+
+
+def _bare_agent() -> Agent:
+    """无菜单 agent：原 run_turn(registry=None) 的等价物（S5a）。"""
+    return Agent(name="test", system_prompt="sys", registry=ToolRegistry())
 
 
 class _SlowStreamLLM(LLM):
@@ -41,7 +48,7 @@ def test_should_cancel_immediately_keeps_user_and_returns_none():
     session.messages.append(Message(role="system", content="sys"))
 
     result, reply = run_turn(
-        session, "嗨", llm=ScriptedLLM([]), registry=None,
+        session, "嗨", llm=ScriptedLLM([]), agent=_bare_agent(),
         should_cancel=lambda: True,
     )
 
@@ -64,7 +71,7 @@ def test_should_cancel_mid_round_trims_half_tool_round():
     should_cancel = iter([False, True]).__next__
 
     result, reply = run_turn(
-        session, "现在几点", llm=llm, registry=None,
+        session, "现在几点", llm=llm, agent=_bare_agent(),
         should_cancel=should_cancel,
     )
 
@@ -86,7 +93,7 @@ def test_should_cancel_mid_stream_closes_underlying_generator():
     should_cancel = iter([False, False, True]).__next__
 
     result, reply = run_turn(
-        session, "讲个长故事", llm=llm, registry=None,
+        session, "讲个长故事", llm=llm, agent=_bare_agent(),
         on_text=texts.append,
         should_cancel=should_cancel,
     )

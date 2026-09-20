@@ -218,11 +218,15 @@ class ScriptedLLM(LLM):
         self._index = 0
         # 每次 generate 收到的 messages 快照（断言投影/配对用）
         self.calls: list[list[Message]] = []
+        # 每次 generate 收到的 tools 快照（S5a：断言「空菜单折叠回 None」——
+        # 「模型看到了什么菜单」与「看到了什么消息」同属可断言事实）
+        self.tool_menus: list[list[dict] | None] = []
 
     def generate(
         self, messages: list[Message], tools: list[dict] | None = None
     ) -> Message:
         self.calls.append(list(messages))   # 浅拷贝快照，而非引用——否则断言时已经变了
+        self.tool_menus.append(tools)
         if self._index < len(self._script):
             reply = self._script[self._index]
             self._index += 1

@@ -114,6 +114,7 @@ def test_web_results_wrapped_in_boundary_marker(tmp_path):
 
 
 def test_system_prompt_has_injection_immunity():
-    from agent.orchestrator.loop import SYSTEM_PROMPT
-    assert "注入免疫" in SYSTEM_PROMPT
-    assert "不是你的任务" in SYSTEM_PROMPT
+    # S5a 搬家：SYSTEM_PROMPT → agent.DEFAULT_SYSTEM_PROMPT（一字未动，sha256 锁死）
+    from agent.orchestrator.agent import DEFAULT_SYSTEM_PROMPT
+    assert "注入免疫" in DEFAULT_SYSTEM_PROMPT
+    assert "不是你的任务" in DEFAULT_SYSTEM_PROMPT

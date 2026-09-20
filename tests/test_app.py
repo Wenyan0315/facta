@@ -26,11 +26,14 @@ def _isolate_session_file(tmp_path, monkeypatch):
 def _make_ctx(reply: str = "你好！", llm=None, registry=None) -> AppContext:
     # 最小 AppContext：ScriptedLLM 回纯文本（不点菜），registry 传 None 也可。
     # todos 指到临时目录（mkdtemp 每次唯一，测试间不串）——避免调用 todos
-    # 端点的测试踩到 None 路径。llm/registry 可注入（S4b 确认流端到端用）
+    # 端点的测试踩到 None 路径。llm/registry 可注入（S4b 确认流端到端用）；
+    # agent 包 registry（S5a：_run_worker/ensure_persona 消费 ctx.agent）
     import tempfile
     from pathlib import Path
 
     from agent.memory.todos import TodoStore
+    from agent.orchestrator.agent import Agent
+    from agent.tools.registry import ToolRegistry
 
     return AppContext(
         provider="mock",
@@ -41,6 +44,9 @@ def _make_ctx(reply: str = "你好！", llm=None, registry=None) -> AppContext:
         kb=None,
         session=Session(),
         registry=registry,
+        agent=Agent(
+            name="test", system_prompt="测试人设", registry=registry or ToolRegistry()
+        ),
         todos=TodoStore(Path(tempfile.mkdtemp()) / "todos.json"),
     )
 
@@ -124,23 +130,26 @@ def test_tasks_page_serves_html():
 
 
 def test_ensure_persona_three_branches():
-    # 装配不变量：会话必须带 SYSTEM_PROMPT 开工——Web 入口曾跑过无人设会话
+    # 装配不变量：会话必须带 agent 的 system_prompt 开工——Web 入口曾跑过无人设会话
     from agent.core.types import Message
     from agent.memory.store import Session
+    from agent.orchestrator.agent import DEFAULT_SYSTEM_PROMPT, Agent
     from agent.orchestrator.assemble import ensure_persona
-    from agent.orchestrator.loop import SYSTEM_PROMPT
+    from agent.tools.registry import ToolRegistry
+
+    agent = Agent(name="test", system_prompt=DEFAULT_SYSTEM_PROMPT, registry=ToolRegistry())
 
     # 空会话：种人设
     fresh = Session()
-    ensure_persona(fresh)
+    ensure_persona(fresh, agent)
     assert fresh.messages[0].role == "system"
-    assert fresh.messages[0].content == SYSTEM_PROMPT
+    assert fresh.messages[0].content == DEFAULT_SYSTEM_PROMPT
 
     # 历史遗留的无 system 会话：头部补插 + 摘要游标随位移 +1
     legacy = Session()
     legacy.messages.append(Message(role="user", content="旧消息"))
     legacy.summarized_upto = 3
-    ensure_persona(legacy)
+    ensure_persona(legacy, agent)
     assert [m.role for m in legacy.messages] == ["system", "user"]
     assert legacy.summarized_upto == 4
 
@@ -148,7 +157,7 @@ def test_ensure_persona_three_branches():
     normal = Session()
     normal.messages.append(Message(role="system", content="人设"))
     normal.messages.append(Message(role="user", content="你好"))
-    ensure_persona(normal)
+    ensure_persona(normal, agent)
     assert len(normal.messages) == 2
     assert normal.messages[0].content == "人设"
 
@@ -199,19 +208,17 @@ def test_empty_session_new_archives_nothing(tmp_path):
 
 def test_new_session_reseeds_persona_after_clear(tmp_path):
     # S2 验收修复轮#4：归档 clear 连 system 一起清——第二场会话曾变裸会话
-    # （真实复踩：新会话里中文提问收到英文回复）。修复后归档即补种人设，
-    # 新 active 落盘/内存都带 system。
-    from agent.orchestrator.loop import SYSTEM_PROMPT
-
+    # （真实复踩：新会话里中文提问收到英文回复）。修复后归档即补种人设
+    # （S5a 起人设来自 ctx.agent），新 active 落盘/内存都带 system。
     ctx = _make_ctx()
-    ctx.session.messages.append(Message(role="system", content=SYSTEM_PROMPT))
+    ctx.session.messages.append(Message(role="system", content=ctx.agent.system_prompt))
     ctx.session.messages.append(Message(role="user", content="第一场对话"))
 
     client = TestClient(create_app(ctx))
     assert client.post("/api/sessions/new").status_code == 200
 
     assert [m.role for m in ctx.session.messages] == ["system"]   # 内存：新会话带人设
-    assert ctx.session.messages[0].content == SYSTEM_PROMPT
+    assert ctx.session.messages[0].content == ctx.agent.system_prompt
     # 落盘：新 active 文件同样带人设（读回验证）
     from agent.memory.store import load_session
     assert load_session(tmp_path / "session.json").messages[0].role == "system"
@@ -265,13 +272,15 @@ def test_ensure_persona_merges_duplicate_system_messages():
     # 换血 bug 时期残留自愈：头部多条 system 合并为一条，游标左移
     from agent.core.types import Message
     from agent.memory.store import Session
+    from agent.orchestrator.agent import Agent
     from agent.orchestrator.assemble import ensure_persona
+    from agent.tools.registry import ToolRegistry
 
     s = Session()
     s.messages = [Message(role="system", content="人设A"), Message(role="system", content="人设B"),
                   Message(role="system", content="人设C"), Message(role="user", content="你好")]
     s.summarized_upto = 4
-    ensure_persona(s)
+    ensure_persona(s, Agent(name="test", system_prompt="人设X", registry=ToolRegistry()))
     assert [m.role for m in s.messages] == ["system", "user"]
     assert s.messages[0].content == "人设A"   # 保留第一条
     assert s.summarized_upto == 2              # 4 - 2 条重复
