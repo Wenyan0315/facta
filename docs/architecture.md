@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.59（2026-09-21）｜随着里程碑推进持续迭代此文档
+> 版本：v0.60（2026-09-21）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [product.md](product.md) v2）：个人执行助手——执行主轴 + 记忆护城河 + 通用外延（[021](decisions/021-direction-decisions.md)）
 
@@ -18,75 +18,81 @@
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                        用户交互层                              │
-│          ✅ CLI（cli.py 壳）｜ ✅ Web UI（S2b 对话视图）    │
-│          以后：任务视图（S2 预留）/ IM 渠道（S8）              │
+│  ✅ CLI 壳 ｜ ✅ Web：对话视图 + 任务视图（列表+计划面板，S5c）  │
+│            + 记忆面板（025）｜ 以后：IM 渠道（S8）              │
 └──────────────────────────┬───────────────────────────────────┘
                            │
 ┌──────────────────────────▼───────────────────────────────────┐
-│       入口 __main__.py（CLI）/ server/__main__.py（Web）       │
-│         装配唯一真值源：orchestrator/assemble.py（依赖注入）    │
+│  入口 __main__.py（CLI）/ server/__main__.py（Web）             │
+│    装配唯一真值源：orchestrator/assemble.py（依赖注入，          │
+│    条件装配：无 key/假模型 → 不挂路由，kb/llm 缺席 → 不注册）    │
 └──────────────────────────┬───────────────────────────────────┘
                            │
 ┌──────────────────────────▼───────────────────────────────────┐
-│  ★ orchestrator/ 编排层：run_turn 主循环（大脑）               │
-│    core/ 地基：types / llm / 网关 / 账本 / 向量数学             │
+│  ★ orchestrator/ 编排层：run_turn 主循环（大脑）                │
+│                                                              │
+│  ✅ Agent 对象（S5a，行为定义与引擎分离）                        │
+│     system_prompt（learned 三桶快照注入）/ 工具子集 /           │
+│     预算 / router（M10 场景路由，None=原生路径）                │
+│     spawn_subagent（S5c）：子 Agent 实例化+临时会话            │
+│           → 只回传结论 = 噪声隔离                              │
 │                                                              │
 │   ┌─────────────────────────────────────────────────┐        │
-│   │  ✅ 感知 → 决策 ⇄ 行动(工具，检索亦工具) → 观察     │        │
-│   │ （M5 ReAct 雏形；M5.5 Agentic RAG：检索权在模型）   │        │
+│   │ ✅ 感知 → 决策 ⇄ 行动(工具) → 观察（ReAct）        │        │
+│   │ ✅ 轮首一针：场景路由（M10，Jev 判 direct/          │        │
+│   │    single_tool/complex → 控制首次菜单形状）         │        │
+│   │ ✅ 投影注入：时间戳 + 活跃计划（S5b 轮首快照）        │        │
+│   │ ✅ plan-then-act（S5b）：make_plan 人审掌舵 →      │        │
+│   │    执行 → update_plan_step 回写 → finish 终态收官   │        │
+│   │ ✅ 运行时校验：L0/L1 白名单 + L2 确认缝（S3/S4b）    │        │
+│   │ 以后：并行工具调用 / S6 真编排                        │        │
 │   └─────────────────────────────────────────────────┘        │
-│      │              │                │               │       │
-│      │         ┌────▼─────┐    ┌─────▼──────┐  ┌─────▼────┐  │
-│      │         │ 运行时校验 │    │  LLM Router │  │ 阶段二:   │  │
-│      │         │ guardrails│    │  (网关能力)  │  │ Orchestr-│  │
-│      │         │ 输出/参数  │    │ 按任务路由模型│  │ ator 多  │  │
-│      │         │ 校验+重试  │    │ 重试/限流/   │  │ agent编排 │  │
-│      │         └──────────┘    │ 成本统计     │  └──────────┘  │
-│      │                         └─────┬──────┘                 │
-└──────┼───────────────────────────────┼────────────────────────┘
-       │                               │
-       ▼                               ▼
-┌────────────────┐        ┌────────────────────────────────┐
-│  knowledge/    │        │  LLM 接入层（接口 + 实现）        │
-│  知识层         │        │  ┌──────────┬─────────┬──────┐  │
-│ ┌────────────┐ │        │  │ ✅mock   │ ✅echo   │repeat │  │
-│ │✅ RAG 检索  │ │        │  │ 假模型   │ 假模型   │ 假模型 │  │
-│ │✅ BGE-M3   │ │        │  ├─────────┴─────────┴──────┤  │
-│ │  语义向量   │ │        │  │ ✅OpenAICompatibleLLM     │  │
-│ │✅loader    │ │        │  │  deepseek/siliconflow     │  │
-│ │✅向量库+M7 │ │        │  │ 以后: Claude / 本地Ollama   │ │
-│ ├────────────┤ │        │  └──────────────────────────┘  │
-│ │ M8:知识图谱 │ │        └────────────────────────────────┘
-│ └────────────┘ │
-│   data/notes/  │ ← 数据与代码分离：笔记是 md 文件，加笔记=丢文件，零改码
-└────────────────┘
+└──────┬───────────────────────────────────┬───────────────────┘
+       │                                   │
+       ▼                                   ▼
+┌────────────────┐          ┌────────────────────────────────┐
+│  knowledge/    │          │  core/ 地基                    │
+│  知识层         │          │  ✅ types / 向量数学            │
+│ ✅ RAG 检索     │          │  ✅ 网关四件套（RobustLLM：      │
+│ ✅ BGE-M3      │          │    记账/重试超时/双档缓存/熔断    │
+│ ✅ 向量库+增量  │          │    + FallbackLLM 降级链）        │
+│   data/notes/  │          │  ✅ LLM 接口+OpenAICompatible    │
+│   （数据外置）  │          │  ✅ Jev 决策模型（M10：JevClient  │
+│ 以后：知识图谱  │          │    + ScenarioRouter 三态）       │
+│ （S7）         │          │  ✅ evalkit 纯函数（024）        │
+└────────────────┘          │  以后：更多供应商+多模型路由      │
+                           └────────────────────────────────┘
        │
 ┌──────▼───────────────────────────────────────────────────────┐
 │  memory/  记忆层                                               │
-│   短期: ✅ messages 列表（会话内）                              │
-│   跨会话: ✅ JSON 持久化（M6.1，data/memory/session.json）      │
-│   压缩: ✅ 滚动摘要+原文窗口（M6.2，发送前投影，底片不动）        │
-│   演进: M6.3 分层记忆完善 + 多会话 + search_history              │
+│   短期: ✅ messages 列表（会话内）                             │
+│   跨会话: ✅ JSON 持久化 + 多会话（S1 active+archive）          │
+│   压缩: ✅ 滚动摘要+原文窗口（投影，底片不动）                  │
+│   固化: ✅ data/learned 三桶（萃取→审查→硬校验，也是 S5a        │
+│         Agent prompt 的注入源——AGENTS.md 式读取侧已兑现）        │
+│   计划: ✅ plan 域（S5b：PlanBoard 事件史，随 session 落盘）    │
+│  以后：用户级记忆仓库外位置                                     │
 └──────────────────────────────────────────────────────────────┘
        │
 ┌──────▼───────────────────────────────────────────────────────┐
-│  tools/  工具层（M5 ✅ 全项目灵魂已落地）                        │
-│  ┌─────────────────────────────────────────────────────┐     │
-│  │  ToolRegistry 工具注册表 ✅                           │     │
-│  │  ├── ✅ 内置工具×6: 时间/清单/读/写/检索/检索+摘要    │     │
-│  │  ├── MCP 客户端 → 外部工具动态发现（顺延待排期）        │     │
-│  │  └── skills/: prompt 模板 + 资源包按需加载             │     │
-│  └─────────────────────────────────────────────────────┘     │
+│  tools/  工具层（M5 起，全项目灵魂）                             │
+│  ✅ ToolRegistry（审计收口 + L2 确认缝 + receives_confirm）     │
+│  ├── ✅ 八族：time / history / notes / files（S4a）            │
+│  │        / terminal（S4b）/ web（015）/ todo（016）           │
+│  │        / plan+spawn（S5b/S5c 编排工具）                     │
+│  ├── ✅ MCP 客户端（stdio+HTTP，配置化接入）                   │
+│  └── 以后：skills/（技能包格式，S6）                            │
 └──────────────────────────────────────────────────────────────┘
 
 ══════════════ 独立于运行链路 ══════════════
 
-┌──────────────────────────────────────────────────────────────┐
-│  evals/  离线评估                                             │
-│   ├── data/            测试集: 问题 + 标准答案/期望命中块        │
-│   ├── 检索指标          precision@k / recall@k / MRR (M3.5)   │
-│   └── LLM-as-judge     回答质量评分 (M4后)                     │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────┐  ┌───────────────────────────┐
+│  server/  Web 壳（可选组）    │  │  evals/  离线评估           │
+│  ✅ Run 三接口 + SSE 断线重放 │  │  ✅ evalkit 内核（024）     │
+│  ✅ Run Store 单锁状态机      │  │  ✅ 检索指标三路并评+归因    │
+│  ✅ waiting_approval 挂起     │  │  ✅ LLM-as-judge           │
+│  以后：Run Store 外置（多实例）│  │  以后：对抗题库回归          │
+└──────────────────────────────┘  └───────────────────────────┘
 ```
 
 ## 二、各层状态一览
@@ -99,15 +105,19 @@
 | knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集)；检索命中带溯源（SearchHit=块+相似度+来源面单，query 全链路透出，S4 评审修复轮） | 知识图谱 |
 | memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘）+ 多会话管理（S1：active+archive，/new 归档重开）+ restore_session 原语（S2a：归档写回 active 后删除，move 语义）+ **plan 计划域（S5b）**：PlanBoard/PlanState/事件史（append 修订、fold 视图、显式终态制），生命周期=会话随 session.json 落盘，老文件宽进 | 用户级记忆仓库外位置 |
 | tools | ✅ Tool+ToolRegistry+内置工具按家族分件（time/history/notes 三族，S4a 拆分）；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型)；联网工具 web_search/fetch_web（015：Tavily Provider+SSRF 栅栏+条件注册）；MCP 外部工具配置化接入；文件四件 read_file/search_code/list_dir/write_file+diff（S4a，workspace 围栏：__file__ 锚定+敏感黑名单读都不行）；终端执行 run_command（S4b：白名单只读免确认/L2 确认缝 registry 收口/批准拒绝都落审；评审修复轮加参数级拦截——find -exec/sort -o 等「只读命令名+危险参数」也弹确认）；计划三件（S5b）：make_plan（人审掌舵点，复用确认缝）/update_plan_step（状态回写+回灌带最新视图）/finish_plan（显式终态程序闸）；spawn_subagent（S5c：子 agent 分派只回传结论=噪声隔离，禁止单硬编码防递归，receives_confirm 确认缝透传） | 更多工具 + skills |
-| server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + 静态三件零构建链；只绑 127.0.0.1。验收修复轮：人设保证（ensure_persona 装配不变量）、每轮落盘、取消检查点③（流中即时）、任务视图最小版（/tasks+GET /api/runs）、历史回放（GET /api/messages）、md 渲染（marked vendored）、Enter/Esc 键盘。S4b：waiting_approval 挂起态（进单锁口径、取消视拒、confirm.request/resolved 事件断线重放重弹）+ confirm 裁决端点 + 前端确认弹窗。S5c：任务视图 Run 详情展开（计划面板——EventSource 消费 plan.* 事件，fold 与后端 PlanState.view 同构，断线重放免费） | 任务视图完整版（S2 预留）；Run Store 外置（多实例触发） |
+| server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + 静态三件零构建链；只绑 127.0.0.1。验收修复轮：人设保证（ensure_persona 装配不变量）、每轮落盘、取消检查点③（流中即时）、任务视图最小版（/tasks+GET /api/runs）、历史回放（GET /api/messages）、md 渲染（marked vendored）、Enter/Esc 键盘。S4b：waiting_approval 挂起态（进单锁口径、取消视拒、confirm.request/resolved 事件断线重放重弹）+ confirm 裁决端点 + 前端确认弹窗。S5c：任务视图 Run 详情展开（计划面板——EventSource 消费 plan.* 事件，fold 与后端 PlanState.view 同构，断线重放免费） | 主聊天视图迁移 FW 站（渐进）；Run Store 外置（多实例触发） |
 | evals | ✅ **evalkit 内核**（src/agent/evalkit：指标/指纹判定/归因/judge 解析纯函数，零依赖可拿走，024）+ evals 壳（三路并评+miss 归因，30 题形态分层，8 万字混合语料，022 混合检索裁定不立项）+ LLM-as-judge 回答质量(基线 13/13 合格, 0% 错误, 全轮 ¥0.011) | 更难的对抗题库 + 回答质量回归 |
-| data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据)；data/learned/*.md 项目级长时记忆(M6.4，进 git) | 长文档、多来源 |
+| data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据)；data/learned/*.md 项目级长时记忆(M6.4，进 git；S5a 起兼任 Agent prompt 注入源——AGENTS.md 式读取侧) | 长文档、多来源 |
 
-## 三、两条演进主线
+## 三、三条演进主线
 
 ```
-主线1：模型      mock ──M4──→ DeepSeek ──以后──→ 多模型路由
-主线2：能力循环  只说话 ──M5──→ 会用工具(ReAct) ──M5.5──→ 自主决定查不查(Agentic RAG) ──阶段二──→ 多agent协作
+主线1：模型分工    单一主力 ──M10──→ 决策/生成分离（Jev 路由 + deepseek-flash 生成）
+                  ──以后──→ 更多供应商 + 多模型路由
+主线2：能力循环    只说话 ──M5──→ 会用工具(ReAct) ──M5.5──→ 自主决定查不查(Agentic RAG)
+                  ──S5c──→ 派分身(spawn 噪声隔离) ──以后──→ 多agent协作(S6)
+主线3：执行架构    纯反应式 ──S5a──→ Agent 对象(行为定义分离) ──S5b──→ plan-then-act
+                  (蓝图+掌舵+回写) ──以后──→ 并行工具调用 / S6 真编排
 ```
 
 ## 四、里程碑路线图
@@ -128,13 +138,13 @@
 | streaming ✅ | 流式输出：generate_stream 接口（默认伪流，老实现零改动）+ 真流实现 + 分片重组纯函数 + 网关四衣流式语义；用户取消复用中断通道 | 增量协议、生成器惰性 |
 | 阶段二 | —— coding agent 产品化（2026-09-13 规划拍板，方向提前定、细节临期定）—— | 实战整合 |
 | S1 ✅ | 多会话管理：/new 会话隔离（active+archive：位置固定无指针、文件名=身份/标题=标签、先存后清、原地清不 rebind） | 状态管理 |
-| S2 ✅ | 产品骨架 v1 对话视图：S2a 清账（agent_loop 正名 orchestrator 编排层、run_turn 内核/外设分离、assemble 装配单一真值源）→ S2b Web 壳（FastAPI+SSE：Run 三接口分离、内存 Run Store 单锁状态机、断线重连重放、会话切回、零构建链前端三件）；任务视图按双视图预留未实现 | 前后端、SSE、Run 状态机 |
+| S2 ✅ | 产品骨架 v1 对话视图：S2a 清账（agent_loop 正名 orchestrator 编排层、run_turn 内核/外设分离、assemble 装配单一真值源）→ S2b Web 壳（FastAPI+SSE：Run 三接口分离、内存 Run Store 单锁状态机、断线重连重放、会话切回、零构建链前端三件）；任务视图当时按双视图预留未实现（后由 FW 站 v2 + S5c 计划面板兑现） | 前后端、SSE、Run 状态机 |
 | S3 ✅ | 安全底座：工具权限分级（L0 只读/L1 写/L2 确认留 S4）+ 注入界碑（外部内容包裹声明+免疫条款）+ 审计日志（registry 收口 append-only jsonl 按天滚动，分级截断） | 安全 |
 | S4 ✅ | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）。**S4a ✅ 文件四件（read/search_code/list_dir/write_file+diff）+ builtin 拆分（time/history/notes 三族）+ workspace 围栏（__file__ 锚定+敏感黑名单）**；**S4b ✅ 终端执行 run_command + L2 确认机制（只读白名单免确认/registry 确认缝第四条缝/waiting_approval 挂起/Web 弹窗+CLI input/批准拒绝都落审）** | 文件系统、进程调度 |
 | FW ✅ | 前端基建（021 裁定兑现，见 [023](decisions/023-fw-preact-pilot.md)）：Preact+Vite 脚手架（frontend/ 源码 → static/fw/ 产物，产物进 git）；任务视图 v2 试点完成（状态驱动替代 innerHTML 同步矩阵，JSX 自动转义结构性免疫注入）；构建链第一课：子路径部署必须 base:"/fw/"。**记忆面板 v1 ✅（[025](decisions/025-memory-panel.md)，护城河可视化）：learned 三桶查看/编辑/删除 + 行号定位协议 + 坏行宽容（幻觉清理入口）**。下一步：主聊天视图渐进迁移 | 声明式渲染、状态驱动 |
 | S5 | 执行架构（2026-09-18 重定义，[021](decisions/021-direction-decisions.md)）：**Agent 对象抽象**（独立 system prompt/工具子集/预算/记忆——吸收原 skill 站的 SYSTEM_PROMPT 外置与 AGENTS.md 式 learned 读取侧，二者本就是 Agent 对象的属性）+ **plan-then-act**（轻量规划，plan 即 Human on the Loop 掌舵点；plan 载体=独立最小结构挂 Run 事件流）+ **spawn_subagent**（子 agent 只回传结论=噪声隔离，S6 判据提前兑现）；技能包格式后置并入 S6。对抗机制（critic）不内置——Agent 对象落地后从机制变配置，触发信号见 [026](decisions/026-adversarial-critic-deferred.md)。**S5a ✅ Agent 对象**（[027](decisions/027-s5-execution-architecture.md)：三拍板定 S5b 形状——模型自判/append 修订/显式终态制；六字段 frozen、菜单与执行分离、两段式验收 sha256 锁死搬家等价、learned 快照三原则）。**S5b ✅ plan-then-act**（[027](decisions/027-s5-execution-architecture.md)：三层结构 值对象/PlanState/PlanBoard，事件溯源最小版——append 修订+fold 视图；双视图 轮首快照+工具结果回灌导航；修订复用 make_plan 状态机分叉；人审掌舵复用 S4b 确认缝）。**S5c ✅ spawn_subagent + 计划面板**（[027](decisions/027-s5-execution-architecture.md)：噪声隔离=主底片只多一条结论消息，临时会话不落盘不受单锁；禁止单程序侧硬编码防递归；receives_confirm 显式通道人审不分主子；任务面板=任务视图 Run 详情展开，SSE 消费 plan.* 事件 fold 与后端同构）。**S5 全站收官** | 执行架构、规划 |
 | S6 | 多 agent 协作：worktree 隔离机制 + 真编排（技能包格式自 S5 后置并入；spawn_subagent 已在 S5 兑现噪声隔离判据） | 编排 |
-| M10 ✅ | 场景路由与快慢分工（2026-09-21，[028](decisions/028-m10-scenario-routing.md)，model-bench 评测结论落地）：**决策/生成分离**——Jev choice 管意图识别（bench 路由 19/20，成本 1/20）挂 Agent.router 轮首一针；deepseek-flash 管生成（题库轨道 86% 第一、ECE 0.042）；参数填充归 LLM、循环决策归 harness（bench 三层分解）。三态生命周期硬约束（无 key 条件装配/单次故障 fail-open/持续故障熔断同款参数），route() 永不抛、返回 None=原生路径（无 Jev=cortex 功能完整）。确认闸门程序侧硬编码不动（bench：五模型安全确认无一全对，DS-V4-Pro 唯一裸奔）。S5c 顺延 | 决策外包、fail-open、选项封闭注入免疫 |
+| M10 ✅ | 场景路由与快慢分工（2026-09-21，[028](decisions/028-m10-scenario-routing.md)，model-bench 评测结论落地）：**决策/生成分离**——Jev choice 管意图识别（bench 路由 19/20，成本 1/20）挂 Agent.router 轮首一针；deepseek-flash 管生成（题库轨道 86% 第一、ECE 0.042）；参数填充归 LLM、循环决策归 harness（bench 三层分解）。三态生命周期硬约束（无 key 条件装配/单次故障 fail-open/持续故障熔断同款参数），route() 永不抛、返回 None=原生路径（无 Jev=cortex 功能完整）。确认闸门程序侧硬编码不动（bench：五模型安全确认无一全对，DS-V4-Pro 唯一裸奔）。（S5c 已于其后收官，`ee4efd4`） | 决策外包、fail-open、选项封闭注入免疫 |
 | S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止） | 结构化知识、图可视化 |
 | S8 | 多入口 Gateway：IM 渠道（飞书/Telegram 等）消息归一化接入 agent_loop，与 headless 合并（gateway 常驻进程——重审「不 daemon 化」原则） | 事件驱动、常驻服务 |
 | 〔另排期〕 L1 | 本地模型接入：Ollama（OpenAI 兼容端点零代码接入，Qwen3 档起步；触发信号=需要零成本/离线验收链路时排期） | 本地推理 |
@@ -148,7 +158,7 @@
 - **每个里程碑收尾时，补一节"企业视角"**：这个模块进了大厂会面对什么（规模/并发/成本/合规）——已讲过的例子：错误分类与容错四件套（重试退避/超时/熔断/降级链）、模型质量分级降级、语义缓存
 - **教学版 vs 工业版的差距永远点名**：M7 前 KnowledgeBase 每次 add_document 全量重建向量（O(N) 重算），M7 已用 Chroma 增量索引解决——现在的教学版 = InMemory 存取 + 词袋向量（离线零成本），工业版 = Chroma 落盘 + BGE-M3（增量 + 语义）；换件不换衣服是这套打法的验收标准
 - **LLM 应用特有考点**：成本控制（token 计费随轮数增长）、可观测性（没有度量就没有熔断）、评测流水线（evals 已是雏形）
-- **安全**：M9 前安排一讲——提示词注入（工具越权）、key 最小权限、审计日志
+- **安全**：已落地 S3（注入界碑+审计收口）与 S4（权限分级+确认缝）；持续考点=工具越权面随工具族扩张而生长（每加一族工具过一遍白名单/围栏检查）
 
 ## 五、关键架构决策记录（索引）
 
@@ -191,11 +201,12 @@
 
 > 非阻塞但已登记的病灶，随里程碑推进逐个消除。
 
-- **任务视图偶发不切换**（2026-09-16 首次报告，09-17 S4b 验收复现一次）：点侧栏其他会话再点回时，主视图第一次不切换（多点一次恢复）。推测与 SSE 事件流消费 / DOM 状态竞争有关，未定位根因。触发信号=用户再次报告或前端框架化时一并排查。
+- **任务视图偶发不切换**（2026-09-16 首次报告，09-17 复现一次）——**已结案（2026-09-21）**：触发信号「前端框架化时一并排查」已兑现——任务视图 v2 整体重写（Preact 状态驱动替代 v1 vanilla 的 DOM 状态同步矩阵），重写后两轮浏览器验收与实机使用均未复现。若再次报告则重新开案（v2 语境下定位成本远低于当年）。
+- **flash 价目待校准**（2026-09-21，M10）：PROVIDERS 里 deepseek-flash 暂按 chat 档占位，账单成本略高估——有官方价目时修正（028 注记）。
 
 ## 待讨论（产品方向，未定档）
 
 > 来自日常使用与外部评审的方向性议题，尚未展开设计评审。记录在此避免遗忘，临期讨论时补草案。
 > 清单状态：2026-09-18 方向定稿会出清四条（见 [021](decisions/021-direction-decisions.md)）；2026-09-19 混合检索数据裁定关闭（见 [022](decisions/022-hybrid-retrieval-eval.md)）。下方仅剩已定方向的排期项，无待裁决议题；新议题随使用生长。
 
-- **前端配置界面**（2026-09-17 提出，编排部分已定稿见 [021](decisions/021-direction-decisions.md)）：①MCP 粘贴配置（替换手动编辑 JSON）②Skill 配置。共享同一设计问题——配置从「写文件」升级到「填表单」，前端框架化已裁定（Preact+Vite，FW 站）扫清地基障碍；③编排已定稿为「文本编辑 + mermaid 阅读」（拖拽进否决档案）。剩余两件依赖 S5（Agent 对象定型后 skill 才有配置对象）与 FW 站进展，排阶段二后段。
+- **前端配置界面**（2026-09-17 提出，编排部分已定稿见 [021](decisions/021-direction-decisions.md)）：①MCP 粘贴配置（替换手动编辑 JSON）②Skill 配置。共享同一设计问题——配置从「写文件」升级到「填表单」，前端框架化已裁定（Preact+Vite，FW 站）扫清地基障碍；③编排已定稿为「文本编辑 + mermaid 阅读」（拖拽进否决档案）。原依赖已齐：Agent 对象 S5a 已定型（skill 的配置对象有了）、FW 站已跑通三入口（任务视图/记忆面板）——两件剩余的其实只是排期，随时可开工；建议排期信号=「手动编辑 mcp_servers.json 出现真实摩擦」或 S6 技能包立项时一并做。
