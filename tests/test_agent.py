@@ -39,10 +39,13 @@ def _bare_agent() -> Agent:
 
 def test_prompt_move_is_byte_identical():
     # 搬家等价锁（013 决策记录拆分的同款手法）：sha256 写死，防止
-    # 「搬家」过程中手抖改字——素材变了 = 主 agent 行为变了
+    # 「无意识改动」——素材变了 = 主 agent 行为变了。
+    # hash 更新史：S5a 搬家锁 b24025d4…（逐字节等价）；S5c 能力扩张
+    # （补 S5b 计划工具+spawn 介绍——S5b 落码时漏了 prompt 介绍，本次
+    # 补上）→ 5fa79c0b…。锁的语义是「改动必须显式过这里」，不是「永不改」
     assert (
         hashlib.sha256(DEFAULT_SYSTEM_PROMPT.encode()).hexdigest()
-        == "b24025d41608f3f26615ebf5e70b25b9275e2ba29595504e04d5dbda5ba2a2a3"
+        == "5fa79c0bdc7ee17837d7f49a42ec00383136f8938f57f97808fffd273a03d6b0"
     )
 
 

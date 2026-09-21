@@ -42,6 +42,7 @@ from agent.tools.files import register_file_tools  # noqa: E402  # 历史结构�
 from agent.tools.mcp_config import assemble_servers, load_server_specs
 from agent.tools.plan import register_plan_tools
 from agent.tools.registry import ToolRegistry
+from agent.tools.spawn import register_spawn_tools
 from agent.tools.terminal import register_terminal_tools
 from agent.tools.todo import register_todo_tools
 from agent.tools.web import get_web_search, register_web_tools
@@ -189,6 +190,7 @@ def assemble(provider: str) -> AppContext:
     register_web_tools(registry, ctx)
     register_todo_tools(registry, todos)
     register_plan_tools(registry, ctx)   # S5b 计划三件：恒注册（无外部依赖）
+    register_spawn_tools(registry, ctx)   # S5c 子 agent 分派：ctx.llm 在即注册（内部链）
 
     # 6) MCP 外部工具（MCP-config 配置化）：改 mcp_servers.json 加工具，零代码。
     #      命令型穿 stdio、URL 型穿 streamable HTTP；单台失败只警告不阻断；

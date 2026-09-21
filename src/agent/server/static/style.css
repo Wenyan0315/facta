@@ -278,6 +278,27 @@ body {
 .task-badge.failed { background: #fee2e2; color: var(--danger); }
 .task-badge.cancelled { background: #f3e8ff; color: #7e22ce; }
 
+/* S5c 计划面板（RunDetail：任务条目展开态） */
+.task-head { cursor: pointer; user-select: none; }   /* 可展开 */
+.task-caret { margin-left: auto; color: var(--muted); font-size: 12px; }
+.detail-muted { font-size: 13px; margin: 8px 0 2px; }
+.plan-panel {
+  margin-top: 10px; padding: 10px 12px;
+  background: var(--bg); border-radius: 6px;
+  font-size: 13px; line-height: 1.7;
+}
+.plan-step { display: flex; gap: 8px; align-items: baseline; }
+.plan-mark { width: 1.2em; text-align: center; color: var(--muted); }
+.plan-step.done .plan-mark { color: #15803d; }
+.plan-step.done .plan-title { color: var(--muted); }     /* 完成步骤淡化 */
+.plan-step.in-progress .plan-mark { color: #1d4ed8; }
+.plan-step.skipped .plan-mark, .plan-step.failed .plan-mark { color: var(--danger); }
+.plan-note { color: var(--muted); font-size: 12px; }
+.plan-finished {
+  margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border);
+  color: #15803d; font-size: 12px;
+}
+
 /* L2 确认弹窗（S4b）：遮罩 + 居中盒，命令全文等宽展示 */
 #confirm-modal {
   position: fixed; inset: 0; z-index: 100;

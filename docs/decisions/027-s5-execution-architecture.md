@@ -45,3 +45,24 @@
 **改造面**：新建 memory/plan.py + tools/plan.py；store.py 加字段与序列化；context.py 加 session（与 history 同款身份契约，纪律：plan 家族只碰 session.plan）；loop.py 两针（`_plan_stamp` 投影注入 + `_forward_plan_events` drain）；assemble 注册（恒注册，无外部依赖）；cli.py 加 plan.* 打印。run_turn 分支数触发 PLR0912 → drain 抽成 `_forward_plan_events`（顺带修真问题：无监听也清队列）。测试 test_plan.py 16 个：状态机全分支、fold 孤儿事件、序列化 roundtrip（_pending 不落盘）、老文件宽进、两轮端到端（事件因果序/跨轮投影注入/双视图回灌/掌舵否决/悬空收官自纠反馈环）。
 
 **验收**：ruff / mypy / pytest 三道门全绿（341 passed / 2 skipped）。
+
+## S5c：spawn_subagent + 计划面板（2026-09-21）
+
+**定位**：S5 收官站——021 定的隔离边界三件全落地（只回传结论/工具子集由主 agent 指定/轮数预算注入），S6 多 agent 协作的 spawn 原语在此兑现。四拍板：默认参数（tools 缺省=全量减禁止单，max_rounds 默认 3 上限 10）/ 子 agent 不带计划三件（主规划子执行，防规划套规划）/ 前端=Run 详情展开（计划挂在 Run 事件流上，语义最正）/ spawn 本身不设 L2 确认（防线在子 agent 手里工具的各自闸门）。
+
+**核心决策**：
+
+1. **噪声隔离的精确语义**：主会话底片只多一条 tool 消息（=子 agent 结论）；子 agent 全部中间过程（点菜/观察/工具输出）零泄漏。临时 Session 纯内存——不落盘、不进主会话、用完即弃。**不进 Run Store 不受单锁约束**：spawn 是主 Run worker 内的工具调用（同步），不是新 Run——run_store「多并发留给 S6 子 agent 隔离」的判据兑现一半（单进程内隔离），真并行多 Run 仍留 S6。
+2. **禁止单程序侧硬编码**（spawn 自己 + 计划三件），显式指定也强制过滤——递归防护与「主规划子执行」分工都不信任模型自觉（S5b 同款哲学）。子 agent 的 router=None（M10 路由是主 agent 前置判断，子任务场景已定，不重复路由）。
+3. **confirm 透传 = receives_confirm 显式通道**：Tool 加布尔标记，registry.execute 见此标记把 confirm 作为关键字参数传给工具函数——接口演进老规矩（默认 False 老工具零改动），显式声明而非 registry 隐藏状态。子 agent 高危工具 → registry 确认缝 → 主循环 on_confirm → Web 挂起当前 Run 弹窗——**人审不分主子**。should_cancel 不透传（取消等主循环下一检查点）。
+4. **失败走反馈环**：子 run_turn FAILED/CANCELLED → 错误串回灌（「子任务失败：…」），主 agent 自纠不炸主轮。空 task/子集全禁 → 错误串。max_rounds 钳制 [1,10]（不信任模型给的数）。
+5. **任务书自包含**：子上下文看不到主对话历史（测试锁定首 payload 的 system=任务书模板）——prompt 里同步写明「任务书必须自包含」。
+6. **计划面板 = 任务视图 Run 详情展开**：TaskItem 点击展开 RunDetail 组件——任务视图第一次消费 SSE（EventSource 逐类型订阅，服务端 encode_sse 用事件名编码）；foldPlan 与后端 PlanState.view() 同构（同一份事件流两个消费者：后端 fold 给模型，前端 fold 给人）；步骤记号 ○◐●×✗ 与 CLI 同款（一个心智模型两处呈现）；断线重连/历史 Run 全量可见（服务端 SSE 重放段免费）。v1 只渲染计划，工具流时间线挂触发信号。
+7. **DEFAULT_SYSTEM_PROMPT 能力扩张**：补 S5b 计划三件介绍（S5b 落码时遗漏——模型此前只靠工具 description 认识计划工具）+ spawn 介绍。sha256 锁同步更新（b24025d4→5fa79c0b），测试注释写 hash 更新史——锁的语义是「改动必须显式过这里」，不是「永不改」。
+8. **mypy 抓到的闭包窄化**：`llm=ctx.llm` 在闭包里类型仍为 `LLM | None`（守卫的属性窄化不跨闭包）——守卫后取局部变量捕获。静态检查再次证明价值。
+
+**改造面**：新建 tools/spawn.py（spawn_subagent 本体 + register）+ frontend/src/tasks/RunDetail.jsx；registry.py 加 receives_confirm 字段与注入；assemble 注册（ctx.llm 在即注册）；App.jsx 展开态 + style.css 计划面板样式；DEFAULT_SYSTEM_PROMPT 扩张 + hash 更新。测试 test_spawn.py 11 个：噪声隔离（主底片单条 tool 消息）、任务书自包含、默认/显式子集过滤、全禁拒绝、confirm 透传（批准继续/拒绝自纠）、receives_confirm 通道原样注入、失败反馈环、空 task、预算钳制。前端构建产物进 git（tasks.js 3.04kB）。
+
+**验收**：ruff / mypy / pytest 三道门全绿（367 passed / 2 skipped）。真模型实机验收（spawn 分派真实子任务 + 浏览器看计划面板）留待日常使用。
+
+**S5 全站收官**：S5a Agent 对象 + S5b plan-then-act + S5c spawn_subagent/计划面板——执行架构三件齐；S6 多 agent 协作的判据（spawn 噪声隔离）已提前兑现。

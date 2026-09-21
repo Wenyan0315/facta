@@ -3,8 +3,10 @@
 //    v1 是 fetch 完手动 innerHTML + querySelector 逐个填（改数据+改 DOM 两步）
 // ② 声明式列表：runs.map(...) 描述「列表长什么样」，不描述「怎么改 DOM」
 // ③ JSX 文本节点自动转义——v1 靠纪律手写 textContent 防注入，v2 结构性免疫
+// S5c：TaskItem 加展开态——点条目展开 RunDetail（计划面板：SSE 消费 plan.* 事件）
 import { useEffect, useState } from "preact/hooks";
 import { fetchRuns } from "./api.js";
+import RunDetail from "./RunDetail.jsx";
 
 const STATUS_ZH = {
   pending: "排队中",
@@ -18,15 +20,19 @@ const STATUS_ZH = {
 const REFRESH_MS = 5000; // 与 v1 同节奏：5 秒轮询
 
 function TaskItem({ run }) {
+  // 展开态是条目自己的局部状态（列表只管列表；详情的生命周期随条目卸载）
+  const [open, setOpen] = useState(false);
   return (
     <div class="task-item">
-      <div class="task-head">
+      <div class="task-head" onClick={() => setOpen(!open)}>
         <span class={`task-badge ${run.status}`}>
           {STATUS_ZH[run.status] || run.status}
         </span>
         <span class="task-title">{run.title || "(无标题)"}</span>
+        <span class="task-caret">{open ? "▾" : "▸"}</span>
       </div>
       <div class="task-preview">{run.preview || "（无交付摘要）"}</div>
+      {open ? <RunDetail runId={run.run_id} /> : null}
     </div>
   );
 }

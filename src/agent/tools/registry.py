@@ -85,6 +85,9 @@ class Tool:
     func: Callable[..., str]        # 真正执行的 Python 函数
     is_readonly: bool = False       # S3 权限分级：只读 L0 / 写 L1（保守默认写类）
     needs_confirmation: bool | Callable[[dict], bool] = False   # S4b L2 确认标记
+    receives_confirm: bool = False  # S5c 编排工具标记：func 额外接收 confirm 参数
+                                    # （spawn_subagent 把主循环的确认缝透传给子执行流——
+                                    # 子 agent 的高危工具照常弹确认，人审不分主子）
 
 
 class ToolRegistry:
@@ -164,7 +167,13 @@ class ToolRegistry:
             return result
 
         try:
-            result = tool.func(**args)
+            # S5c 编排工具（receives_confirm）：确认缝作为关键字参数注入——
+            # 显式声明而非 registry 隐藏状态（接口演进老规矩：默认 False，
+            # 老工具零改动）。func 签名须有 confirm 形参（spawn_subagent）
+            if tool.receives_confirm:
+                result = tool.func(confirm=confirm, **args)
+            else:
+                result = tool.func(**args)
         except TypeError as e:
             result = f"错误：参数不匹配（{e}）"
         except Exception as e:  # 兜底：工具内部任何异常都不让程序崩溃
