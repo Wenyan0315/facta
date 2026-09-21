@@ -126,6 +126,30 @@ def _time_stamp(now: datetime | None = None) -> Message:
     )
 
 
+def _route_first_menu(agent: Agent, user_text: str, schemas: list[dict]) -> list[dict] | None:
+    """M10 场景路由（轮首一针，只影响本轮第一次模型调用）。
+
+    direct      → None——省全部菜单 token，且纯聊天流量因此落进
+                  SemanticCacheLLM 的命中区（它只在 tools=None 时生效，免费放大既有基建）
+    single_tool → 只递该工具 schema——选择权已由 Jev 行使，LLM 只填参数
+                  （单工具菜单即全部强制力，不用 tool_choice 强制——那会堵死
+                  Jev 误判时模型直答的逃生门）；Jev 选的名字不在菜单 → 回退全量
+    complex     → 全量菜单——模型自己走 S5b make_plan
+    无路由（无 key 装配缺席 / 故障降级 / 熔断跳过）→ 原生路径（v0.57 行为）
+    """
+    if agent.router is None:
+        return schemas or None
+    decision = agent.router.route(user_text)
+    if decision is None:
+        return schemas or None
+    if decision.kind == "direct":
+        return None
+    if decision.kind == "single_tool" and decision.tool is not None:
+        single = [s for s in schemas if s["function"]["name"] == decision.tool]
+        return single or (schemas or None)
+    return schemas or None   # complex
+
+
 def run_turn(
     session: Session,
     user_text: str,
@@ -178,7 +202,10 @@ def run_turn(
     # 对齐——tools=None（省略字段=无工具能力）与 tools=[]（有工具能力但
     # 清单为空）在 OpenAI 兼容 API 里语义不保证等价，不赌供应商实现
     schemas = agent.schemas()
-    tools = schemas or None
+    full_tools = schemas or None
+    # M10 轮首一针：路由决策收口在 _route_first_menu（语义见其 docstring）；
+    # 只影响本轮第一次模型调用，工具结果回灌后循环尾归还全量菜单（半路由）
+    tools = _route_first_menu(agent, user_text, schemas)
 
     # 1) 用户这句话存进历史（底片照常全量生长，append-only 不变）
     session.messages.append(Message(role="user", content=user_text))
@@ -249,6 +276,10 @@ def run_turn(
                 tool_msg = Message(role="tool", tool_call_id=tc["id"], content=result)
                 session.messages.append(tool_msg)
                 payload.append(tool_msg)
+            # M10 半路由归还：第一次模型调用结束后，菜单恢复全量——工具结果
+            # 已回灌，循环决策权归还模型（bench 三层分解：Jev 管第一步，
+            # 循环内决策归模型/harness）。direct 场景模型直答即 return，到不了这里
+            tools = full_tools
         # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
         if on_event:
             on_event("max_rounds", {})

@@ -412,6 +412,17 @@ PROVIDERS: dict[str, dict[str, str | float]] = {
         "price_in": 1.0,
         "price_out": 2.0,
     },
+    # M10 主力生成模型（bench 题库轨道综合 86% 第一、ECE 0.042 最佳、
+    # p50 741ms、¥0.02/90判断）：deepseek 同供应商，仅模型名与价目不同；
+    # 与 "deepseek" 共用 DEEPSEEK_API_KEY（prefix 同）。价目暂按 chat 档
+    # 占位——flash 官方价更低，待校准后修正（028 验收注记）
+    "deepseek-flash": {
+        "prefix": "DEEPSEEK",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-flash",
+        "price_in": 1.0,
+        "price_out": 2.0,
+    },
     "siliconflow": {
         "prefix": "SILICONFLOW",
         "base_url": "https://api.siliconflow.cn/v1",
@@ -466,9 +477,12 @@ def get_llm(
     cfg = PROVIDERS[provider]
     chain: list[LLM] = [_wrapped(_build_openai(cfg), provider)]
 
-    # 备用真模型：只挂「有 key 的」——没 key 的备选在启动时不报错（不是主选）
+    # 备用真模型：只挂「有 key 的」——没 key 的备选在启动时不报错（不是主选）。
+    # 同 prefix（同供应商同 key）跳过（M10 起 deepseek/deepseek-flash 共存）：
+    # 降级链的意义是跨故障域，挂同一家等于故障时陪葬
     for name, backup_cfg in PROVIDERS.items():
-        if name != provider and os.environ.get(f"{backup_cfg['prefix']}_API_KEY"):
+        if name != provider and backup_cfg["prefix"] != cfg["prefix"] \
+                and os.environ.get(f"{backup_cfg['prefix']}_API_KEY"):
             chain.append(_wrapped(_build_openai(backup_cfg), name))
 
     # mock 兜底（用户拍板）：全挂也保对话可用；降级时 FallbackLLM 会打印声明，

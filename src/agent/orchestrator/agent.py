@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent.core.jev import ScenarioRouter
 from agent.memory.consolidate import CATEGORIES
 from agent.memory.learned import read_learned
 from agent.tools.registry import ToolRegistry
@@ -83,6 +84,7 @@ class Agent:
     allowed_tools: frozenset[str] | None = None   # None=全量（主agent）；空集=无工具
     max_tool_rounds: int = 5                       # 预算：原 _MAX_TOOL_ROUNDS 全局常量归位
     learned_dir: Path | None = None                # None=不注入；有值=快照已在 prompt 里
+    router: ScenarioRouter | None = None           # M10 场景路由：None=无路由（原生路径，v0.57 行为）
 
     def schemas(self) -> list[dict]:
         """我的菜单：registry 全量按 allowed_tools 过滤——子集是菜单视图，
@@ -141,12 +143,17 @@ def _learned_block(learned_dir: Path) -> str:
     return header + "\n" + "\n".join(sections)
 
 
-def build_default_agent(registry: ToolRegistry, learned_dir: Path | None) -> Agent:
+def build_default_agent(
+    registry: ToolRegistry,
+    learned_dir: Path | None,
+    router: ScenarioRouter | None = None,
+) -> Agent:
     """主 agent：S5 前行为等价（素材搬家）+ learned 读取侧（新能力）。
 
     快照语义（AGENTS.md 式）：装配时读盘一次拼 prompt 尾部，会话中途固化
     不热刷新——接受边界，触发信号挂档（真实使用发现「刚固化的它不知道」
     再考虑工具化）。learned_dir=None 与三桶全空同收敛：无注入。
+    router（M10）：None=无路由（原生路径）；有值=run_turn 轮首先问 Jev。
     """
     prompt = DEFAULT_SYSTEM_PROMPT
     if learned_dir is not None:
@@ -158,6 +165,7 @@ def build_default_agent(registry: ToolRegistry, learned_dir: Path | None) -> Age
         system_prompt=prompt,
         registry=registry,
         learned_dir=learned_dir,
+        router=router,
         # max_tool_rounds / allowed_tools 省略：默认值住 dataclass，
         # 工厂里再写一遍 = 将来改默认要改两处
     )

@@ -24,8 +24,10 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     print(f"Personal Agent v{VERSION}")
 
-    # 命令行第一个参数 = 用哪个模型，不传默认 deepseek
-    provider = sys.argv[1] if len(sys.argv) > 1 else "deepseek"
+    # 命令行第一个参数 = 用哪个模型，不传默认 deepseek-flash
+    # （M10 主力切换：bench 题库轨道综合 86% 第一 + ECE 0.042 最佳；
+    #  python -m agent deepseek 可切回 chat 档，供应商表另有 siliconflow）
+    provider = sys.argv[1] if len(sys.argv) > 1 else "deepseek-flash"
 
     # 组装依赖（单一真值源 S2a）：账本/embedder/双链/知识库/会话/工具/MCP
     # 全在 assemble 里，本入口只解析 provider 再拿结果

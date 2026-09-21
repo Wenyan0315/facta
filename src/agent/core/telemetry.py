@@ -26,6 +26,10 @@ class UsageLedger:
     embed_calls: int = 0
     embed_tokens: int = 0
     embed_cost: float = 0.0
+    # M10 场景路由（Jev 决策模型）：路由调用与降级次数（降级=Jev 故障
+    # fail-open 走 LLM 原生路径——账单可见，可观测性要求降级显式化）
+    jev_calls: int = 0
+    jev_degradations: int = 0
 
     def record_llm(
         self, usage: dict | None, cost: float = 0.0, elapsed: float = 0.0
@@ -52,6 +56,15 @@ class UsageLedger:
         self.embed_tokens += tokens
         self.embed_cost += cost
 
+    def record_jev(self) -> None:
+        """一笔 Jev 路由调用入账（M10）。token/成本暂不展开——路由按次计费，
+        量级远低于 LLM（bench：约 1/20），账单行先记次数。"""
+        self.jev_calls += 1
+
+    def record_jev_degradation(self) -> None:
+        """一次路由降级入账（M10）：Jev 故障 fail-open 走 LLM 原生路径。"""
+        self.jev_degradations += 1
+
     def bill(self) -> str:
         """把账本渲染成人话账单（退出时由 __main__ 调用）。"""
         notes = []
@@ -71,4 +84,7 @@ class UsageLedger:
         ]
         if self.llm_calls:
             lines.insert(2, f"  平均耗时 : {self.llm_seconds / self.llm_calls:.2f}s/次")
+        if self.jev_calls or self.jev_degradations:
+            deg = f"（降级 {self.jev_degradations} 次走原生路径）" if self.jev_degradations else ""
+            lines.append(f"Jev 路由   : {self.jev_calls} 次{deg}")
         return "\n".join(lines)

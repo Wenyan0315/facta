@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from agent.core.audit import AuditLog
 from agent.core.gateway import SemanticCacheLLM
+from agent.core.jev import JevClient, ScenarioRouter
 from agent.core.llm import LLM, get_llm
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
@@ -203,7 +204,26 @@ def assemble(provider: str) -> AppContext:
     # 7) Agent 对象（S5a）：主 agent = 默认全量工具 + learned 快照注入
     #    （AGENTS.md 式：装配时读盘一次拼 prompt 尾部，会话中途固化不热刷新）。
     #    人设保证（装配不变量）随 agent 到位：CLI/Web 两个入口都带着开工
-    agent = build_default_agent(registry, LEARNED_DIR)
+    #    M10 场景路由（条件装配，同 kb=None 不注册 notes 工具的模式）：
+    #    JEV_API_KEY 缺席（CI/其他 clone 者）→ 不挂 router，行为与 v0.57
+    #    逐字节一致；假模型路径（mock/echo/repeat）同样不挂——教学组合不背
+    #    外部依赖。运行时故障（状态B）与熔断（状态C）不在这里：router 内部
+    #    fail-open，装配期只管「有没有」
+    router = None
+    jev_key = os.environ.get("JEV_API_KEY")
+    if jev_key and provider not in ("mock", "echo", "repeat"):
+        router = ScenarioRouter(
+            JevClient(
+                api_key=jev_key,
+                base_url=os.environ.get("JEV_BASE_URL", "https://api.typesafe.ai"),
+            ),
+            tool_names=registry.names(),
+            ledger=ledger,
+        )
+        logger.info("已启用 Jev 场景路由（工具 %d 个）", len(registry.names()))
+    else:
+        logger.info("未启用 Jev 场景路由，走 LLM 原生路径")
+    agent = build_default_agent(registry, LEARNED_DIR, router=router)
     ensure_persona(session, agent)
 
     return AppContext(

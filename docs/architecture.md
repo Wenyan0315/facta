@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.57（2026-09-20）｜随着里程碑推进持续迭代此文档
+> 版本：v0.58（2026-09-21）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [product.md](product.md) v2）：个人执行助手——执行主轴 + 记忆护城河 + 通用外延（[021](decisions/021-direction-decisions.md)）
 
@@ -93,9 +93,9 @@
 
 | 层 | 现状 | 建成后 |
 |---|------|--------|
-| core 地基 | ✅ types / llm 接口+实现 / 网关四件套 / 账本 / 向量数学——最底层不反认上层（S2a 依赖方向拨正） | 更多供应商 + 多模型路由 |
-| orchestrator 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb；streaming 流式消费（分片边收边打→merge 拼回复；内部调用照旧非流）；S2a 内核/外设分离：run_turn 零 input/print，I/O 走 on_text/on_event/should_cancel/on_confirm 四条缝（S4b 加确认缝）；S2b 协作式取消两检查点；run_turn 返回 RunResult 三态枚举（COMPLETED/CANCELLED/FAILED，取消/模型全挂不再靠 None 二义反推，S4 评审修复轮）；**S5a Agent 对象**：行为定义与执行引擎分离（agent.py 六字段 frozen；SYSTEM_PROMPT 外置为 DEFAULT_SYSTEM_PROMPT，learned 三桶 AGENTS.md 式快照注入 prompt 尾）；run_turn agent 化（registry 参数退场、空菜单折叠回 None 防「不传≠空」API 坑、幻觉点菜 assert 炸→错误串反馈环）；**S5b plan-then-act 两针**：活跃计划投影注入（`_plan_stamp`，时间戳同款手法，无活跃零开销）+ 计划事件 drain 转发（工具执行后、tool_result 前，因果序，零新缝） | 并行工具调用 / 更复杂的规划策略 |
-| LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/siliconflow) + 进程内网关(M7.5：记账/重试超时/精确+语义缓存/熔断三态/降级链+优雅兜底) | 更多供应商 + 多模型路由 |
+| core 地基 | ✅ types / llm 接口+实现 / 网关四件套 / 账本 / 向量数学 / **Jev 决策模型接入（M10：JevClient+ScenarioRouter，urllib 零依赖、三态生命周期、选项空间封闭注入免疫）**——最底层不反认上层（S2a 依赖方向拨正） | 更多供应商 + 多模型路由 |
+| orchestrator 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb；streaming 流式消费（分片边收边打→merge 拼回复；内部调用照旧非流）；S2a 内核/外设分离：run_turn 零 input/print，I/O 走 on_text/on_event/should_cancel/on_confirm 四条缝（S4b 加确认缝）；S2b 协作式取消两检查点；run_turn 返回 RunResult 三态枚举（COMPLETED/CANCELLED/FAILED，取消/模型全挂不再靠 None 二义反推，S4 评审修复轮）；**S5a Agent 对象**：行为定义与执行引擎分离（agent.py 六字段 frozen；SYSTEM_PROMPT 外置为 DEFAULT_SYSTEM_PROMPT，learned 三桶 AGENTS.md 式快照注入 prompt 尾）；run_turn agent 化（registry 参数退场、空菜单折叠回 None 防「不传≠空」API 坑、幻觉点菜 assert 炸→错误串反馈环）；**S5b plan-then-act 两针**：活跃计划投影注入（`_plan_stamp`，时间戳同款手法，无活跃零开销）+ 计划事件 drain 转发（工具执行后、tool_result 前，因果序，零新缝）；**M10 场景路由轮首一针**：`_route_first_menu`（direct 藏菜单进语义缓存命中区/single_tool 单工具菜单 LLM 只填参数/complex 全量自决；半路由——工具结果回灌后循环尾归还全量菜单，循环决策权归还模型） | 并行工具调用 / 更复杂的规划策略 |
+| LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/deepseek-flash/siliconflow，M10 备用链按 prefix 去重——同供应商同故障域不陪葬) + 进程内网关(M7.5：记账/重试超时/精确+语义缓存/熔断三态/降级链+优雅兜底)；主力默认 deepseek-flash（M10，bench 题86%+ECE 0.042） | 更多供应商 + 多模型路由 |
 | knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集)；检索命中带溯源（SearchHit=块+相似度+来源面单，query 全链路透出，S4 评审修复轮） | 知识图谱 |
 | memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘）+ 多会话管理（S1：active+archive，/new 归档重开）+ restore_session 原语（S2a：归档写回 active 后删除，move 语义）+ **plan 计划域（S5b）**：PlanBoard/PlanState/事件史（append 修订、fold 视图、显式终态制），生命周期=会话随 session.json 落盘，老文件宽进 | 用户级记忆仓库外位置 |
 | tools | ✅ Tool+ToolRegistry+内置工具按家族分件（time/history/notes 三族，S4a 拆分）；write_note 安全栅栏+查重闸门；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型)；联网工具 web_search/fetch_web（015：Tavily Provider+SSRF 栅栏+条件注册）；MCP 外部工具配置化接入；文件四件 read_file/search_code/list_dir/write_file+diff（S4a，workspace 围栏：__file__ 锚定+敏感黑名单读都不行）；终端执行 run_command（S4b：白名单只读免确认/L2 确认缝 registry 收口/批准拒绝都落审；评审修复轮加参数级拦截——find -exec/sort -o 等「只读命令名+危险参数」也弹确认）；计划三件（S5b）：make_plan（人审掌舵点，复用确认缝）/update_plan_step（状态回写+回灌带最新视图）/finish_plan（显式终态程序闸） | 更多工具 + skills |
@@ -134,6 +134,7 @@
 | FW ✅ | 前端基建（021 裁定兑现，见 [023](decisions/023-fw-preact-pilot.md)）：Preact+Vite 脚手架（frontend/ 源码 → static/fw/ 产物，产物进 git）；任务视图 v2 试点完成（状态驱动替代 innerHTML 同步矩阵，JSX 自动转义结构性免疫注入）；构建链第一课：子路径部署必须 base:"/fw/"。**记忆面板 v1 ✅（[025](decisions/025-memory-panel.md)，护城河可视化）：learned 三桶查看/编辑/删除 + 行号定位协议 + 坏行宽容（幻觉清理入口）**。下一步：主聊天视图渐进迁移 | 声明式渲染、状态驱动 |
 | S5 | 执行架构（2026-09-18 重定义，[021](decisions/021-direction-decisions.md)）：**Agent 对象抽象**（独立 system prompt/工具子集/预算/记忆——吸收原 skill 站的 SYSTEM_PROMPT 外置与 AGENTS.md 式 learned 读取侧，二者本就是 Agent 对象的属性）+ **plan-then-act**（轻量规划，plan 即 Human on the Loop 掌舵点；plan 载体=独立最小结构挂 Run 事件流）+ **spawn_subagent**（子 agent 只回传结论=噪声隔离，S6 判据提前兑现）；技能包格式后置并入 S6。对抗机制（critic）不内置——Agent 对象落地后从机制变配置，触发信号见 [026](decisions/026-adversarial-critic-deferred.md)。**S5a ✅ Agent 对象**（[027](decisions/027-s5-execution-architecture.md)：三拍板定 S5b 形状——模型自判/append 修订/显式终态制；六字段 frozen、菜单与执行分离、两段式验收 sha256 锁死搬家等价、learned 快照三原则）。**S5b ✅ plan-then-act**（[027](decisions/027-s5-execution-architecture.md)：三层结构 值对象/PlanState/PlanBoard，事件溯源最小版——append 修订+fold 视图；双视图 轮首快照+工具结果回灌导航；修订复用 make_plan 状态机分叉；人审掌舵复用 S4b 确认缝） | 执行架构、规划 |
 | S6 | 多 agent 协作：worktree 隔离机制 + 真编排（技能包格式自 S5 后置并入；spawn_subagent 已在 S5 兑现噪声隔离判据） | 编排 |
+| M10 ✅ | 场景路由与快慢分工（2026-09-21，[028](decisions/028-m10-scenario-routing.md)，model-bench 评测结论落地）：**决策/生成分离**——Jev choice 管意图识别（bench 路由 19/20，成本 1/20）挂 Agent.router 轮首一针；deepseek-flash 管生成（题库轨道 86% 第一、ECE 0.042）；参数填充归 LLM、循环决策归 harness（bench 三层分解）。三态生命周期硬约束（无 key 条件装配/单次故障 fail-open/持续故障熔断同款参数），route() 永不抛、返回 None=原生路径（无 Jev=cortex 功能完整）。确认闸门程序侧硬编码不动（bench：五模型安全确认无一全对，DS-V4-Pro 唯一裸奔）。S5c 顺延 | 决策外包、fail-open、选项封闭注入免疫 |
 | S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止） | 结构化知识、图可视化 |
 | S8 | 多入口 Gateway：IM 渠道（飞书/Telegram 等）消息归一化接入 agent_loop，与 headless 合并（gateway 常驻进程——重审「不 daemon 化」原则） | 事件驱动、常驻服务 |
 | 〔另排期〕 L1 | 本地模型接入：Ollama（OpenAI 兼容端点零代码接入，Qwen3 档起步；触发信号=需要零成本/离线验收链路时排期） | 本地推理 |
@@ -183,6 +184,7 @@
 | [025-memory-panel](decisions/025-memory-panel.md) | 记忆面板 v1 | learned 三桶查看/编辑/删除（护城河可视化）；行号定位协议（append-only 下稳定）+ 坏行宽容（幻觉清理入口）+ 编辑保留日期（时间戳归程序管）；FW 新栈第二入口，多入口共享 chunk |
 | [026-adversarial-critic-deferred](decisions/026-adversarial-critic-deferred.md) | 对抗机制裁定 | S5 不内置 critic（2026-09-12 悬案结案：基线 0% 错误无痛点；人审已是更强对抗者；Agent 对象落地后 critic 从机制变配置）；三条触发信号挂档（plan 挑刺/执行监督/对抗题库） |
 | [027-s5-execution-architecture](decisions/027-s5-execution-architecture.md) | S5 执行架构 | 三拍板（plan 触发模型自判/修订 append/完成显式终态制）；S5a Agent 对象：六字段 frozen、菜单与执行分离（子集=菜单视图非第二 registry）、两段式验收（sha256 锁死搬家等价+行为升级单列）、空菜单折叠 None（不传≠空）、assert 退场反馈环接管、learned 快照三原则（落盘格式零翻译/空桶跳过/锁老文加新文）；S5b plan-then-act：三层结构与 _pending 挂 board（finish 事件不丢）、fold 事件史+孤儿事件跳过、双视图（轮首快照+回灌导航）、修订复用 make_plan 分叉、掌舵复用确认缝、事件转发零新缝 |
+| [028-m10-scenario-routing](decisions/028-m10-scenario-routing.md) | M10 场景路由 | model-bench 证据摘要（适用域=原子决策）；三类场景 direct/single_tool/complex；Jev 挂 Agent 轮首一针不进 gateway；半路由（循环尾归还全量菜单）；single_tool 不用 tool_choice（逃生门）；三态生命周期（无 key 条件装配/fail-open/熔断同款参数）；direct 进语义缓存命中区；主力切 deepseek-flash + 备用链 prefix 去重；确认闸门程序侧硬编码（bench 正名） |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
