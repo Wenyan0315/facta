@@ -109,6 +109,11 @@ class ToolRegistry:
         """当前已登记的工具名清单（给外部展示用）。"""
         return list(self._tools.keys())
 
+    def tool_descriptions(self) -> dict[str, str]:
+        """名字→说明书（M10 场景路由的 criteria 原料——Jev 按语义选工具，
+        description 本来就是给模型看的使用说明书，直接复用）。"""
+        return {name: t.description for name, t in self._tools.items()}
+
     def schemas(self) -> list[dict]:
         """生成 OpenAI 格式的工具清单——这就是发给模型的「菜单」。"""
         return [

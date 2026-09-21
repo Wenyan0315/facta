@@ -25,7 +25,7 @@ class FakeJev:
         self._replies = list(replies)
         self.calls: list[str] = []   # 每次收到的 state（断言注入面）
 
-    def choice(self, state, question_id, instructions, options):
+    def choice(self, state, question_id, instructions, criteria):
         self.calls.append(state)
         r = self._replies.pop(0)
         if isinstance(r, Exception):
@@ -41,7 +41,8 @@ def _reg(*names: str) -> ToolRegistry:
 
 
 def _router(fake: FakeJev, tools: list[str]) -> ScenarioRouter:
-    return ScenarioRouter(fake, tools, ledger=UsageLedger())   # type: ignore[arg-type]
+    # tools 转 dict（名字→说明）：ScenarioRouter 构造参数是 dict（criteria 原料）
+    return ScenarioRouter(fake, {t: "工具说明" for t in tools}, ledger=UsageLedger())   # type: ignore[arg-type]
 
 
 # ---------- 路由三场景 ----------
@@ -77,7 +78,7 @@ def test_state_text_contains_user_message_and_tool_names():
 def test_single_failure_fail_open_and_degradation_recorded():
     ledger = UsageLedger()
     fake = FakeJev([TimeoutError("net down"), "direct"])
-    r = ScenarioRouter(fake, ["get_current_time"], ledger=ledger)   # type: ignore[arg-type]
+    r = ScenarioRouter(fake, {"get_current_time": "查时间"}, ledger=ledger)   # type: ignore[arg-type]
     assert r.route("你好") is None          # fail-open：降级 = 没有路由
     assert ledger.jev_degradations == 1
     assert r.route("你好") == RouteDecision(kind="direct")   # 下一轮自然再试（无重试设计）
@@ -141,7 +142,7 @@ class _MenuSpyLLM(LLM):
 
 
 def _agent_with_router(fake: FakeJev, reg: ToolRegistry) -> Agent:
-    router = ScenarioRouter(fake, reg.names(), ledger=UsageLedger())   # type: ignore[arg-type]
+    router = ScenarioRouter(fake, reg.tool_descriptions(), ledger=UsageLedger())   # type: ignore[arg-type]
     return Agent(name="test", system_prompt="sys", registry=reg, router=router)
 
 
@@ -245,17 +246,23 @@ def test_jev_client_payload_shape(monkeypatch):
         def read(self):
             return _json.dumps({"answers": {"scenario": {"choice": "direct"}}}).encode()
 
-    def _fake_urlopen(req, timeout=None):
+    def _fake_urlopen(req, timeout=None, context=None):   # context：certifi SSL 修复后新增 kwarg
         captured["url"] = req.full_url
         captured["data"] = _json.loads(req.data.decode())
         captured["auth"] = req.headers.get("Authorization")
         return _FakeResp()
 
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
-    client = JevClient(api_key="sk-test", base_url="https://api.typesafe.ai")
-    picked, _ = client.choice("state text", "scenario", "哪个？", ["direct", "complex"])
+    # base_url=完整端点（JEV_BASE_URL 语义，与 model-bench registry 一致——不拼接路径）
+    client = JevClient(api_key="sk-test", base_url="https://api.typesafe.ai/v1/systemone")
+    picked, _ = client.choice(
+        "state text", "scenario", "哪个？",
+        {"direct": "直接回答", "complex": "复杂任务"},   # criteria 是 dict（选项→说明，bench 协议）
+    )
     assert picked == "direct"
     assert captured["url"] == "https://api.typesafe.ai/v1/systemone"
     assert captured["auth"] == "Bearer sk-test"
     assert captured["data"]["model"] == "jev-latest"
-    assert captured["data"]["questions"]["scenario"]["criteria"] == ["direct", "complex"]
+    assert captured["data"]["questions"]["scenario"]["criteria"] == {
+        "direct": "直接回答", "complex": "复杂任务",
+    }

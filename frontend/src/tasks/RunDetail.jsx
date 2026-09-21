@@ -67,10 +67,15 @@ export default function RunDetail({ runId }) {
     // 计划视图；tool_*/text.* 等先收集不展示——执行时间线挂触发信号）
     const onEvent = (e) => {
       try {
-        events.push({ type: e.type, data: JSON.parse(e.data) });
+        // 服务端 SSE 帧有外层信封 {schema_version, run_id, seq, type, data}——
+        // 真实载荷在内层 .data（encode_sse 的编码约定）。解包错误=TypeError
+        // 被 catch 吞掉 → 面板永久卡 connecting（浏览器验收抓到的 P0，此为修复）
+        const envelope = JSON.parse(e.data);
+        events.push({ type: e.type, data: envelope.data || {} });
         apply();
-      } catch {
-        // 坏 JSON 忽略：一个坏事件不该拖垮整个面板
+      } catch (err) {
+        // 坏事件不拖垮面板，但不再静默——控制台留痕（这次验收的教训）
+        console.warn("[RunDetail] 坏事件忽略：", e.type, err);
       }
     };
     // SSE 端点每类型一个 addEventListener（EventSource 只默认收 message

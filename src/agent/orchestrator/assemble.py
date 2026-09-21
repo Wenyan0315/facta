@@ -217,9 +217,9 @@ def assemble(provider: str) -> AppContext:
         router = ScenarioRouter(
             JevClient(
                 api_key=jev_key,
-                base_url=os.environ.get("JEV_BASE_URL", "https://api.typesafe.ai"),
+                base_url=os.environ.get("JEV_BASE_URL", "https://api.typesafe.ai/v1/systemone"),
             ),
-            tool_names=registry.names(),
+            tools=registry.tool_descriptions(),   # dict：名字→说明书（Jev 的 choice criteria 原料）
             ledger=ledger,
         )
         logger.info("已启用 Jev 场景路由（工具 %d 个）", len(registry.names()))

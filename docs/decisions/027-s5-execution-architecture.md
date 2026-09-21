@@ -63,6 +63,6 @@
 
 **改造面**：新建 tools/spawn.py（spawn_subagent 本体 + register）+ frontend/src/tasks/RunDetail.jsx；registry.py 加 receives_confirm 字段与注入；assemble 注册（ctx.llm 在即注册）；App.jsx 展开态 + style.css 计划面板样式；DEFAULT_SYSTEM_PROMPT 扩张 + hash 更新。测试 test_spawn.py 11 个：噪声隔离（主底片单条 tool 消息）、任务书自包含、默认/显式子集过滤、全禁拒绝、confirm 透传（批准继续/拒绝自纠）、receives_confirm 通道原样注入、失败反馈环、空 task、预算钳制。前端构建产物进 git（tasks.js 3.04kB）。
 
-**验收**：ruff / mypy / pytest 三道门全绿（367 passed / 2 skipped）。真模型实机验收（spawn 分派真实子任务 + 浏览器看计划面板）留待日常使用。
+**验收**：ruff / mypy / pytest 三道门全绿（367 passed / 2 skipped）。真模型实机验收完成（2026-09-21）：spawn 全链路（主 agent 写自包含任务书+主动指定 tools 子集与 max_rounds；子 agent 交回三句话+来源；主 Run 事件流零中间过程泄漏）；计划面板实机抓到 **P0：SSE 信封未解包**——服务端 encode_sse 的 data 是外层信封 `{schema_version, run_id, seq, type, data}`，RunDetail 直接当载荷用 → `ev.data.steps` 实为 `ev.data.data.steps`，TypeError 被 catch 静默吞 → 面板永久卡「连接事件流…」（pytest 测不到 JS；浏览器验收的价值现场兑现）。修复：解信封 `JSON.parse(e.data).data` + catch 加 console.warn 不再静默。
 
 **S5 全站收官**：S5a Agent 对象 + S5b plan-then-act + S5c spawn_subagent/计划面板——执行架构三件齐；S6 多 agent 协作的判据（spawn 噪声隔离）已提前兑现。

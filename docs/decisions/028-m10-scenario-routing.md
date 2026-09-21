@@ -42,4 +42,4 @@
 
 ## 验收
 
-ruff / mypy / pytest 三道门全绿（356 passed / 2 skipped，无 key 形态——CI 同款环境，Jev 路径全 FakeJev）。真模型 + 真 Jev 的实机验收留待日常使用（教学惯例：先实测再前进——已知注记：flash 价目待校准；Jev 路由质量在真实分布下的表现待观察）。
+ruff / mypy / pytest 三道门全绿（356 passed / 2 skipped，无 key 形态——CI 同款环境，Jev 路径全 FakeJev）。真模型 + 真 Jev 实机验收（2026-09-21）：三态完整实测（状态B fail-open 真实上演并优雅降级），direct/single_tool 两场景真路由成功。实机三连修复（「payload 与 bench 同构」的声明被实测打脸三次——**同构要逐字段对齐，不能靠记忆**）：①macOS urllib 无根证书（CERTIFICATE_VERIFY_FAILED）→ JevClient 加 certifi SSL 上下文（openai 传递依赖，缺席回退）；②JEV_BASE_URL 语义=完整端点（bench registry 直接 POST，不拼接——曾拼 /v1/systemone 两次得 404）；③criteria 是 dict（选项→说明），发 list 得 422——ScenarioRouter 构造参数从 tool_names 改 tools: dict[str,str]，registry 加 tool_descriptions()（description 本就是给模型看的说明书，直接复用）。已知注记：flash 价目待校准；Jev 路由质量在真实分布下的表现继续观察。

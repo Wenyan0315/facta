@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -61,14 +62,28 @@ class JevClient:
     name = "jev"
 
     def __init__(self, api_key: str, base_url: str, timeout: float = 3.0) -> None:
+        # base_url 语义=完整端点（与 model-bench 的 registry 一致：JEV_BASE_URL
+        # 直接 POST，不拼接路径——实测曾拼 /v1/systemone 两次得 404）
         self._key = api_key
-        self._url = base_url.rstrip("/") + "/v1/systemone"
+        self._url = base_url.rstrip("/")
         self._timeout = timeout
+        # SSL 上下文：优先 certifi 的 CA bundle（实机验收发现：macOS Python
+        # 的 urllib 默认找不到根证书，CERTIFICATE_VERIFY_FAILED → Jev 永远
+        # fail-open。certifi 是 openai SDK 的传递依赖，venv 必有；缺席回退
+        # 默认上下文——Linux CI 通常系统证书齐全，不额外加依赖）
+        self._ssl_ctx: ssl.SSLContext | None = None
+        try:
+            import certifi
+
+            self._ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            pass
 
     def choice(self, state: str, question_id: str, instructions: str,
-               options: list[str]) -> tuple[str, dict]:
+               criteria: dict[str, str]) -> tuple[str, dict]:
         """问一个 choice 问题；返回 (选中项, 响应)。
 
+        criteria 是 dict（选项名→说明）——bench 已验证协议：发 list 会 422。
         抛 urllib.error.URLError / HTTPError / TimeoutError —— 由
         ScenarioRouter.route() 统一捕获（fail-open 语义在此层之上）。
         payload 形状与 model-bench/toolcall.py 的 run_jev 同构（已验证）。
@@ -80,7 +95,7 @@ class JevClient:
                 question_id: {
                     "type": "choice",
                     "instructions": instructions,
-                    "criteria": options,
+                    "criteria": criteria,
                 }
             },
         }
@@ -93,7 +108,7 @@ class JevClient:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+        with urllib.request.urlopen(req, timeout=self._timeout, context=self._ssl_ctx) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         answer = (data.get("answers", {}).get(question_id) or {})
         picked = answer.get("choice")
@@ -114,13 +129,15 @@ class ScenarioRouter:
     def __init__(
         self,
         client: JevClient,
-        tool_names: list[str],
+        tools: dict[str, str],
         ledger: UsageLedger | None = None,
         fail_threshold: int = 3,
         cooldown_seconds: float = 30.0,
     ) -> None:
         self._client = client
-        self._tools = list(tool_names)
+        # 工具名→说明（取自 registry 的 description——本来就是给模型看的
+        # 使用说明书，Jev 按语义选，说明越准路由越准）
+        self._tools = dict(tools)
         self._ledger = ledger or UsageLedger()
         self._fail_threshold = fail_threshold
         self._cooldown = cooldown_seconds
@@ -136,6 +153,12 @@ class ScenarioRouter:
             return "open"
         return "half_open" if self._half_open else "closed"
 
+    # 两个路由元选项的说明（与 bench ROUTE_OPTIONS 的 direct_answer 描述同风格）
+    _META = {
+        "direct": "用模型自身知识直接回答，不需要任何工具",
+        "complex": "多步骤复杂任务：先制定计划再逐步执行，需要完整工具菜单",
+    }
+
     def route(self, user_text: str) -> RouteDecision | None:
         """一段式 choice：选项 = 工具名 ∪ {direct, complex}。
 
@@ -146,7 +169,7 @@ class ScenarioRouter:
         if self._breaker_blocks():
             return None
 
-        options = self._tools + ["direct", "complex"]
+        criteria = {**self._tools, **self._META}
         state = (
             f"用户对个人助手说：「{user_text}」\n可用工具：{', '.join(self._tools)}"
         )
@@ -155,7 +178,7 @@ class ScenarioRouter:
                 state=state,
                 question_id="scenario",
                 instructions="这条消息应该走哪条处理路径？",
-                options=options,
+                criteria=criteria,
             )
         except Exception as exc:  # noqa: BLE001  # fail-open：任何故障都降级，不上抛
             self._ledger.record_jev_degradation()
