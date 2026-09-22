@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.61（2026-09-22）｜随着里程碑推进持续迭代此文档
+> 版本：v0.62（2026-09-22）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [product.md](product.md) v2）：个人执行助手——执行主轴 + 记忆护城河 + 通用外延（[021](decisions/021-direction-decisions.md)）
 
@@ -143,7 +143,7 @@
 | S4 ✅ | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）。**S4a ✅ 文件四件（read/search_code/list_dir/write_file+diff）+ builtin 拆分（time/history/notes 三族）+ workspace 围栏（__file__ 锚定+敏感黑名单）**；**S4b ✅ 终端执行 run_command + L2 确认机制（只读白名单免确认/registry 确认缝第四条缝/waiting_approval 挂起/Web 弹窗+CLI input/批准拒绝都落审）** | 文件系统、进程调度 |
 | FW ✅ | 前端基建（021 裁定兑现，见 [023](decisions/023-fw-preact-pilot.md)）：Preact+Vite 脚手架（frontend/ 源码 → static/fw/ 产物，产物进 git）；任务视图 v2 试点完成（状态驱动替代 innerHTML 同步矩阵，JSX 自动转义结构性免疫注入）；构建链第一课：子路径部署必须 base:"/fw/"。**记忆面板 v1 ✅（[025](decisions/025-memory-panel.md)，护城河可视化）：learned 三桶查看/编辑/删除 + 行号定位协议 + 坏行宽容（幻觉清理入口）**。下一步：主聊天视图渐进迁移 | 声明式渲染、状态驱动 |
 | S5 | 执行架构（2026-09-18 重定义，[021](decisions/021-direction-decisions.md)）：**Agent 对象抽象**（独立 system prompt/工具子集/预算/记忆——吸收原 skill 站的 SYSTEM_PROMPT 外置与 AGENTS.md 式 learned 读取侧，二者本就是 Agent 对象的属性）+ **plan-then-act**（轻量规划，plan 即 Human on the Loop 掌舵点；plan 载体=独立最小结构挂 Run 事件流）+ **spawn_subagent**（子 agent 只回传结论=噪声隔离，S6 判据提前兑现）；技能包格式后置并入 S6。对抗机制（critic）不内置——Agent 对象落地后从机制变配置，触发信号见 [026](decisions/026-adversarial-critic-deferred.md)。**S5a ✅ Agent 对象**（[027](decisions/027-s5-execution-architecture.md)：三拍板定 S5b 形状——模型自判/append 修订/显式终态制；六字段 frozen、菜单与执行分离、两段式验收 sha256 锁死搬家等价、learned 快照三原则）。**S5b ✅ plan-then-act**（[027](decisions/027-s5-execution-architecture.md)：三层结构 值对象/PlanState/PlanBoard，事件溯源最小版——append 修订+fold 视图；双视图 轮首快照+工具结果回灌导航；修订复用 make_plan 状态机分叉；人审掌舵复用 S4b 确认缝）。**S5c ✅ spawn_subagent + 计划面板**（[027](decisions/027-s5-execution-architecture.md)：噪声隔离=主底片只多一条结论消息，临时会话不落盘不受单锁；禁止单程序侧硬编码防递归；receives_confirm 显式通道人审不分主子；任务面板=任务视图 Run 详情展开，SSE 消费 plan.* 事件 fold 与后端同构）。**S5 全站收官** | 执行架构、规划 |
-| S6 | 多 agent 协作：worktree 隔离机制 + 真编排（技能包格式自 S5 后置并入；spawn_subagent 已在 S5 兑现噪声隔离判据；2026-09-22 优先级拍板 B 先行已落地——冒烟套件作 S6 安全网，spawn 内部重构外部行为自动把关） | 编排 |
+| S6 | 多 agent 协作：worktree 隔离机制 + 真编排（技能包格式自 S5 后置并入；spawn_subagent 已在 S5 兑现噪声隔离判据；2026-09-22 优先级拍板 B 先行已落地——冒烟套件作 S6 安全网，spawn 内部重构外部行为自动把关）。**S6a ✅ worktree 隔离**（[030](decisions/030-s6a-worktree-isolation.md)：WORKSPACE_ROOT 注入化+确认缝合回+子 registry 重锚+残留回收；跨进程挂触发信号） | 编排 |
 | M10 ✅ | 场景路由与快慢分工（2026-09-21，[028](decisions/028-m10-scenario-routing.md)，model-bench 评测结论落地）：**决策/生成分离**——Jev choice 管意图识别（bench 路由 19/20，成本 1/20）挂 Agent.router 轮首一针；deepseek-flash 管生成（题库轨道 86% 第一、ECE 0.042）；参数填充归 LLM、循环决策归 harness（bench 三层分解）。三态生命周期硬约束（无 key 条件装配/单次故障 fail-open/持续故障熔断同款参数），route() 永不抛、返回 None=原生路径（无 Jev=cortex 功能完整）。确认闸门程序侧硬编码不动（bench：五模型安全确认无一全对，DS-V4-Pro 唯一裸奔）。（S5c 已于其后收官，`ee4efd4`） | 决策外包、fail-open、选项封闭注入免疫 |
 | S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止） | 结构化知识、图可视化 |
 | S8 | 多入口 Gateway：IM 渠道（飞书/Telegram 等）消息归一化接入 agent_loop，与 headless 合并（gateway 常驻进程——重审「不 daemon 化」原则） | 事件驱动、常驻服务 |
@@ -196,6 +196,7 @@
 | [027-s5-execution-architecture](decisions/027-s5-execution-architecture.md) | S5 执行架构 | 三拍板（plan 触发模型自判/修订 append/完成显式终态制）；S5a Agent 对象：六字段 frozen、菜单与执行分离（子集=菜单视图非第二 registry）、两段式验收（sha256 锁死搬家等价+行为升级单列）、空菜单折叠 None（不传≠空）、assert 退场反馈环接管、learned 快照三原则（落盘格式零翻译/空桶跳过/锁老文加新文）；S5b plan-then-act：三层结构与 _pending 挂 board（finish 事件不丢）、fold 事件史+孤儿事件跳过、双视图（轮首快照+回灌导航）、修订复用 make_plan 分叉、掌舵复用确认缝、事件转发零新缝；S5c spawn+计划面板：噪声隔离（临时会话不落盘不受单锁）、禁止单硬编码、receives_confirm 人审不分主子、前端 fold 同构、prompt 能力扩张 hash 更新史 |
 | [028-m10-scenario-routing](decisions/028-m10-scenario-routing.md) | M10 场景路由 | model-bench 证据摘要（适用域=原子决策）；三类场景 direct/single_tool/complex；Jev 挂 Agent 轮首一针不进 gateway；半路由（循环尾归还全量菜单）；single_tool 不用 tool_choice（逃生门）；三态生命周期（无 key 条件装配/fail-open/熔断同款参数）；direct 进语义缓存命中区；主力切 deepseek-flash + 备用链 prefix 去重；确认闸门程序侧硬编码（bench 正名） |
 | [029-review-round-sonus](decisions/029-review-round-sonus.md) | 评审修复轮（sonus） | 外部评审 8 项坐实硬伤分类消化；R1 读边界不对称（read_notes 越界+search_code .env 泄漏）；R2 XSS（escape-before-parse+协议白名单）；R3 事件名契约（点分统一）；R4 plan 生命周期（/new 清+换血恢复）；R5 spawn 禁止单加历史工具；R6 SSE 广播模型（单队列竞争→订阅者独立队列+终态哨兵）；R7 归档保留手工名；R8 语义缓存默认关（env 开关）；四视角吸收（已有设施覆盖） |
+| [030-s6a-worktree-isolation](decisions/030-s6a-worktree-isolation.md) | S6a worktree 隔离 | 四拍板（WORKSPACE_ROOT 注入化/确认缝合回/生命周期+残留回收/跨进程不进本轮）；_worktree_registry（五件重锚+其余共享+审计同源）；merge_worktree 确认缝（批准合回拒绝整棵丢弃）；commit 显式带 cortex-agent 身份（CI 环境无关）；三实踩入档（默认参数固化 monkeypatch 无效/reset --hard 误伤未提交/CI git 身份差异） |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
