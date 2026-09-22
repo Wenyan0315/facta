@@ -20,6 +20,7 @@ data/memory/
 data/vector_db/
 data/todos.json
 data/audit/
+data/worktrees/
 servers/sandbox/
 
 # 系统文件

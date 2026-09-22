@@ -15,8 +15,10 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from agent.paths import WORKSPACE_ROOT
+from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
 
 TIMEOUT_SECONDS = 60
@@ -74,9 +76,10 @@ def needs_confirm(command: str) -> bool:
     return True
 
 
-def _run_command(command: str) -> str:
+def _run_command(command: str, *, root: Path = WORKSPACE_ROOT) -> str:
     """跑一条 shell 命令，返回 exit code + 合并输出（截断）。
 
+    root（S6a 注入化）：cwd 锚点——主 agent = 主工作区；子 agent = worktree。
     shell=True 是裁定不是疏忽：管道/重定向是日常刚需，危险面由白名单 +
     确认机制兜住，不在工具内做命令解析（那不归它管，且解析不全）。
     """
@@ -84,7 +87,7 @@ def _run_command(command: str) -> str:
         proc = subprocess.run(
             command,
             shell=True,
-            cwd=WORKSPACE_ROOT,
+            cwd=root,
             capture_output=True,
             text=True,
             timeout=TIMEOUT_SECONDS,
@@ -100,8 +103,12 @@ def _run_command(command: str) -> str:
     return f"exit code: {proc.returncode}\n{output}{truncated}".strip()
 
 
-def register_terminal_tools(registry: ToolRegistry) -> None:
-    """注册终端工具（恒注册；L2 高危——needs_confirmation=True）。"""
+def register_terminal_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
+    """注册终端工具（恒注册；L2 高危——needs_confirmation=True）。
+
+    S6a 注入化：cwd 锚点从 ctx 取（与 files.py 同款闭包模式）。
+    """
+    root = ctx.workspace_root
     registry.register(
         Tool(
             name="run_command",
@@ -120,7 +127,7 @@ def register_terminal_tools(registry: ToolRegistry) -> None:
                 },
                 "required": ["command"],
             },
-            func=_run_command,
+            func=lambda command: _run_command(command, root=root),
             needs_confirmation=lambda args: needs_confirm(args["command"]),
         )
     )

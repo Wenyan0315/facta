@@ -51,83 +51,79 @@ def test_fence_allows_normal_project_files():
 
 # ---------- 四件行为 ----------
 
-def test_read_file_paging(tmp_path, monkeypatch):
-    # 分页窗口：超 limit 显示行号区间 + 续读提示
-    monkeypatch.setattr("agent.tools.files.WORKSPACE_ROOT", tmp_path)
+def test_read_file_paging(tmp_path):
+    # 分页窗口：超 limit 显示行号区间 + 续读提示（S6a 起 root 显式注入，替代 monkeypatch）
     (tmp_path / "big.py").write_text("\n".join(f"line{i}" for i in range(1, 51)), encoding="utf-8")
 
-    out = _read_file("big.py", limit=10)
+    out = _read_file("big.py", limit=10, root=tmp_path)
     assert "共 50 行" in out and "line1" in out and "line10" in out
     assert "line11" not in out
     assert "offset=11" in out               # 教模型怎么续读
 
 
-def test_read_file_missing_and_binary(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent.tools.files.WORKSPACE_ROOT", tmp_path)
-    assert "不存在" in _read_file("nope.py")
+def test_read_file_missing_and_binary(tmp_path):
+    assert "不存在" in _read_file("nope.py", root=tmp_path)
     (tmp_path / "blob.bin").write_bytes(b"\x00\xff\xfe")
-    assert "不是文本" in _read_file("blob.bin")
+    assert "不是文本" in _read_file("blob.bin", root=tmp_path)
 
 
-def test_search_code_finds_and_formats(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent.tools.files.WORKSPACE_ROOT", tmp_path)
+def test_search_code_finds_and_formats(tmp_path):
     (tmp_path / "a.py").write_text("def run_turn():\n    pass\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("x = 1\n", encoding="utf-8")
 
-    out = _search_code("run_turn")
+    out = _search_code("run_turn", root=tmp_path)
     assert "a.py:1: def run_turn():" in out
     assert "b.py" not in out                # 未命中文件不出现
-    assert "没有命中" in _search_code("不存在的符号xyz")
+    assert "没有命中" in _search_code("不存在的符号xyz", root=tmp_path)
 
 
-def test_search_code_skips_sensitive_dirs(tmp_path, monkeypatch):
+def test_search_code_skips_sensitive_dirs(tmp_path):
     # .git/.venv 等黑名单目录整树跳过（含命中也不返回）
-    monkeypatch.setattr("agent.tools.files.WORKSPACE_ROOT", tmp_path)
     (tmp_path / ".git").mkdir()
     (tmp_path / ".git" / "cfg").write_text("SECRET_TOKEN here\n", encoding="utf-8")
 
-    out = _search_code("SECRET_TOKEN")
+    out = _search_code("SECRET_TOKEN", root=tmp_path)
     assert "没有命中" in out
 
 
-def test_list_dir_one_level(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent.tools.files.WORKSPACE_ROOT", tmp_path)
+def test_list_dir_one_level(tmp_path):
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "in_pkg.py").write_text("x", encoding="utf-8")
     (tmp_path / "top.py").write_text("y", encoding="utf-8")
 
-    out = _list_dir(".")
+    out = _list_dir(".", root=tmp_path)
     assert "pkg/" in out and "top.py" in out
     assert "in_pkg.py" not in out           # 只列一层
 
 
-def test_write_file_new_and_diff(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent.tools.files.WORKSPACE_ROOT", tmp_path)
-
+def test_write_file_new_and_diff(tmp_path):
     # 新建
-    out = _write_file("new.py", "print('v1')")
+    out = _write_file("new.py", "print('v1')", root=tmp_path)
     assert "已新建" in out
 
     # 覆盖 → 必返 diff
-    out = _write_file("new.py", "print('v2')")
+    out = _write_file("new.py", "print('v2')", root=tmp_path)
     assert "已覆盖" in out
     assert "-print('v1')" in out and "+print('v2')" in out
 
     # 内容相同 → 不写
-    assert "完全相同" in _write_file("new.py", "print('v2')")
+    assert "完全相同" in _write_file("new.py", "print('v2')", root=tmp_path)
 
 
-def test_write_file_respects_fence(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent.tools.files.WORKSPACE_ROOT", tmp_path)
+def test_write_file_respects_fence(tmp_path):
     with pytest.raises(ValueError, match="敏感"):
-        _write_file(".env", "STOLEN=1")
+        _write_file(".env", "STOLEN=1", root=tmp_path)
 
 
 # ---------- 注册与分级 ----------
 
 def test_file_tools_registered_with_levels():
+    from pathlib import Path
+
+    from agent.tools.context import ToolContext
+
     registry = ToolRegistry()
-    register_file_tools(registry)
+    register_file_tools(registry, ToolContext(notes_dir=Path("data/notes")))
     schemas = {s["function"]["name"] for s in registry.schemas()}
     assert {"read_file", "search_code", "list_dir", "write_file"} <= schemas
 

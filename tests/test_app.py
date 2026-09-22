@@ -396,12 +396,12 @@ def test_confirm_endpoint_409_without_pending_404_unknown_run():
 def test_confirm_approve_flow_end_to_end(tmp_path, monkeypatch):
     # 全链路：worker 挂起 → POST confirm(approve) → 命令真执行 → run 完成
     # 副作用验证（审计佐证思路）：看文件落没落地，不看模型嘴说
+    from agent.tools.context import ToolContext
     from agent.tools.registry import ToolRegistry
     from agent.tools.terminal import register_terminal_tools
 
-    monkeypatch.setattr("agent.tools.terminal.WORKSPACE_ROOT", tmp_path)
     registry = ToolRegistry()
-    register_terminal_tools(registry)
+    register_terminal_tools(registry, ToolContext(notes_dir=tmp_path, workspace_root=tmp_path))
     ctx = _make_ctx(llm=_confirm_llm("touch approved.txt", "已执行"), registry=registry)
     client = TestClient(create_app(ctx))
 
@@ -418,12 +418,12 @@ def test_confirm_approve_flow_end_to_end(tmp_path, monkeypatch):
 
 def test_confirm_reject_flow_end_to_end(tmp_path, monkeypatch):
     # 拒绝不炸会话：拒绝提示作为工具结果回灌，模型收尾回答，run 正常完成
+    from agent.tools.context import ToolContext
     from agent.tools.registry import ToolRegistry
     from agent.tools.terminal import register_terminal_tools
 
-    monkeypatch.setattr("agent.tools.terminal.WORKSPACE_ROOT", tmp_path)
     registry = ToolRegistry()
-    register_terminal_tools(registry)
+    register_terminal_tools(registry, ToolContext(notes_dir=tmp_path, workspace_root=tmp_path))
     ctx = _make_ctx(llm=_confirm_llm("touch pwned.txt", "好的，我换个方案"), registry=registry)
     client = TestClient(create_app(ctx))
 

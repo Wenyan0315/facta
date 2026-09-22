@@ -19,7 +19,7 @@ from agent.tools.spawn import register_spawn_tools
 # ---------- R1：读边界 ----------
 
 
-def test_read_notes_rejects_path_escape(tmp_path, monkeypatch):
+def test_read_notes_rejects_path_escape(tmp_path):
     from agent.tools.builtin import register_builtin
 
     notes = tmp_path / "notes"
@@ -38,16 +38,15 @@ def test_read_notes_rejects_path_escape(tmp_path, monkeypatch):
     assert registry.execute("read_notes", json.dumps({"filename": "ok.md"})) == "正文"
 
 
-def test_search_code_skips_env_files(tmp_path, monkeypatch):
+def test_search_code_skips_env_files(tmp_path):
     from agent.tools import files as files_mod
 
-    monkeypatch.setattr(files_mod, "WORKSPACE_ROOT", tmp_path)
     (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=sk-secret123", encoding="utf-8")
     (tmp_path / "code.py").write_text("password = 'plain-in-code'", encoding="utf-8")
 
-    out = files_mod._search_code("sk-secret123")
+    out = files_mod._search_code("sk-secret123", root=tmp_path)
     assert "没有命中" in out   # .env 内容不吐给模型
-    out2 = files_mod._search_code("plain-in-code")
+    out2 = files_mod._search_code("plain-in-code", root=tmp_path)
     assert "code.py" in out2   # 正常文件照常命中
 
 

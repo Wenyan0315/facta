@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from agent.core.llm import LLM
 from agent.core.types import Message
@@ -35,7 +36,15 @@ from agent.memory.store import Session
 from agent.orchestrator.agent import Agent
 from agent.orchestrator.loop import RunResult, run_turn
 from agent.tools.context import ToolContext
+from agent.tools.files import register_file_tools
 from agent.tools.registry import Tool, ToolRegistry
+from agent.tools.terminal import register_terminal_tools
+from agent.tools.worktree import (
+    commit_and_merge_back,
+    create_worktree,
+    discard_worktree,
+    worktree_changes,
+)
 
 # 禁止清单（程序侧硬编码，显式指定也不放行）：
 # - spawn_subagent：递归防护（子 agent 不再派子 agent，规划深度=2 层封顶）
@@ -61,6 +70,50 @@ TASK_TEMPLATE = (
 )
 
 
+def _worktree_registry(registry: ToolRegistry, ctx: ToolContext, wt: Path) -> ToolRegistry:
+    """S6a worktree 模式的子 registry：file/terminal 五件重锚 worktree，其余原样共享。
+
+    重锚=重新注册（闭包锚 wt 目录）；共享=搬运同一 Tool 对象（闭包锚主资源
+    ——知识库/待办/时钟共享是正确语义）。审计同源（registry.audit 透传），
+    S3「单一必经点」与 S5a「确认缝收口不分叉」都保持。
+    """
+    sub = ToolRegistry(audit=registry.audit)
+    wt_ctx = ToolContext(notes_dir=ctx.notes_dir, workspace_root=wt)
+    register_file_tools(sub, wt_ctx)
+    register_terminal_tools(sub, wt_ctx)
+    for name in registry.names():
+        if name not in {"read_file", "search_code", "list_dir", "write_file", "run_command"}:
+            tool = registry.get(name)
+            if tool is not None:
+                sub.register(tool)
+    return sub
+
+
+def _worktree_finalization(
+    wt: Path,
+    task: str,
+    conclusion: str,
+    confirm: Callable[[str, dict], bool] | None,
+) -> str:
+    """S6a worktree 收尾：改动经确认缝裁决——批准合回，拒绝/无通道丢弃。
+
+    保守默认与 L2 同哲学：没有眼睛就不动手（confirm 缺失 = 丢弃）。
+    """
+    changes = worktree_changes(wt)
+    if not changes:
+        discard_worktree(wt)
+        return f"{conclusion}\n〔worktree 无文件改动，沙箱已清理〕"
+    approved = confirm is not None and confirm(
+        "merge_worktree", {"task": task[:100], "changes": changes[:2000]}
+    )
+    if approved:
+        outcome = commit_and_merge_back(wt, message=f"spawn: {task.strip()[:60]}")
+    else:
+        discard_worktree(wt)
+        outcome = "用户未批准合回（或无确认通道），改动已整棵丢弃，主工作区未受影响"
+    return f"{conclusion}\n〔文件改动〕\n{changes}\n〔处理〕{outcome}"
+
+
 def spawn_subagent(
     task: str,
     *,
@@ -69,21 +122,42 @@ def spawn_subagent(
     tools: list[str] | None = None,
     max_rounds: int = DEFAULT_ROUNDS,
     confirm: Callable[[str, dict], bool] | None = None,
+    worktree: bool = False,
+    ctx: ToolContext | None = None,
 ) -> str:
     """构造子 agent + 临时会话跑一轮，只回传结论（spawn 工具的本体）。
 
     单独导出为模块级函数（不是闭包）：测试可直接调，不经 registry 菜单。
     confirm 由 registry.execute 的 receives_confirm 通道注入（见 registry.py）。
+
+    worktree（S6a）：True = 子 agent 在独立 git worktree 里干活——文件
+    改动不碰主工作区；跑完后 diff 经确认缝裁决（人审掌舵，与 make_plan
+    同一原则）：批准→commit+merge 回主分支；拒绝/无通道→整棵丢弃
+    （保守默认：没有眼睛就不动手）。需要 ctx（重锚信息：notes_dir 等）。
     """
     if not task.strip():
         return "错误：task 不能为空——说清楚要子任务做什么"
     rounds = max(1, min(int(max_rounds), MAX_ROUNDS))
 
+    if worktree and ctx is None:
+        return "错误：worktree 模式需要装配上下文（spawn 未接 ctx，检查注册路径）"
+
+    # S6a worktree 分支：先建沙箱，子 registry 重锚，跑完裁决合回/丢弃
+    wt_dir: Path | None = None
+    effective_registry = registry
+    if worktree and ctx is not None:
+        wt_dir, err = create_worktree()
+        if err:
+            return f"错误：{err}"
+        effective_registry = _worktree_registry(registry, ctx, wt_dir)
+
     # 工具子集：默认全量；显式指定 ∩ 全量；一律过禁止单
-    available = set(registry.names()) - _FORBIDDEN
+    available = set(effective_registry.names()) - _FORBIDDEN
     if tools:
         wanted = set(tools) & available
         if not wanted:
+            if wt_dir is not None:
+                discard_worktree(wt_dir)
             return (
                 f"错误：指定的工具都不在可用清单里（可用：{sorted(available)}；"
                 "spawn_subagent 与计划工具不可派给子 agent）"
@@ -94,7 +168,7 @@ def spawn_subagent(
     sub_agent = Agent(
         name="sub",
         system_prompt=TASK_TEMPLATE.format(task=task.strip()),
-        registry=registry,
+        registry=effective_registry,
         allowed_tools=frozenset(wanted),
         max_tool_rounds=rounds,
     )
@@ -112,10 +186,16 @@ def spawn_subagent(
         # should_cancel 不透传：取消等主循环下一检查点（子任务通常几轮内完成）
     )
     if result is RunResult.COMPLETED and reply is not None:
-        return reply.content or "（子任务完成，但未产出文本结论）"
-    if result is RunResult.CANCELLED:
-        return "子任务被取消，未产出结论"
-    return "子任务失败：模型不可用（可稍后重试，或由你直接执行）"
+        conclusion = reply.content or "（子任务完成，但未产出文本结论）"
+    elif result is RunResult.CANCELLED:
+        conclusion = "子任务被取消，未产出结论"
+    else:
+        conclusion = "子任务失败：模型不可用（可稍后重试，或由你直接执行）"
+
+    # S6a worktree 收尾（裁决细节在 _worktree_finalization）
+    if wt_dir is not None:
+        return _worktree_finalization(wt_dir, task, conclusion, confirm)
+    return conclusion
 
 
 def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
@@ -125,10 +205,11 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     sub_llm = ctx.llm   # 局部窄化：闭包捕获局部变量（mypy 不认跨闭包的属性窄化）
 
     def _spawn(task: str, tools: list[str] | None = None, max_rounds: int = DEFAULT_ROUNDS,
-               confirm=None) -> str:
+               worktree: bool = False, confirm=None) -> str:
         return spawn_subagent(
             task, llm=sub_llm, registry=registry,
             tools=tools, max_rounds=max_rounds, confirm=confirm,
+            worktree=worktree, ctx=ctx,
         )
 
     registry.register(Tool(
@@ -138,6 +219,8 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "（中间过程不打扰本对话）。适合检索、整理、验证类杂活，"
             "或任何「过程啰嗦但结论一句话」的工作。tools 可限定子上下文能用的工具，"
             "max_rounds 是其工具循环预算（默认 3）。注意：子上下文没有本对话的历史。"
+            "worktree=True 时子上下文在独立的 git worktree 沙箱里改文件——改动不碰"
+            "当前工作区，跑完经用户确认后合回（拒绝则整棵丢弃）。"
         ),
         parameters={
             "type": "object",
@@ -149,6 +232,7 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                     "description": "子上下文可用的工具名清单（缺省=全部可用工具）",
                 },
                 "max_rounds": {"type": "integer", "description": "工具循环预算（默认 3，上限 10）"},
+                "worktree": {"type": "boolean", "description": "是否在独立 git worktree 沙箱里执行文件改动（改代码类任务用 true；改动经确认后合回主分支）"},
             },
             "required": ["task"],
         },

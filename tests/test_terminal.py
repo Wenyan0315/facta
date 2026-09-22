@@ -118,15 +118,18 @@ def test_run_command_cwd_is_workspace_root():
 
 # ---------- registry confirm 流 ----------
 
-def _terminal_registry(audit: AuditLog | None = None) -> ToolRegistry:
+def _terminal_registry(audit: AuditLog | None = None, root=WORKSPACE_ROOT) -> ToolRegistry:
+    from pathlib import Path
+
+    from agent.tools.context import ToolContext
+
     registry = ToolRegistry(audit=audit)
-    register_terminal_tools(registry)
+    register_terminal_tools(registry, ToolContext(notes_dir=Path("data/notes"), workspace_root=root))
     return registry
 
 
-def test_confirm_rejected_never_runs(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent.tools.terminal.WORKSPACE_ROOT", tmp_path)
-    registry = _terminal_registry()
+def test_confirm_rejected_never_runs(tmp_path):
+    registry = _terminal_registry(root=tmp_path)
 
     out = registry.execute(
         "run_command", json.dumps({"command": "touch pwned.txt"}),
@@ -137,9 +140,8 @@ def test_confirm_rejected_never_runs(tmp_path, monkeypatch):
     assert not (tmp_path / "pwned.txt").exists()      # 拒绝 = 根本没执行
 
 
-def test_confirm_approved_executes(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent.tools.terminal.WORKSPACE_ROOT", tmp_path)
-    registry = _terminal_registry()
+def test_confirm_approved_executes(tmp_path):
+    registry = _terminal_registry(root=tmp_path)
 
     out = registry.execute(
         "run_command", json.dumps({"command": "touch approved.txt"}),
@@ -150,10 +152,9 @@ def test_confirm_approved_executes(tmp_path, monkeypatch):
     assert (tmp_path / "approved.txt").exists()
 
 
-def test_no_confirm_channel_defaults_to_reject(tmp_path, monkeypatch):
+def test_no_confirm_channel_defaults_to_reject(tmp_path):
     # 无 confirm 通道（on_confirm=None）→ 按拒绝：没有眼睛就不动手
-    monkeypatch.setattr("agent.tools.terminal.WORKSPACE_ROOT", tmp_path)
-    registry = _terminal_registry()
+    registry = _terminal_registry(root=tmp_path)
 
     out = registry.execute("run_command", json.dumps({"command": "touch pwned.txt"}))
 
@@ -188,10 +189,13 @@ def test_rejection_is_audited(tmp_path):
 
 def test_default_tools_unaffected_by_confirm_seam():
     # needs_confirmation=False 的既有工具：不传 confirm 也照常执行（回归）
+    from pathlib import Path
+
+    from agent.tools.context import ToolContext
     from agent.tools.files import register_file_tools
 
     registry = ToolRegistry()
-    register_file_tools(registry)
+    register_file_tools(registry, ToolContext(notes_dir=Path("data/notes")))
 
     out = registry.execute(
         "read_file", json.dumps({"path": "src/agent/paths.py", "offset": 17})
@@ -211,7 +215,6 @@ def test_run_turn_passes_confirm_through(tmp_path, monkeypatch):
     from agent.orchestrator.agent import Agent
     from agent.orchestrator.loop import RunResult, run_turn
 
-    monkeypatch.setattr("agent.tools.terminal.WORKSPACE_ROOT", tmp_path)
     llm = ScriptedLLM([
         Message(role="assistant", content="", tool_calls=[
             {"id": "c1", "name": "run_command",
@@ -219,7 +222,7 @@ def test_run_turn_passes_confirm_through(tmp_path, monkeypatch):
         ]),
         Message(role="assistant", content="好的，我换个方案"),
     ])
-    registry = _terminal_registry()
+    registry = _terminal_registry(root=tmp_path)
     agent = Agent(name="test", system_prompt="sys", registry=registry)
     session = Session()
     session.messages.append(Message(role="system", content="sys"))

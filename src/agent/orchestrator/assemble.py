@@ -32,7 +32,7 @@ from agent.knowledge.vector_store import ChromaVectorStore
 from agent.memory.store import Session, load_session
 from agent.memory.todos import TodoStore
 from agent.orchestrator.agent import Agent, build_default_agent
-from agent.paths import LEARNED_DIR, NOTES_DIR
+from agent.paths import LEARNED_DIR, NOTES_DIR, WORKSPACE_ROOT
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 
@@ -46,6 +46,7 @@ from agent.tools.spawn import register_spawn_tools
 from agent.tools.terminal import register_terminal_tools
 from agent.tools.todo import register_todo_tools
 from agent.tools.web import get_web_search, register_web_tools
+from agent.tools.worktree import cleanup_stale_worktrees
 
 # 组装层唯一真值源：CLI / Web 都从这里拿路径，不在各自入口重定义
 MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx）
@@ -120,6 +121,12 @@ def assemble(provider: str) -> AppContext:
     # 把项目根目录 .env 里的配置（API key 等）加载进环境变量
     load_dotenv()
 
+    # -1) worktree 残留回收（S6a）：上次进程被杀可能留下半截沙箱——启动即清
+    #     （「先杀进程再删文件」血案同款防线：不动运行中的，只清启动前的）
+    stale = cleanup_stale_worktrees()
+    if stale:
+        logger.info("已回收 %s 个残留 worktree（上次进程未正常退出）", stale)
+
     # 0) 账本（M7.5）：全进程一本账，LLM 与 embedding 都往里记，退出时打印
     ledger = UsageLedger()
 
@@ -192,10 +199,11 @@ def assemble(provider: str) -> AppContext:
         web=web_client,
         todos=todos,
         session=session,   # S5b：计划工具的操作载体（传 Session 对象本身，与 history 同款身份契约）
+        workspace_root=WORKSPACE_ROOT,   # S6a：主 agent 文件/终端锚点（子 agent 由 spawn 覆盖为 worktree）
     )
     register_builtin(registry, ctx)
-    register_file_tools(registry)   # S4a 文件四件：恒注册（workspace 围栏即安全边界）
-    register_terminal_tools(registry)   # S4b 终端执行：L2 确认缝裁决，白名单只读免确认
+    register_file_tools(registry, ctx)   # S4a 文件四件：恒注册（S6a 起锚点随 ctx 注入）
+    register_terminal_tools(registry, ctx)   # S4b 终端执行：L2 确认缝裁决，白名单只读免确认
     register_web_tools(registry, ctx)
     register_todo_tools(registry, todos)
     register_plan_tools(registry, ctx)   # S5b 计划三件：恒注册（无外部依赖）

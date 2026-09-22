@@ -22,3 +22,8 @@ SESSIONS_DIR = Path("data/memory/sessions")   # S1 多会话管理：历史会�
 # 用 __file__ 锚定而非 Path.cwd()——已知边界「依赖从仓库根启动」就治了一半：
 # 无论从哪个目录启动，agent 只碰得到本项目的文件（S4a 裁定：workspace=项目根）
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+
+# S6a worktree 沙箱根：子 agent 的文件改动隔离区（运行时数据，gitignore 排除）。
+# 放仓库内 data/ 下（与 memory/audit 同区）；files.py 黑名单挡住——否则
+# search_code 的 rglob 会扫进 worktree 造成同文件双重命中
+WORKTREES_DIR = WORKSPACE_ROOT / "data" / "worktrees"

@@ -20,6 +20,7 @@ import re
 from pathlib import Path
 
 from agent.paths import WORKSPACE_ROOT
+from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
 
 MAX_FILE_BYTES = 1024 * 1024      # 1MB：超限拒读拒写（防灌爆上下文/内存）
@@ -29,11 +30,14 @@ MAX_DIFF_LINES = 40               # write_file 返回的 diff 行数上限
 
 # 敏感黑名单：路径 resolve 后命中即拒（读都不行）
 _BLACKLIST_PARTS = (".env", ".git")
-_BLACKLIST_DIRS = ("data/memory", "data/audit", "data/vector_db", "servers/sandbox", ".venv")
+_BLACKLIST_DIRS = ("data/memory", "data/audit", "data/vector_db", "servers/sandbox", ".venv", "data/worktrees")   # 末项 S6a：worktree 沙箱区（search_code rglob 双扫+主 agent 读子沙箱都挡）
 
 
-def _resolve_in_workspace(path_str: str) -> Path:
+def _resolve_in_workspace(path_str: str, *, root: Path = WORKSPACE_ROOT) -> Path:
     """把用户/模型给的路径安全解析到 workspace 内；越界/敏感即 ValueError。
+
+    root（S6a 注入化）：文件锚点——主 agent = 主工作区；子 agent = worktree。
+    keyword-only 带 paths.py 默认（真值源唯一，引用传播非第二真值源）。
 
     ValueError 经 registry 变错误字符串回给模型——它可自纠（换个合法路径），
     不炸会话（与 fetch_web 栅栏同一错误通道）。
@@ -41,11 +45,11 @@ def _resolve_in_workspace(path_str: str) -> Path:
     if not path_str or not path_str.strip():
         raise ValueError("路径为空")
 
-    candidate = (WORKSPACE_ROOT / path_str).resolve()
-    if not candidate.is_relative_to(WORKSPACE_ROOT):
+    candidate = (root / path_str).resolve()
+    if not candidate.is_relative_to(root):
         raise ValueError(f"路径越界（只允许项目内相对路径）：{path_str}")
 
-    rel = candidate.relative_to(WORKSPACE_ROOT).as_posix()
+    rel = candidate.relative_to(root).as_posix()
     for part in _BLACKLIST_PARTS:
         if part in Path(rel).parts or rel.startswith(part):
             raise ValueError(f"敏感路径拒绝访问：{rel}")
@@ -55,9 +59,9 @@ def _resolve_in_workspace(path_str: str) -> Path:
     return candidate
 
 
-def _read_file(path: str, offset: int = 1, limit: int = 200) -> str:
+def _read_file(path: str, offset: int = 1, limit: int = 200, *, root: Path = WORKSPACE_ROOT) -> str:
     """读项目文件：行窗口分页（offset 从 1 起，limit 行），二进制/超 1MB 拒。"""
-    target = _resolve_in_workspace(path)
+    target = _resolve_in_workspace(path, root=root)
     if not target.is_file():
         return f"文件不存在：{path}（可用 list_dir 浏览目录）"
     if target.stat().st_size > MAX_FILE_BYTES:
@@ -79,7 +83,7 @@ def _read_file(path: str, offset: int = 1, limit: int = 200) -> str:
     return f"{path}（共 {len(lines)} 行）：\n" + text
 
 
-def _search_code(pattern: str) -> str:
+def _search_code(pattern: str, *, root: Path = WORKSPACE_ROOT) -> str:
     """grep 式代码定位：正则跨 workspace 搜文本文件，返回 文件:行号:内容。"""
     if not pattern.strip():
         return "搜索模式为空"
@@ -89,11 +93,11 @@ def _search_code(pattern: str) -> str:
         return f"正则不合法：{e}（如搜字面量请转义，如 search_code 用 'def run_turn' 不用引号）"
 
     hits: list[str] = []
-    for file in sorted(WORKSPACE_ROOT.rglob("*")):
+    for file in sorted(root.rglob("*")):
         if not file.is_file() or len(hits) >= MAX_SEARCH_HITS:
             continue
         try:
-            rel = file.relative_to(WORKSPACE_ROOT).as_posix()
+            rel = file.relative_to(root).as_posix()
             # 黑名单目录整树跳过（含 .venv 几万文件——不跳会搜到天荒地老）
             if any(rel == b or rel.startswith(b + "/") for b in _BLACKLIST_DIRS) or ".git" in file.parts:
                 continue
@@ -118,9 +122,9 @@ def _search_code(pattern: str) -> str:
     return f"命中 {len(hits)} 处：\n" + "\n".join(hits)
 
 
-def _list_dir(path: str = ".") -> str:
+def _list_dir(path: str = ".", *, root: Path = WORKSPACE_ROOT) -> str:
     """列目录一层：目录加 / 后缀，标注文件大小。"""
-    target = _resolve_in_workspace(path)
+    target = _resolve_in_workspace(path, root=root)
     if not target.is_dir():
         return f"目录不存在：{path}"
 
@@ -137,9 +141,9 @@ def _list_dir(path: str = ".") -> str:
     return f"{path}（{len(entries)} 项）：\n" + "\n".join(lines)
 
 
-def _write_file(path: str, content: str) -> str:
+def _write_file(path: str, content: str, *, root: Path = WORKSPACE_ROOT) -> str:
     """写项目文件（新建或覆盖）。覆盖时返回 diff 摘要——改了什么一眼可见。"""
-    target = _resolve_in_workspace(path)
+    target = _resolve_in_workspace(path, root=root)
     if target.exists() and not target.is_file():
         return f"目标不是普通文件：{path}"
     if len(content.encode("utf-8")) > MAX_FILE_BYTES:
@@ -174,8 +178,13 @@ def _write_file(path: str, content: str) -> str:
     return f"已{action} {path}（{len(content)} 字）{diff_note}"
 
 
-def register_file_tools(registry: ToolRegistry) -> None:
-    """注册文件四件。恒注册（无外部依赖）——workspace 围栏即安全边界。"""
+def register_file_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
+    """注册文件四件。恒注册（无外部依赖）——workspace 围栏即安全边界。
+
+    S6a 注入化：锚点从 ctx 取（闭包捕获）——主 agent = 主工作区；
+    spawn 子 agent = worktree 目录。锚点跟着 ctx 走，无全局态。
+    """
+    root = ctx.workspace_root   # 闭包捕获（非循环变量，无 B023 风险）
     registry.register(Tool(
         name="read_file",
         description="读取项目工作区里的文件（代码/文档/配置），按行窗口分页。先 search_code 定位或 list_dir 浏览，再读目标文件。",
@@ -188,7 +197,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
             },
             "required": ["path"],
         },
-        func=lambda path, offset=1, limit=200: _read_file(path, int(offset), int(limit)),
+        func=lambda path, offset=1, limit=200: _read_file(path, int(offset), int(limit), root=root),
         is_readonly=True,
     ))
     registry.register(Tool(
@@ -201,7 +210,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
             },
             "required": ["pattern"],
         },
-        func=_search_code,
+        func=lambda pattern: _search_code(pattern, root=root),
         is_readonly=True,
     ))
     registry.register(Tool(
@@ -214,7 +223,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
             },
             "required": [],
         },
-        func=lambda path=".": _list_dir(path),
+        func=lambda path=".": _list_dir(path, root=root),
         is_readonly=True,
     ))
     registry.register(Tool(
@@ -228,5 +237,5 @@ def register_file_tools(registry: ToolRegistry) -> None:
             },
             "required": ["path", "content"],
         },
-        func=_write_file,
+        func=lambda path, content: _write_file(path, content, root=root),
     ))

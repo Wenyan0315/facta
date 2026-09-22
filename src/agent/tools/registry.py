@@ -109,6 +109,16 @@ class ToolRegistry:
         """当前已登记的工具名清单（给外部展示用）。"""
         return list(self._tools.keys())
 
+    @property
+    def audit(self) -> AuditLog | None:
+        """审计实例（只读暴露——S6a 子 registry 构造需审计同源收口）。"""
+        return self._audit
+
+    def get(self, name: str) -> Tool | None:
+        """取工具对象（S6a 子 registry 搬运用——同一 Tool 对象可注册进
+        多个 registry，闭包锚定的资源（kb/todos 等）随之共享）。"""
+        return self._tools.get(name)
+
     def tool_descriptions(self) -> dict[str, str]:
         """名字→说明书（M10 场景路由的 criteria 原料——Jev 按语义选工具，
         description 本来就是给模型看的使用说明书，直接复用）。"""

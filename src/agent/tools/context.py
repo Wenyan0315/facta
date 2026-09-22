@@ -29,6 +29,7 @@ from agent.core.llm import LLM
 from agent.core.types import Message
 from agent.knowledge.knowledge_base import KnowledgeBase
 from agent.memory.store import Session
+from agent.paths import WORKSPACE_ROOT
 
 if TYPE_CHECKING:
     from agent.memory.todos import TodoStore
@@ -61,3 +62,9 @@ class ToolContext:
     web: WebSearchClient | None = None   # 联网搜索 client（2026-09-16）：None=web 工具不上菜单
     todos: TodoStore | None = None       # 待办仓库（2026-09-17）：None=待办工具不上菜单
     session: Session | None = None       # 会话状态（S5b）：None=计划工具不上菜单（测试最小装配）
+    # 文件/终端锚点（S6a）：主 agent = 主工作区；spawn 的子 agent = worktree 目录
+    # （同一 registry 实例上闭包随 ctx 切换，S6b 并行时各 ctx 各锚点无全局态）。
+    # 允许默认值（与 notes_dir 不同判据）：主值是项目常量，真值源唯一在
+    # paths.py——这里是引用传播，不是第二真值源；notes_dir 禁默认是因为
+    # 它因环境而异必须组装层拍板。子 agent 覆盖时必显式。
+    workspace_root: Path = WORKSPACE_ROOT
