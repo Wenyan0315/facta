@@ -227,16 +227,21 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
                 last = int(raw_last)
             except ValueError:
                 last = 0
-            for ev in list(run.events):
-                if ev.seq > last:
-                    yield encode_sse(run.run_id, ev)
-                    last = ev.seq   # 更新哨兵，防实时段重复发
-
-            # 实时读：阻塞 + 心跳保活；None 哨兵 = Run 结束。
-            # 广播模型（评审修复轮）：每连接独立队列；断开必须退订
-            # （finally 兜底——客户端断连时 generator 被 close，此处清理）
+            # 先订阅再快照（顺序是竞态修复）：旧序（先 list 再 subscribe）在
+            # 两步间隙里有终态事件 emit 时——重放段没它、实时段只收到 None
+            # 哨兵，run.completed 丢失（CI 偶发踩中，本地几百次不遇的窗口）。
+            # 新序：subscribe 后到达的事件必进 q；快照可能含重复（也进了 q），
+            # 靠 ev.seq <= last 去重——窗口消失。
             q = run.subscribe()
             try:
+                for ev in list(run.events):
+                    if ev.seq > last:
+                        yield encode_sse(run.run_id, ev)
+                        last = ev.seq   # 更新哨兵，防实时段重复发
+
+                # 实时读：阻塞 + 心跳保活；None 哨兵 = Run 结束。
+                # 广播模型（评审修复轮）：每连接独立队列；断开必须退订
+                # （finally 兜底——客户端断连时 generator 被 close，此处清理）
                 while True:
                     try:
                         ev = q.get(timeout=_HEARTBEAT_SECONDS)
