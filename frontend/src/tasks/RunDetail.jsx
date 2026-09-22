@@ -79,10 +79,13 @@ export default function RunDetail({ runId }) {
       }
     };
     // SSE 端点每类型一个 addEventListener（EventSource 只默认收 message
-    // 类型——服务端 encode_sse 用事件名编码，需逐类型订阅）
+    // 类型——服务端 encode_sse 用事件名编码，需逐类型订阅）。
+    // 契约修正（评审修复轮）：服务端 _EVENT_MAP 把内核下划线事件映射为
+    // 点分（tool_started→tool.started）——此前订阅下划线版导致 tool 事件
+    // 全收不到（v1 未渲染工具时间线所以潜伏未暴露）
     const TYPES = [
       "plan.created", "plan.revised", "plan.step_updated", "plan.finished",
-      "tool_started", "tool_result", "run.completed", "run.failed", "run.cancelled",
+      "tool.started", "tool.result", "run.completed", "run.failed", "run.cancelled",
     ];
     TYPES.forEach((t) => es.addEventListener(t, onEvent));
     es.onerror = () => {

@@ -42,7 +42,13 @@ from agent.tools.registry import Tool, ToolRegistry
 # - 计划三件：分派语义是「主 agent 已规划好，子 agent 执行」；子 agent 再
 #   规划=规划套规划，主 plan 事件流被稀释（挂触发信号：真实使用出现
 #   「子任务本身够复杂需要二级计划」再开，届时 S6 编排也该上了）
-_FORBIDDEN = frozenset({"spawn_subagent", "make_plan", "update_plan_step", "finish_plan"})
+# - 历史两件（评审修复轮）：search_history/read_history 的闭包绑着【父会话】
+#   messages——默认子集含它们=「子上下文看不到本对话」的 prompt 承诺被
+#   工具层击穿（子 agent 能检索父会话全部内容，噪声隔离反向泄漏）
+_FORBIDDEN = frozenset({
+    "spawn_subagent", "make_plan", "update_plan_step", "finish_plan",
+    "search_history", "read_history",
+})
 
 DEFAULT_ROUNDS = 3
 MAX_ROUNDS = 10

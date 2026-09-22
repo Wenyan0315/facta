@@ -17,24 +17,33 @@ from agent.server.run_store import (
 
 
 def test_emit_increments_seq_and_pushes_to_subscriber():
+    # 广播模型（评审修复轮）：subscribe 只收订阅后的事件——历史事件在
+    # run.events 列表里，由 SSE 端点单独重放。单队列时代的旧测试在 emit
+    # 后才 subscribe，队列空 → get() 永久阻塞（全套 pytest 挂起的根因）。
     run = Run(run_id="r1")
-    e1 = run.emit("run.started")
+    q = run.subscribe()          # 先订阅
+    e1 = run.emit("run.started") # 再 emit → 广播进队列
     e2 = run.emit("text.delta", {"delta": "你好"})
 
     assert [e1.seq, e2.seq] == [1, 2]
     assert run.events == [e1, e2]
     # 订阅者可依序读回同一条事件（对象身份一致）
-    assert run.subscribe().get() is e1
-    assert run.subscribe().get() is e2
+    assert q.get(timeout=1) is e1
+    assert q.get(timeout=1) is e2
 
 
 def test_finish_emits_terminal_event_then_sentinel():
     run = Run(run_id="r1")
-    run.finish(STATUS_COMPLETED)
+    q = run.subscribe()              # 先订阅
+    run.finish(STATUS_COMPLETED)    # finish 广播 run.completed + None 哨兵
 
     assert run.status == STATUS_COMPLETED
-    assert run.subscribe().get().type == "run.completed"   # 终态事件先进流
-    assert run.subscribe().get() is None                   # 再哨兵：流结束
+    assert q.get(timeout=1).type == "run.completed"   # 终态事件先进流
+    assert q.get(timeout=1) is None                   # 再哨兵：流结束
+
+    # 晚到的订阅者（终态后才连）：subscribe 补发哨兵（评审修复轮修复）
+    late = run.subscribe()
+    assert late.get(timeout=1) is None
 
     # 单一终态不变量：终态后再 finish 不覆盖、不再发事件
     run.finish(STATUS_CANCELLED)

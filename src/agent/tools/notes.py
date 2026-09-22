@@ -54,9 +54,19 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         return "知识库笔记清单：\n" + "\n".join(f"- {f.name}" for f in files)
 
     def read_notes(filename: str) -> str:
-        """读取知识库目录下的指定笔记文件。"""
+        """读取知识库目录下的指定笔记文件。
+
+        越界读修复（评审修复轮）：与 write_note 同款防线——resolve 后必须
+        落在 notes_dir 内。此前裸拼接，`../../.env` 可越界读密钥——
+        写有三重防线、读裸奔的「防御不对称」被外部评审坐实。
+        """
+        path = (ctx.notes_dir / filename).resolve()
+        if not path.is_relative_to(ctx.notes_dir.resolve()):
+            return f"拒绝：文件名越界（只允许知识库内的笔记名）：{filename}"
+        if path.suffix != ".md":
+            return "拒绝：只允许读取 .md 笔记"
         try:
-            with open(ctx.notes_dir / filename, encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError:
             return f"知识库里没有 {filename} 这个笔记。"

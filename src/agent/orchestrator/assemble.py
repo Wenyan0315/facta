@@ -139,7 +139,16 @@ def assemble(provider: str) -> AppContext:
     #        内部调用的（提示词, 回复）进缓存池有串味路径，且内部 prompt
     #        几乎不可能命中 0.92 阈值（白付 embed）
     internal_llm = get_llm(provider, ledger)
-    llm = SemanticCacheLLM(internal_llm, embedder, ledger)
+    # 语义缓存默认关闭（评审修复轮）：它只比最后一条 user 消息，忽略历史/
+    # system/计划——「继续」在不同任务里含义完全不同，外部评审探针实证了
+    # 跨上下文串味；M10 direct 路由把纯聊天送进 tools=None 命中区后风险
+    # 被进一步放大。先保证「回答的是当前任务」，再谈省调用。
+    # 精确缓存（完整输入哈希）不受影响仍在 RobustLLM 内生效。
+    # CORTEX_SEMANTIC_CACHE=1 显式开启（无状态 FAQ 场景）
+    llm: LLM = internal_llm   # 标注基类：if/else 两分支类型不同，mypy 不自动合并
+    if os.environ.get("CORTEX_SEMANTIC_CACHE"):
+        llm = SemanticCacheLLM(internal_llm, embedder, ledger)
+        logger.info("语义缓存：已开启（实验性，注意跨上下文串味风险）")
     logger.info("当前模型：%s", provider)
 
     # 3) 知识库（M7）：组装 embedder + store，索引走增量同步——

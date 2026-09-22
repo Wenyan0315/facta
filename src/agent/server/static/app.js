@@ -23,13 +23,25 @@ function escapeHtml(s) {
 
 // ---- Markdown 渲染 ----
 // 流式中用 textContent（快，pre-wrap 保换行）；终态渲染一次 md。
-// 只渲染 assistant 消息（内容来自自家模型）；用户输入与工具结果永远
-// textContent——不可信内容不进 innerHTML（注入防线）。
+// 用户输入与工具结果永远 textContent——不可信内容不进 innerHTML。
+// XSS 修复（评审修复轮）：assistant 消息同样是不可信内容（模型可能复述
+// 外部网页/用户输入里的恶意 HTML——assistant 身份≠内容安全）。两道防线：
+// ① escape-before-parse：HTML 标签全部变文本（md 语法不受影响），
+//    script/onerror 注入面结构性消失；② 渲染后 <a> 协议白名单，
+//    挡 javascript: 链接（escape 不影响 href 内容）。零新依赖。
 if (window.marked) marked.setOptions({ gfm: true, breaks: true });
+
+function sanitizeLinks(el) {
+  el.querySelectorAll("a[href]").forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    if (!/^(https?:|mailto:|#)/i.test(href)) a.removeAttribute("href");
+  });
+}
 
 function renderMarkdown(el, text) {
   if (window.marked && text) {
-    el.innerHTML = marked.parse(text);
+    el.innerHTML = marked.parse(escapeHtml(text));
+    sanitizeLinks(el);
     el.classList.add("md-rendered");   // 关掉 pre-wrap：换行交给 md 的 <br>
   } else el.textContent = text || "";
 }

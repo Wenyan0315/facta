@@ -97,6 +97,12 @@ def _search_code(pattern: str) -> str:
             # 黑名单目录整树跳过（含 .venv 几万文件——不跳会搜到天荒地老）
             if any(rel == b or rel.startswith(b + "/") for b in _BLACKLIST_DIRS) or ".git" in file.parts:
                 continue
+            # 敏感文件跳过（评审修复轮）：.env 等文件级黑名单此前只挡
+            # read_file 的路径解析，search_code 直接 rglob 绕过了它——
+            # 密钥文件的内容会随命中行吐给模型。与 _resolve_in_workspace
+            # 的 _BLACKLIST_PARTS 同一清单（不 import 那个函数：解析语义不同）
+            if any(part in _BLACKLIST_PARTS for part in Path(rel).parts) or rel.startswith(".env"):
+                continue
             if file.stat().st_size > MAX_FILE_BYTES:
                 continue
             text = file.read_text(encoding="utf-8")

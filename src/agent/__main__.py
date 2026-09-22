@@ -11,6 +11,7 @@ import sys
 
 from agent.cli import EXIT_NEW, run_chat
 from agent.memory.consolidate import consolidate
+from agent.memory.plan import PlanBoard
 from agent.memory.store import archive_session, derive_title, save_session
 from agent.memory.title import summarize_title
 from agent.orchestrator.assemble import MEMORY_PATH, assemble, ensure_persona
@@ -71,6 +72,7 @@ def main() -> None:
             session.summary = None
             session.summarized_upto = 1
             session.title = None
+            session.plan = PlanBoard()   # 评审修复轮：与 Web 同修——旧计划不泄进新会话
             ensure_persona(session, agent)   # clear 连 system 一起清——补种，新 active 落盘即带人设（与 Web 同款修复）
             save_session(session, MEMORY_PATH)   # active 立即反映为新空会话
             print(f"已归档「{title}」→ {archived.name}，新会话开始")

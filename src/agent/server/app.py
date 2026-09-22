@@ -26,6 +26,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 from agent.memory.consolidate import CATEGORIES, consolidate
 from agent.memory.learned import delete_line, read_learned, update_line
+from agent.memory.plan import PlanBoard
 from agent.memory.store import (
     archive_session,
     derive_title,
@@ -159,7 +160,11 @@ def _archive_current(ctx: AppContext) -> bool:
     """
     if not any(m.role == "user" for m in ctx.session.messages):
         return False
-    ctx.session.title = summarize_title(ctx.session, ctx.internal_llm) or derive_title(ctx.session)
+    # 手工名优先（评审修复轮）：title 非空=用户 rename 过（或上次归档已提炼）
+    # ——不再重新生成。此前无条件覆盖，用户整理的名称被 LLM 重新提炼顶掉
+    # （「自动生成用于填空，不覆盖用户主动编辑」——计划名/记忆标签同此原则）
+    if ctx.session.title is None:
+        ctx.session.title = summarize_title(ctx.session, ctx.internal_llm) or derive_title(ctx.session)
     save_session(ctx.session, MEMORY_PATH)
     consolidate(ctx.session, ctx.internal_llm, LEARNED_DIR, since=0)   # v1 简化：全量复盘
     archive_session(MEMORY_PATH, SESSIONS_DIR)
@@ -167,6 +172,7 @@ def _archive_current(ctx: AppContext) -> bool:
     ctx.session.summary = None
     ctx.session.summarized_upto = 1
     ctx.session.title = None
+    ctx.session.plan = PlanBoard()   # 评审修复轮：旧任务的活跃计划不随 /new 清空——泄进新会话投影（CLI /new 同修）
     ensure_persona(ctx.session, ctx.agent)   # 清空连 system 一起清了——第二场会话前必须补种，否则裸会话（语言/画像/政策全失效）
     save_session(ctx.session, MEMORY_PATH)   # 收尾落盘（与 CLI /new 同款）：active 立即反映为新空会话——不落盘则磁盘残留旧会话，服务被杀后重启会「复活」已归档对话
     return True
@@ -187,6 +193,7 @@ def _switch_session(ctx: AppContext, archive_path) -> None:
     ctx.session.summary = restored.summary
     ctx.session.summarized_upto = restored.summarized_upto
     ctx.session.title = restored.title
+    ctx.session.plan = restored.plan   # 评审修复轮：换血漏了 plan——归档文件里明明存着（S5b 序列化），恢复时却被丢弃
     # 旧归档可能无 system（人设保证上线前的文件）——幂等补插+游标对齐
     ensure_persona(ctx.session, ctx.agent)
 
@@ -225,19 +232,24 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
                     yield encode_sse(run.run_id, ev)
                     last = ev.seq   # 更新哨兵，防实时段重复发
 
-            # 实时读：阻塞 + 心跳保活；None 哨兵 = Run 结束
+            # 实时读：阻塞 + 心跳保活；None 哨兵 = Run 结束。
+            # 广播模型（评审修复轮）：每连接独立队列；断开必须退订
+            # （finally 兜底——客户端断连时 generator 被 close，此处清理）
             q = run.subscribe()
-            while True:
-                try:
-                    ev = q.get(timeout=_HEARTBEAT_SECONDS)
-                except queue.Empty:
-                    yield encode_heartbeat()
-                    continue
-                if ev is None:
-                    break
-                if ev.seq <= last:   # 重放段已发过，去重
-                    continue
-                yield encode_sse(run.run_id, ev)
+            try:
+                while True:
+                    try:
+                        ev = q.get(timeout=_HEARTBEAT_SECONDS)
+                    except queue.Empty:
+                        yield encode_heartbeat()
+                        continue
+                    if ev is None:
+                        break
+                    if ev.seq <= last:   # 重放段已发过，去重
+                        continue
+                    yield encode_sse(run.run_id, ev)
+            finally:
+                run.unsubscribe(q)
 
         return StreamingResponse(
             gen(),

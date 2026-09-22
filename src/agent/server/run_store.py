@@ -64,7 +64,7 @@ class Run:
     events: list[RunEvent] = field(default_factory=list)
     cancel_requested: bool = False
     confirm_pending: bool = False   # S4b：是否正挂着一个待裁决的 L2 确认（confirm 端点判据）
-    _queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
+    _subscribers: list = field(default_factory=list, repr=False)   # 广播模型（评审修复轮）：每连接独立队列——此前单队列，聊天页+任务页同时订阅同一 Run 时事件被随机分食（竞争消费）
     _seq: int = 0
     _confirm_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _confirm_decision: bool | None = field(default=None, repr=False)
@@ -74,26 +74,43 @@ class Run:
         return self._seq
 
     def emit(self, type: str, data: dict | None = None) -> RunEvent:
-        """记录一条事件并推送给订阅者（append-only，seq 自增）。"""
+        """记录一条事件并广播给所有订阅者（append-only，seq 自增）。"""
         event = RunEvent(seq=self._next_seq(), type=type, data=data or {})
         self.events.append(event)
-        self._queue.put(event)
+        for q in self._subscribers:
+            q.put(event)
         return event
 
     def subscribe(self) -> queue.Queue:
-        """订阅者从这里阻塞读事件；最终会读到 None 哨兵表示流结束。"""
-        return self._queue
+        """新订阅者获得独立队列（广播模型）；断开时必须 unsubscribe 防泄漏。
+
+        终态补发哨兵：Run 已结束时才连接的订阅者错过了已广播的 None——
+        单队列时代靠积压天然送达，广播模型必须显式补（否则流永不收口，
+        晚到的客户端死等心跳——TestClient 挂起事故的根因）。重放段已含
+        run.completed 终态事件，补发哨兵后流可正常结束。
+        """
+        q: queue.Queue = queue.Queue()
+        self._subscribers.append(q)
+        if self.status in _TERMINAL:
+            q.put(None)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        """SSE 连接断开时退订（generator finally 调用）；不退则队列引用滞留。"""
+        if q in self._subscribers:
+            self._subscribers.remove(q)
 
     def finish(self, status: str) -> None:
-        """推进到终态并通知订阅者结束。只有一个终态——重复调用不覆盖。
+        """推进到终态并通知所有订阅者结束。只有一个终态——重复调用不覆盖。
 
         终态事件（run.completed/failed/cancelled）也进事件流：客户端靠它渲染
         最终结果，不能只靠「流断了」来推断成功还是失败。
         """
         if self.status not in _TERMINAL:
             self.status = status
-            self.emit(f"run.{status}", {})   # 终态事件先进流
-            self._queue.put(None)            # 再 sentinel 结束流（只在首次终态推进时发一次）
+            self.emit(f"run.{status}", {})   # 终态事件先进流（广播给全部订阅者）
+            for q in list(self._subscribers):
+                q.put(None)            # 再 sentinel 结束流（只在首次终态推进时发一次）
 
     def request_cancel(self) -> bool:
         """请求取消：只在尚未终态时有效，终态后取消是无效操作。"""
