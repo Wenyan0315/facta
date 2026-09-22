@@ -144,3 +144,160 @@ ExecutionContext
 未运行完整 Web 集成、全量测试或真实模型评估；部分依赖缺失，未联网安装。
 
 **一句话建议：保留现在的单体结构，把下一阶段主题定为“执行隔离、状态一致性和结果验证”，比再增加几个 Agent 能力更有价值。**
+
+
+-----
+
+**还有。三个视角共同指向一个问题：功能已经比较丰富，但功能之间的衔接还不够完整，用户容易在跳页、恢复任务、编辑内容这些日常操作中遇到断点。**
+
+这一轮重点看了开发流程、产品流程和前端交互，不重复上一轮的架构问题。以下基于代码核查，尚未做浏览器视觉和可用性实测。
+
+## 一、研发工程师：让项目“容易启动、容易调试、容易安全修改”
+
+### 1. 做一条真正独立的离线上手路径
+
+当前假模型模式仍会装配远程 MCP，而附件默认启用了远程 Context7。新人即使不调用真实模型，启动过程仍可能被网络和外部服务影响。
+
+建议把启动方式明确分成三档：
+- **离线体验**：假模型＋本地工具，不需要密钥和网络。
+- **真实模型体验**：只配置模型即可。
+- **扩展工具体验**：按需开启 MCP，不与基础启动绑定。
+
+验收标准：禁网、无密钥的新环境，也能完成一次“提出任务→调用本地工具→返回结果”。
+
+证据：[assemble.py](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/src/agent/orchestrator/assemble.py#L195-L203)。
+
+### 2. 前后端接口需要共同验证的契约
+
+发现一个具体问题：后端发送 `tool.started/tool.result`，任务页监听的却是 `tool_started/tool_result`。代码各自看起来没问题，接起来就收不到对应事件。
+
+建议：
+- 统一事件名称、字段和版本定义。
+- 用后端生成的真实事件样本测试前端消费逻辑。
+- 在已有 Python CI 基础上，补前端构建和关键事件回归。
+
+不必马上全面迁移 TypeScript；先让“后端发什么，前端确实收得到”进入自动测试。
+
+证据：[后端事件编码](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/src/agent/server/app.py#L54-L60)、[前端订阅](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/frontend/src/tasks/RunDetail.jsx#L83-L87)。
+
+### 3. 列表对象需要稳定身份，不能把行号当身份
+
+记忆条目以文件行号作为组件 key，但编辑草稿、删除确认状态保存在组件内部。删除前面的条目后，后续行号移动，状态可能被另一条内容继承。
+
+建议给记忆条目稳定 ID，将“内容身份”和“文件存储位置”分开。
+
+最有价值的回归用例是：**编辑第二条时删除第一条，第二条的草稿不能跑到第三条上。**这类交叉操作，比继续补正常路径测试更能发现实际问题。
+
+证据：[memory/App.jsx](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/frontend/src/memory/App.jsx#L100-L112)。
+
+## 二、产品经理：让用户“知道怎么开始、随时接得回来、相信修改会保留”
+
+### 1. 第一屏应该引导完成一个成功任务，而不是展示能力清单
+
+项目定位是“从零搭建 Agent”，因此首次体验最重要的不是告诉用户支持多少工具，而是让他看懂一次完整运行。
+
+建议提供一条无需外部配置的示例任务，展示：
+
+```text
+用户提出目标 → Agent 选择工具 → 展示执行结果 → 用户检查结果
+```
+
+同时清楚区分“体验模式”和“真实模型模式”，避免用户把假模型效果误认为项目能力上限。
+
+教学解释可以渐进展开；不要把里程碑、底层配置和所有工具都塞进首次体验。
+
+### 2. 用户离开页面后，应该还能接管原任务
+
+当前从聊天页进入任务页再返回，聊天页没有主动找回正在运行的 Run。后台任务可能还在执行，前台却失去了对应的取消或待确认入口；再次发送又会被后端拒绝。
+
+建议把“接回当前任务”作为明确产品能力：
+- 刷新、跳页后自动恢复正在运行的任务。
+- 等待确认时恢复同一个确认请求。
+- 断网显示“连接中断，任务状态待确认”，不要表现得像任务已结束。
+- 始终提供“查看当前任务”的入口。
+
+验收不只是页面能打开，而是：**等待确认时跳页再回来，仍然可以拒绝或取消同一个任务。**
+
+证据：[聊天页初始化](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/src/agent/server/static/app.js#L518-L521)。
+
+### 3. 用户手工整理的内容，要比自动生成更优先
+
+目前用户重命名会话后，归档逻辑仍会重新生成标题，覆盖手工名称。
+
+这会让用户觉得“我整理了也没用”。
+
+建议明确一条产品规则：**自动生成用于填空，不覆盖用户主动编辑。**会话标题如此，后续计划名称、记忆标签也应遵循同样原则。
+
+验收：重命名→新建会话→切回→再次归档，名称始终保留。
+
+证据：[归档标题逻辑](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/src/agent/server/app.py#L160-L165)。
+
+### 4. 不知道的状态，不要展示成确定结论
+
+任务页连接事件流失败后，会落入“本次运行没有计划”的提示。但“没拿到计划”和“没有计划”是两回事。
+
+建议至少区分：
+- 正在获取；
+- 暂时断开，等待恢复；
+- 已确认没有计划；
+- 已有计划。
+
+这类文案不是小修饰，它决定用户会不会沿错误方向排查。
+
+证据：[RunDetail.jsx](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/frontend/src/tasks/RunDetail.jsx#L88-L101)。
+
+## 三、UED 设计师：让用户“找得到操作、掌握阅读节奏、理解确认后果”
+
+### 1. 核心操作不能依赖鼠标悬停
+
+当前部分会话、记忆操作只在 hover 时显示；任务展开和会话切换也存在仅绑定点击的非按钮元素。
+
+建议：
+- 核心操作保持可发现，次要操作收进“更多”菜单。
+- 展开、切换等操作使用原生按钮。
+- 提供清晰的键盘焦点与展开状态。
+- 触屏场景不能依赖 hover 才出现入口。
+
+验收：只用 Tab、Enter、Space，就能切换会话、展开任务、编辑和删除记忆。
+
+证据：[任务条目](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/frontend/src/tasks/App.jsx#L22-L35)、[操作按钮样式](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/src/agent/server/static/style.css#L88-L96)。
+
+### 2. 确认弹层需要真正接管交互，并区分两种取消
+
+当前确认层只是显示出来，没有完整的焦点移入、背景隔离和焦点恢复；全局 Escape 又会取消整轮运行。
+
+建议：
+- 使用真正的模态交互，打开后焦点进入弹层。
+- 明确区分“拒绝这次操作”和“取消整个任务”。
+- 将“要做什么、影响哪些资源”放在主要位置，原始参数作为详情展开。
+- Escape 的行为明确且只触发一次，不与全局取消叠加。
+
+验收：不使用鼠标也能完成批准或拒绝，且不会误取消整个任务。
+
+证据：[确认层结构](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/src/agent/server/static/index.html#L37-L48)、[交互处理](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/src/agent/server/static/app.js#L103-L121)。
+
+### 3. 流式输出不能抢走用户的阅读位置
+
+当前每次流式渲染和新增工具卡片都会滚到底部。用户想回看上面的代码或依据时，会被持续拉回最新位置。
+
+建议：
+- 用户本来就在底部时，自动跟随。
+- 用户向上滚动后，停止跟随。
+- 展示“有新内容／回到最新”按钮，由用户恢复跟随。
+- 文本和工具卡片遵循同一规则。
+
+这比先换配色、圆角或动效更值得投入，因为它直接影响长任务能不能看得下去。
+
+证据：[流式渲染与滚动](file:///Users/eleme/SQL/output/cortex_arch_review_upload3/utf8_extracted/cortex-from-scratch-main/src/agent/server/static/app.js#L37-L45)。
+
+## 四、如果只安排一轮迭代
+
+建议把三个角色的工作合成三个可验收的小闭环：
+
+| 优先级 | 交付目标 | 验收标准 |
+|---|---|---|
+| 1 | 任务随时接得回来 | 刷新、跳页、断网恢复后，仍能查看、确认和取消同一任务 |
+| 2 | 用户修改不串、不丢 | 记忆删除不迁移编辑状态，会话手工标题不被覆盖 |
+| 3 | 新人离线完成首个任务 | 无密钥、禁网可运行，工具事件正确展示，阅读位置不被抢走 |
+
+**研发侧先补契约，产品侧先补流程，UED 侧先补控制感。暂时不用重写整个前端，也不需要继续增加多 Agent、拖拽编排或复杂基础设施。**
