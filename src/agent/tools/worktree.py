@@ -91,7 +91,13 @@ def commit_and_merge_back(wt: Path, message: str) -> str:
     code_c, out_c = _git("add", "-A", cwd=wt)
     if code_c != 0:
         return f"staging 失败：{out_c}"
-    code_c, out_c = _git("commit", "-m", message, cwd=wt)
+    # commit 身份显式带（CI runner 无全局 git 配置会 commit 失败——
+    # 本地全绿 CI 红的坑）；且语义正确：spawn 的 commit 本就是 agent 干的，
+    # 归属标注清楚（不覆盖用户主分支上自己的 commit 身份）
+    code_c, out_c = _git(
+        "-c", "user.name=cortex-agent", "-c", "user.email=agent@cortex.local",
+        "commit", "-m", message, cwd=wt,
+    )
     if code_c != 0:
         return f"commit 失败：{out_c}（改动仍在 worktree：{wt}）"
 

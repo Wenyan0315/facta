@@ -165,9 +165,9 @@ def test_spawn_worktree_isolation_and_merge(git_repo):
     assert "merge_worktree" in confirms
     # 主分支拿到改动
     assert (git_repo / "feat.py").exists()
-    # 沙箱清干净
-    from agent.paths import WORKTREES_DIR
-    assert not any(WORKTREES_DIR.iterdir())
+    # 沙箱清干净（读 patch 后的 WORKTREES_DIR；目录可能整个不存在=更干净）
+    from agent.tools.worktree import WORKTREES_DIR
+    assert not WORKTREES_DIR.exists() or not any(WORKTREES_DIR.iterdir())
     # 主底片只有 spawn 结论一条 tool 消息（噪声隔离保持）
     tool_msgs = [m for m in session.messages if m.role == "tool"]
     assert len(tool_msgs) == 1
@@ -197,8 +197,8 @@ def test_spawn_worktree_reject_discards(git_repo):
 
     assert not (git_repo / "pwn.py").exists()
     assert _git_status(git_repo) == ""
-    from agent.paths import WORKTREES_DIR
-    assert not any(WORKTREES_DIR.iterdir())
+    from agent.tools.worktree import WORKTREES_DIR
+    assert not WORKTREES_DIR.exists() or not any(WORKTREES_DIR.iterdir())
 
 
 def test_spawn_worktree_no_changes_cleans_up(git_repo):
@@ -219,8 +219,8 @@ def test_spawn_worktree_no_changes_cleans_up(git_repo):
     run_turn(session, "看", agent=agent, llm=main_llm,
              on_confirm=lambda name, args: True)
 
-    from agent.paths import WORKTREES_DIR
-    assert not any(WORKTREES_DIR.iterdir())
+    from agent.tools.worktree import WORKTREES_DIR
+    assert not WORKTREES_DIR.exists() or not any(WORKTREES_DIR.iterdir())
     tool_msgs = [m for m in session.messages if m.role == "tool"]
     assert "无文件改动" in tool_msgs[0].content
 
