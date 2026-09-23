@@ -14,4 +14,8 @@
 
 - **验收**：pytest 400 passed（+6：自动回写 done/failed + 无计划/bad id/已终态拒绝 + 子 agent 权限）；冒烟回归 4 条全过（spawn_subagent 外部契约不动，spawn_step 是新增）；ruff/mypy/CI 全绿。
 
+- **实机验收两发现（2026-09-23，真模型 deepseek-flash + Jev + 浏览器）**：
+  - **发现 A——模型引导力**：Jev 正确路由 `single_tool → make_plan`、确认缝/拆解/回写全通，但用户明说「派子任务执行」模型仍选择自己做+手动回写（S6c 前的手工桥行为）。处置：make_plan 回灌文案补中性引导（`f0323fc`）——「步骤可自己做，也可 spawn_step 派出去」，掌舵权归模型（简单步骤自己干是合法选择，引导不强制）。
+  - **发现 B——DSML 泄漏（真 bug，挂已知问题活清单）**：模型在 max_rounds 边缘轮想调 finish_plan，吐出 DeepSeek 内部函数调用格式裸文本（`<｜｜DSML｜｜ calls>...`），未解析成 tool_calls 并入 content——计划全终态但收官声明丢，保险丝兜底不崩。与 Qwen thinking 通道/Gemma 空 content 同族（模型输出格式泄漏，ScriptedLLM 测不出——实机验收是唯一能抓这类 bug 的门）。
+
 - **S6 全站收官状态**：S6a 隔离（worktree）→ S6b 并发（并行 spawn）→ S6c 编排（plan 驱动 spawn）。三站拼齐「多 agent 协作」的最小闭环：拆（make_plan）→ 派（spawn_step 绑定步骤）→ 隔离（worktree）→ 并发（裸 spawn 并行）→ 汇总（finish_plan）。技能包格式（skill package）与跨进程（崩溃域隔离）仍挂触发信号，未在本轮。
