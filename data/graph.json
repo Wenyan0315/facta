@@ -1,0 +1,409 @@
+{
+  "nodes": [
+    {
+      "id": "Agent",
+      "type": "概念",
+      "aliases": [
+        "agent"
+      ]
+    },
+    {
+      "id": "大模型应用",
+      "type": "概念"
+    },
+    {
+      "id": "工具",
+      "type": "概念",
+      "aliases": [
+        "tools"
+      ]
+    },
+    {
+      "id": "任务",
+      "type": "概念"
+    },
+    {
+      "id": "政策",
+      "type": "概念",
+      "aliases": [
+        "约束政策",
+        "三级信息政策",
+        "旧政策"
+      ]
+    },
+    {
+      "id": "能力",
+      "type": "概念"
+    },
+    {
+      "id": "LLM",
+      "type": "技术",
+      "aliases": [
+        "底层 LLM"
+      ]
+    },
+    {
+      "id": "Agent 骨架",
+      "type": "概念"
+    },
+    {
+      "id": "规划 + 工具调用的循环",
+      "type": "方法",
+      "aliases": [
+        "最小规划 + 工具循环"
+      ]
+    },
+    {
+      "id": "复杂任务",
+      "type": "任务"
+    },
+    {
+      "id": "仿制 coding agent",
+      "type": "概念"
+    },
+    {
+      "id": "企业级课程",
+      "type": "概念"
+    },
+    {
+      "id": "前沿论文",
+      "type": "概念"
+    },
+    {
+      "id": "demo 类项目",
+      "type": "概念"
+    },
+    {
+      "id": "项目",
+      "type": "概念"
+    },
+    {
+      "id": "课程",
+      "type": "概念"
+    },
+    {
+      "id": "论文",
+      "type": "概念"
+    },
+    {
+      "id": "能力与政策一致性检查.md",
+      "type": "概念",
+      "aliases": [
+        "能力与政策一致性检查"
+      ]
+    },
+    {
+      "id": "政策自动复查落地手册.md",
+      "type": "概念"
+    },
+    {
+      "id": "一致性检查-第2_3层实操示例.md",
+      "type": "概念"
+    },
+    {
+      "id": "Agent.md",
+      "type": "概念"
+    },
+    {
+      "id": "Embedding",
+      "type": "概念"
+    },
+    {
+      "id": "PHP",
+      "type": "语言"
+    },
+    {
+      "id": "Python",
+      "type": "语言"
+    },
+    {
+      "id": "RAG",
+      "type": "概念",
+      "aliases": [
+        "检索增强生成",
+        "Retrieval-Augmented Generation"
+      ]
+    },
+    {
+      "id": "上下文窗口",
+      "type": "概念"
+    },
+    {
+      "id": "模型",
+      "type": "概念"
+    },
+    {
+      "id": "余弦相似度",
+      "type": "概念"
+    },
+    {
+      "id": "向量数据库",
+      "type": "技术"
+    },
+    {
+      "id": "向量",
+      "type": "概念"
+    },
+    {
+      "id": "Chroma",
+      "type": "工具"
+    },
+    {
+      "id": "Qdrant",
+      "type": "工具"
+    },
+    {
+      "id": "pgvector",
+      "type": "工具"
+    },
+    {
+      "id": "知识图谱",
+      "type": "概念"
+    },
+    {
+      "id": "实体向量",
+      "type": "概念"
+    }
+  ],
+  "edges": [
+    {
+      "source": "Agent",
+      "target": "大模型应用",
+      "relation": "包含",
+      "source_note": "Agent.md"
+    },
+    {
+      "source": "仿制 coding agent",
+      "target": "Agent 骨架",
+      "relation": "包含",
+      "source_note": "Agent仿制-能力分层与演进.md"
+    },
+    {
+      "source": "Agent 骨架",
+      "target": "规划 + 工具调用的循环",
+      "relation": "包含",
+      "source_note": "Agent仿制-能力分层与演进.md"
+    },
+    {
+      "source": "Agent 骨架",
+      "target": "工具",
+      "relation": "依赖",
+      "source_note": "Agent仿制-能力分层与演进.md"
+    },
+    {
+      "source": "Agent 骨架",
+      "target": "LLM",
+      "relation": "依赖",
+      "source_note": "Agent仿制-能力分层与演进.md"
+    },
+    {
+      "source": "政策",
+      "target": "能力与政策一致性检查.md",
+      "relation": "引用",
+      "source_note": "Agent仿制-能力分层与演进.md"
+    },
+    {
+      "source": "政策",
+      "target": "政策自动复查落地手册.md",
+      "relation": "引用",
+      "source_note": "Agent仿制-能力分层与演进.md"
+    },
+    {
+      "source": "政策",
+      "target": "一致性检查-第2_3层实操示例.md",
+      "relation": "引用",
+      "source_note": "Agent仿制-能力分层与演进.md"
+    },
+    {
+      "source": "Agent",
+      "target": "Agent.md",
+      "relation": "引用",
+      "source_note": "Agent仿制-能力分层与演进.md"
+    },
+    {
+      "source": "一致性检查-第2_3层实操示例.md",
+      "target": "能力与政策一致性检查.md",
+      "relation": "引用",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "一致性检查-第2_3层实操示例.md",
+      "target": "政策",
+      "relation": "引用",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "政策",
+      "target": "能力",
+      "relation": "包含",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "政策",
+      "target": "工具",
+      "relation": "包含",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "Agent",
+      "target": "能力",
+      "relation": "包含",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "Agent",
+      "target": "工具",
+      "relation": "依赖",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "政策",
+      "target": "工具",
+      "relation": "依赖",
+      "source_note": "三级信息政策.md"
+    },
+    {
+      "source": "Agent",
+      "target": "政策",
+      "relation": "依赖",
+      "source_note": "三级信息政策.md"
+    },
+    {
+      "source": "能力",
+      "target": "政策",
+      "relation": "依赖",
+      "source_note": "三级信息政策.md"
+    },
+    {
+      "source": "向量数据库",
+      "target": "向量",
+      "relation": "包含",
+      "source_note": "向量数据库.md"
+    },
+    {
+      "source": "Chroma",
+      "target": "向量数据库",
+      "relation": "包含",
+      "source_note": "向量数据库.md"
+    },
+    {
+      "source": "Qdrant",
+      "target": "向量数据库",
+      "relation": "包含",
+      "source_note": "向量数据库.md"
+    },
+    {
+      "source": "pgvector",
+      "target": "向量数据库",
+      "relation": "包含",
+      "source_note": "向量数据库.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "能力与政策一致性检查.md",
+      "relation": "引用",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "一致性检查-第2_3层实操示例.md",
+      "relation": "引用",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "政策",
+      "relation": "包含",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "能力",
+      "relation": "依赖",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "Agent",
+      "relation": "引用",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "能力与政策一致性检查.md",
+      "target": "政策",
+      "relation": "引用",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "能力与政策一致性检查.md",
+      "target": "能力",
+      "relation": "包含",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "Agent",
+      "target": "能力",
+      "relation": "包含",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "能力",
+      "target": "工具",
+      "relation": "包含",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "能力与政策一致性检查.md",
+      "target": "一致性检查-第2_3层实操示例.md",
+      "relation": "引用",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "能力与政策一致性检查.md",
+      "target": "政策自动复查落地手册.md",
+      "relation": "引用",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "知识图谱",
+      "target": "Embedding",
+      "relation": "依赖",
+      "source_note": "知识图谱.md"
+    },
+    {
+      "source": "知识图谱",
+      "target": "向量数据库",
+      "relation": "依赖",
+      "source_note": "知识图谱.md"
+    },
+    {
+      "source": "Embedding",
+      "target": "实体向量",
+      "relation": "包含",
+      "source_note": "知识图谱.md"
+    },
+    {
+      "source": "实体向量",
+      "target": "向量数据库",
+      "relation": "依赖",
+      "source_note": "知识图谱.md"
+    }
+  ],
+  "note_hashes": {
+    "Agent.md": "68269dc770dd5f7f",
+    "Agent仿制-能力分层与演进.md": "fbbedadf7343d190",
+    "Embedding.md": "53ad4b03067ab22b",
+    "PHP是最好的语言.md": "a5b327139e812148",
+    "PHP简介.md": "6db4505e9b455c7c",
+    "Python简介.md": "a3b67eb31ba0d3d0",
+    "RAG.md": "49c2f3d30efbbee3",
+    "一致性检查-第2_3层实操示例.md": "36d5031b4694cdd1",
+    "三级信息政策.md": "57aed4a5b42663f8",
+    "上下文窗口.md": "a66f840a24b35d3d",
+    "余弦相似度.md": "c447bf1132a81511",
+    "向量数据库.md": "ab402cf2f4370624",
+    "政策自动复查落地手册.md": "39fee38ab8bce033",
+    "能力与政策一致性检查.md": "7b80c105cacb1bc0",
+    "知识图谱.md": "cc68257f585d470e"
+  }
+}
