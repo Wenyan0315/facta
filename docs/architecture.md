@@ -200,7 +200,7 @@
 | [029-review-round-sonus](decisions/029-review-round-sonus.md) | 评审修复轮（sonus） | 外部评审 8 项坐实硬伤分类消化；R1 读边界不对称（read_notes 越界+search_code .env 泄漏）；R2 XSS（escape-before-parse+协议白名单）；R3 事件名契约（点分统一）；R4 plan 生命周期（/new 清+换血恢复）；R5 spawn 禁止单加历史工具；R6 SSE 广播模型（单队列竞争→订阅者独立队列+终态哨兵）；R7 归档保留手工名；R8 语义缓存默认关（env 开关）；四视角吸收（已有设施覆盖） |
 | [030-s6a-worktree-isolation](decisions/030-s6a-worktree-isolation.md) | S6a worktree 隔离 | 四拍板（WORKSPACE_ROOT 注入化/确认缝合回/生命周期+残留回收/跨进程不进本轮）；_worktree_registry（五件重锚+其余共享+审计同源）；merge_worktree 确认缝（批准合回拒绝整棵丢弃）；commit 显式带 cortex-agent 身份（CI 环境无关）；三实踩入档（默认参数固化 monkeypatch 无效/reset --hard 误伤未提交/CI git 身份差异） |
 | [031-s6b-parallel-spawn](decisions/031-s6b-parallel-spawn.md) | S6b 并行 spawn | 四拍板（只并行 spawn/确认缝 _confirm_lock 串行化/结果按点菜顺序回填/描述中性引导）；切批+ThreadPoolExecutor 并行（IO-bound 无需进程）；_execute_tool_calls 抽函数；实踩入档（merge_stream_chunks 按 index 归并、测试 _call 缺 index 导致同轮多 spawn arguments 拼接） |
-| [032-memory-system-principles](decisions/032-memory-system-principles.md) | 记忆体系调研裁定 | Trae/Qoder/Pi 三系记忆调研对照 cortex 现状：不搬 5 大类（user_preference 撞隐私红线）；借「目录树先行+按需检索」挂触发信号（learned>10）；显式区分 append-only vs 可删（下一站顺手做）；反思保持异步旁路（Qoder 四缺陷教训）；Knowledge 归知识层不混记忆层；Mycelium 反设计不适用（flash 档判断力不足）；Tombstone/DeepSeek 前缀缓存列为待确认不立项 |
+| [032-memory-system-principles](decisions/032-memory-system-principles.md) | 记忆体系调研裁定 | Trae/Qoder/Pi 三系记忆调研对照 cortex 现状：不搬 5 大类（user_preference 撞隐私红线）；借「目录树先行+按需检索」挂 v2 触发信号（注入 token 成本阈值——v1「文件数>10」是死信号已废弃：文件数=分类数=3 结构常数）；显式区分 append-only vs 可删（下一站顺手做）；反思保持异步旁路（Qoder 四缺陷教训）+ 条目腐烂实证（行号/时点快照类条目变假知识）；Knowledge 归知识层不混记忆层；Mycelium 反设计不适用（flash 档判断力不足）；Tombstone/DeepSeek 前缀缓存列为待确认不立项 |
 | [033-s6c-orchestration](decisions/033-s6c-orchestration.md) | S6c 真编排 | 焊点认知（make_plan 与 spawn_subagent 两条平行线靠模型临场手工桥接——会忘/错位/重复，spawn_step 把手工桥变程序焊缝）；四拍板（新工具不加参数/自动回写保留步骤间掌舵/串行为主+步骤级并行挂触发信号/子 agent 禁 spawn_step）；_FAILURE_PREFIXES 成败判据；S6 全站收官（拆→派→隔离→并发→汇总最小闭环） |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
@@ -210,6 +210,7 @@
 
 - **任务视图偶发不切换**（2026-09-16 首次报告，09-17 复现一次）——**已结案（2026-09-21）**：触发信号「前端框架化时一并排查」已兑现——任务视图 v2 整体重写（Preact 状态驱动替代 v1 vanilla 的 DOM 状态同步矩阵），重写后两轮浏览器验收与实机使用均未复现。若再次报告则重新开案（v2 语境下定位成本远低于当年）。
 - **flash 价目待校准**（2026-09-21，M10）：PROVIDERS 里 deepseek-flash 暂按 chat 档占位，账单成本略高估——有官方价目时修正（028 注记）。
+- **deepseek-flash DSML 泄漏致收官丢失**（2026-09-23，S6c 实机验收）：模型在 max_rounds 边缘轮想调 finish_plan，吐出的是 DeepSeek 内部函数调用格式裸文本（`<｜｜DSML｜｜ calls>...`），未被解析成合法 tool_calls 而被并入 content——计划全步骤终态但 finish_plan 未执行，悬在 active；max_rounds 保险丝兜底强制收尾（不崩但收官声明丢）。与 Qwen thinking 通道/Gemma 空 content 同族（模型输出格式泄漏，ScriptedLLM 测不出）。修复方向二选一：a) harness 侧检测 DSML 泄漏文本转错误串回灌让模型重试；b) max_rounds 收尾时检测「计划全终态但未收官」给提示。触发信号=「收官丢失再现」或下一模型质量轮。
 
 ## 待讨论（产品方向，未定档）
 

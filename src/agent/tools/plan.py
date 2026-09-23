@@ -52,7 +52,14 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         except ValueError as e:
             return f"计划操作被拒：{e}"
         verb = "已创建" if kind == "created" else "已修订"
-        return f"计划{verb}（用户已确认）。当前计划：\n{format_view(board.view())}"
+        # S6c 实机验收发现 A：模型不知道「步骤可派出去」这条焊缝——用户明说
+        # 派子任务它仍自己做。回灌补一句中性引导（掌舵权归模型：简单步骤
+        # 自己做更便宜，重步骤派 spawn_step 换隔离与噪声抑制，它自己选）
+        return (
+            f"计划{verb}（用户已确认）。当前计划：\n{format_view(board.view())}"
+            "\n（执行提示：步骤可自己做，也可用 spawn_step 派子任务执行——"
+            "过程啰嗦或值得上下文隔离的步骤建议派出去，它会自动回写状态）"
+        )
 
     def _update_plan_step(step_id: int, status: str, note: str = "") -> str:
         try:
