@@ -26,15 +26,18 @@ from agent.core.jev import JevClient, ScenarioRouter
 from agent.core.llm import LLM, get_llm
 from agent.core.telemetry import UsageLedger
 from agent.core.types import Message
+from agent.knowledge.extract import sync_graph
+from agent.knowledge.graph import GraphStore
 from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.sync import sync_notes
 from agent.knowledge.vector_store import ChromaVectorStore
 from agent.memory.store import Session, load_session
 from agent.memory.todos import TodoStore
 from agent.orchestrator.agent import Agent, build_default_agent
-from agent.paths import LEARNED_DIR, NOTES_DIR, WORKSPACE_ROOT
+from agent.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, WORKSPACE_ROOT, user_memory_path
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
+from agent.tools.graph import register_graph_tools
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +170,21 @@ def assemble(provider: str) -> AppContext:
     report = sync_notes(kb, NOTES_DIR)
     logger.info("知识库同步：新增 %s / 删除 %s / 不变 %s", report.added, report.removed, report.unchanged)
 
+    # 3.5) 知识图谱（S7a）：notes 的结构化投影——向量管模糊相似，图管精确关系。
+    #      指纹差集增量：笔记没改不重抽（省 LLM 的钱）；教学路径（假模型）
+    #      不抽不记指纹（切真模型自动补抽）。graph.json 是知识资产进 git
+    #      ——只在真有变更时落盘（extracted/removed>0），避免每次启动把
+    #      git 工作区弄脏
+    graph = GraphStore.load(GRAPH_PATH)
+    graph_llm = None if provider in ("mock", "echo", "repeat") else internal_llm
+    g_report = sync_graph(graph, NOTES_DIR, graph_llm)
+    logger.info(
+        "图谱同步：抽取 %s / 不变 %s / 删除 %s / 跳过 %s / 失败 %s",
+        g_report.extracted, g_report.unchanged, g_report.removed, g_report.skipped, g_report.failed,
+    )
+    if g_report.extracted or g_report.removed:
+        graph.save(GRAPH_PATH)
+
     # 4) 会话记忆（M6）：启动时载入【完整会话状态】——底片(消息) + 压缩缓存(摘要游标)
     #    关键细节：必须在登记工具之前载入——search_history 的闭包要抓这个列表对象
     session = load_session(MEMORY_PATH)
@@ -200,6 +218,7 @@ def assemble(provider: str) -> AppContext:
         todos=todos,
         session=session,   # S5b：计划工具的操作载体（传 Session 对象本身，与 history 同款身份契约）
         workspace_root=WORKSPACE_ROOT,   # S6a：主 agent 文件/终端锚点（子 agent 由 spawn 覆盖为 worktree）
+        graph=graph,   # S7a：知识图谱（活对象注入——查询原语读最新图）
     )
     register_builtin(registry, ctx)
     register_file_tools(registry, ctx)   # S4a 文件四件：恒注册（S6a 起锚点随 ctx 注入）
@@ -208,6 +227,7 @@ def assemble(provider: str) -> AppContext:
     register_todo_tools(registry, todos)
     register_plan_tools(registry, ctx)   # S5b 计划三件：恒注册（无外部依赖）
     register_spawn_tools(registry, ctx)   # S5c 子 agent 分派：ctx.llm 在即注册（内部链）
+    register_graph_tools(registry, ctx)   # S7a 图谱查询：ctx.graph 在即注册（图空时工具如实报空）
 
     # 6) MCP 外部工具（MCP-config 配置化）：改 mcp_servers.json 加工具，零代码。
     #      命令型穿 stdio、URL 型穿 streamable HTTP；单台失败只警告不阻断；
@@ -242,7 +262,12 @@ def assemble(provider: str) -> AppContext:
         logger.info("已启用 Jev 场景路由（工具 %d 个）", len(registry.names()))
     else:
         logger.info("未启用 Jev 场景路由，走 LLM 原生路径")
-    agent = build_default_agent(registry, LEARNED_DIR, router=router)
+    # M6.5 用户级记忆：快照注入主 agent prompt 尾（子 agent 不注入——
+    # 执行器不是陪伴者，spawn.py 头注记）；位置经 paths.user_memory_path()
+    #（env 可覆写，测试注入点）。文件不存在=空收敛，无注入零开销
+    agent = build_default_agent(
+        registry, LEARNED_DIR, router=router, user_memory_path=user_memory_path()
+    )
     ensure_persona(session, agent)
 
     return AppContext(

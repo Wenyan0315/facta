@@ -197,3 +197,120 @@ def test_entries_are_capped_and_deduped(tmp_path):
     assert "新增 5 条" in report
     lines = (tmp_path / "learned" / "constraints.md").read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 5
+
+
+# ---------- M6.5 用户级分流 ----------
+
+def _both_scope_script() -> list[Message]:
+    """萃取与审查都放行两条：一条项目级、一条用户级（阳澄湖同款）。"""
+    entries = json.dumps(
+        [
+            {"category": "constraints", "content": "搜索结果需按目的地核对", "scope": "project"},
+            {"category": "other", "content": "用户偏好行程室内外交错排", "scope": "user"},
+        ],
+        ensure_ascii=False,
+    )
+    return [
+        Message(role="assistant", content=entries),
+        Message(role="assistant", content=entries),
+    ]
+
+
+def test_user_scope_splits_to_user_md(tmp_path):
+    """分流主路径：user 条目 → 仓库外 user.md；project 条目照旧进桶。"""
+    llm = ScriptedLLM(_both_scope_script())
+    session = _session(_dialogue())
+    user_md = tmp_path / "personal" / "user.md"
+
+    report = consolidate(session, llm, tmp_path / "learned", user_memory_path=user_md)
+
+    assert "新增 2 条" in report and "用户级 1 条" in report
+    constraints = (tmp_path / "learned" / "constraints.md").read_text(encoding="utf-8")
+    assert "按目的地核对" in constraints
+    user_content = user_md.read_text(encoding="utf-8")
+    assert "行程室内外交错排" in user_content
+    assert user_content.startswith("- [")   # 同款行格式：读侧零翻译
+    assert "交错排" not in constraints      # 用户级不进项目桶（泄漏方向）
+
+
+def test_user_scope_dropped_when_unconfigured(tmp_path):
+    """未配置位置（None）：user 条目照 v1 行为丢弃，文案如实说。"""
+    llm = ScriptedLLM(_both_scope_script())
+    session = _session(_dialogue())
+
+    report = consolidate(session, llm, tmp_path / "learned", user_memory_path=None)
+
+    assert "新增 1 条" in report
+    assert "1 条用户级候选因未配置位置丢弃" in report
+    assert (tmp_path / "learned" / "constraints.md").exists()
+    for md in (tmp_path / "learned").glob("*.md"):
+        assert "交错排" not in md.read_text(encoding="utf-8")
+
+
+def test_sensitive_entries_never_land(tmp_path):
+    """敏感凭证禁令（程序侧硬边界）：API key / 身份证 / 手机号，萃取审查
+    都放行也拦在落盘前——信模型语义，不信模型纪律。"""
+    entries = json.dumps(
+        [
+            {"category": "other", "content": "用户的 key 是 sk-abc123def456ghi789jkl012"},
+            {"category": "other", "content": "用户身份证号 110101199003077777"},
+            {"category": "other", "content": "用户手机号 13800138000"},
+            {"category": "constraints", "content": "合法的项目约束条目"},
+        ],
+        ensure_ascii=False,
+    )
+    script = [
+        Message(role="assistant", content=entries),
+        Message(role="assistant", content=entries),   # 审查全放行（测的就是硬校验）
+    ]
+    llm = ScriptedLLM(script)
+    session = _session(_dialogue())
+
+    report = consolidate(session, llm, tmp_path / "learned", user_memory_path=tmp_path / "u.md")
+
+    assert "新增 1 条" in report   # 只剩合法条目
+    for md in list((tmp_path / "learned").glob("*.md")) + [tmp_path / "u.md"]:
+        if not md.exists():
+            continue   # 文件不存在 = 该作用域全被拦下，本身就是断言的一部分
+        text = md.read_text(encoding="utf-8")
+        assert "sk-abc123" not in text
+        assert "110101199003077777" not in text
+        assert "13800138000" not in text
+
+
+def test_invalid_scope_falls_back_to_project(tmp_path):
+    """scope 非法归 project（保守方向：错进项目桶是噪音，反向是泄漏）。"""
+    entries = json.dumps(
+        [{"category": "other", "content": "某条记忆", "scope": "global"}],
+        ensure_ascii=False,
+    )
+    script = [
+        Message(role="assistant", content=entries),
+        Message(role="assistant", content=entries),
+    ]
+    llm = ScriptedLLM(script)
+    session = _session(_dialogue())
+
+    consolidate(session, llm, tmp_path / "learned", user_memory_path=tmp_path / "u.md")
+
+    assert (tmp_path / "learned" / "other.md").exists()
+    assert not (tmp_path / "u.md").exists()
+
+
+def test_user_memory_known_fed_to_extract_prompt(tmp_path):
+    """去重范围跨作用域：user.md 已有内容也要进「已知记忆」。"""
+    learned = tmp_path / "learned"
+    learned.mkdir(parents=True)
+    user_md = tmp_path / "user.md"
+    user_md.write_text("- [2026-01-01] 用户偏好全景到细节的讲解\n", encoding="utf-8")
+    llm = ScriptedLLM([
+        Message(role="assistant", content="[]"),
+        Message(role="assistant", content="[]"),
+    ])
+    session = _session(_dialogue())
+
+    consolidate(session, llm, learned, user_memory_path=user_md)
+
+    extract_input = llm.calls[0][-1].content
+    assert "用户偏好全景到细节的讲解" in extract_input
+    assert "user.md（用户记忆）" in extract_input

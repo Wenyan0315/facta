@@ -42,7 +42,7 @@ from agent.orchestrator.assemble import (
     ensure_persona,
 )
 from agent.orchestrator.loop import RunResult, run_turn
-from agent.paths import LEARNED_DIR, SESSIONS_DIR
+from agent.paths import LEARNED_DIR, SESSIONS_DIR, user_memory_path
 from agent.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -166,7 +166,10 @@ def _archive_current(ctx: AppContext) -> bool:
     if ctx.session.title is None:
         ctx.session.title = summarize_title(ctx.session, ctx.internal_llm) or derive_title(ctx.session)
     save_session(ctx.session, MEMORY_PATH)
-    consolidate(ctx.session, ctx.internal_llm, LEARNED_DIR, since=0)   # v1 简化：全量复盘
+    consolidate(
+        ctx.session, ctx.internal_llm, LEARNED_DIR,
+        since=0, user_memory_path=user_memory_path(),
+    )   # v1 简化：全量复盘；M6.5 起用户级条目分流仓库外
     archive_session(MEMORY_PATH, SESSIONS_DIR)
     ctx.session.messages.clear()
     ctx.session.summary = None

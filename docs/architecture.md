@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.64（2026-09-23）｜随着里程碑推进持续迭代此文档
+> 版本：v0.65（2026-09-23）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [product.md](product.md) v2）：个人执行助手——执行主轴 + 记忆护城河 + 通用外延（[021](decisions/021-direction-decisions.md)）
 
@@ -72,8 +72,11 @@
 │   压缩: ✅ 滚动摘要+原文窗口（投影，底片不动）                  │
 │   固化: ✅ data/learned 三桶（萃取→审查→硬校验，也是 S5a        │
 │         Agent prompt 的注入源——AGENTS.md 式读取侧已兑现）        │
+│   用户级: ✅ ~/.personal-agent/user.md（M6.5 分流：scope=user    │
+│         条目仓库外落盘+主 agent 注入【用户记忆】段+敏感凭证      │
+│         硬校验禁令；子 agent 不注入）                            │
 │   计划: ✅ plan 域（S5b：PlanBoard 事件史，随 session 落盘）    │
-│  以后：用户级记忆仓库外位置                                     │
+│  以后：记忆面板用户级分栏；检索分层（032 v2 信号触发）           │
 └──────────────────────────────────────────────────────────────┘
        │
 ┌──────▼───────────────────────────────────────────────────────┐
@@ -105,7 +108,7 @@
 | orchestrator 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb；streaming 流式消费（分片边收边打→merge 拼回复；内部调用照旧非流）；S2a 内核/外设分离：run_turn 零 input/print，I/O 走 on_text/on_event/should_cancel/on_confirm 四条缝（S4b 加确认缝）；S2b 协作式取消两检查点；run_turn 返回 RunResult 三态枚举（COMPLETED/CANCELLED/FAILED，取消/模型全挂不再靠 None 二义反推，S4 评审修复轮）；**S5a Agent 对象**：行为定义与执行引擎分离（agent.py 六字段 frozen；SYSTEM_PROMPT 外置为 DEFAULT_SYSTEM_PROMPT，learned 三桶 AGENTS.md 式快照注入 prompt 尾）；run_turn agent 化（registry 参数退场、空菜单折叠回 None 防「不传≠空」API 坑、幻觉点菜 assert 炸→错误串反馈环）；**S5b plan-then-act 两针**：活跃计划投影注入（`_plan_stamp`，时间戳同款手法，无活跃零开销）+ 计划事件 drain 转发（工具执行后、tool_result 前，因果序，零新缝）；**M10 场景路由轮首一针**：`_route_first_menu`（direct 藏菜单进语义缓存命中区/single_tool 单工具菜单 LLM 只填参数/complex 全量自决；半路由——工具结果回灌后循环尾归还全量菜单，循环决策权归还模型） | 并行工具调用 / 更复杂的规划策略 |
 | LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/deepseek-flash/siliconflow，M10 备用链按 prefix 去重——同供应商同故障域不陪葬) + 进程内网关(M7.5：记账/重试超时/精确缓存+语义缓存默认关(029：跨上下文串味，env 开关)/熔断三态/降级链+优雅兜底)；主力默认 deepseek-flash（M10，bench 题86%+ECE 0.042） | 更多供应商 + 多模型路由 |
 | knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集)；检索命中带溯源（SearchHit=块+相似度+来源面单，query 全链路透出，S4 评审修复轮） | 知识图谱 |
-| memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘）+ 多会话管理（S1：active+archive，/new 归档重开）+ restore_session 原语（S2a：归档写回 active 后删除，move 语义）+ **plan 计划域（S5b）**：PlanBoard/PlanState/事件史（append 修订、fold 视图、显式终态制），生命周期=会话随 session.json 落盘，老文件宽进 | 用户级记忆仓库外位置 |
+| memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘）+ 多会话管理（S1：active+archive，/new 归档重开）+ restore_session 原语（S2a：归档写回 active 后删除，move 语义）+ **plan 计划域（S5b）**：PlanBoard/PlanState/事件史（append 修订、fold 视图、显式终态制），生命周期=会话随 session.json 落盘，老文件宽进 + **用户级记忆（M6.5）**：固化管线 scope 分流→~/.personal-agent/user.md 仓库外落盘（不进任何 git），主 agent prompt 注入【用户记忆】段（项目桶之后，元记忆首轮必加载），敏感凭证正则硬禁令，审查对 user 条目从宽（跨项目污染代价高），子 agent 不注入（执行器非陪伴者） | 记忆面板用户级分栏；检索分层（032 v2 信号） |
 | tools | ✅ Tool+ToolRegistry+内置工具按家族分件（time/history/notes 三族，S4a 拆分）；write_note 安全栅栏+查重闸门；**read_notes 越界读修复(029：与 write_note 同款 resolve+is_relative_to 防线)**；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型)；联网工具 web_search/fetch_web（015：Tavily Provider+SSRF 栅栏+条件注册）；MCP 外部工具配置化接入；文件四件 read_file/search_code/list_dir/write_file+diff（S4a，workspace 围栏：__file__ 锚定+敏感黑名单读都不行，**search_code rglob 也挡 .env(029)**）；终端执行 run_command（S4b：白名单只读免确认/L2 确认缝 registry 收口/批准拒绝都落审；评审修复轮加参数级拦截——find -exec/sort -o 等「只读命令名+危险参数」也弹确认）；计划三件（S5b）：make_plan（人审掌舵点，复用确认缝）/update_plan_step（状态回写+回灌带最新视图）/finish_plan（显式终态程序闸）；spawn_subagent（S5c：子 agent 分派只回传结论=噪声隔离，禁止单硬编码防递归，**_FORBIDDEN 含历史工具(029：防父会话泄漏)**，receives_confirm 确认缝透传，worktree 沙箱+并行(S6a/S6b)）；spawn_step（S6c：计划步骤派发——标 in_progress→派子任务→自动回写 done/failed，make_plan→spawn_step→finish_plan 编排链，_FORBIDDEN 封死子 agent 编排） | 更多工具 + skills |
 | server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子、**广播模型(029)：订阅者独立队列+终态补发哨兵，聊天页+任务页同时订阅不竞争**）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + 静态三件零构建链；只绑 127.0.0.1。验收修复轮：人设保证（ensure_persona 装配不变量）、每轮落盘、取消检查点③（流中即时）、任务视图最小版（/tasks+GET /api/runs）、历史回放（GET /api/messages）、md 渲染（marked vendored，**escape-before-parse+协议白名单(029)**）、Enter/Esc 键盘。S4b：waiting_approval 挂起态（进单锁口径、取消视拒、confirm.request/resolved 事件断线重放重弹）+ confirm 裁决端点 + 前端确认弹窗。S5c：任务视图 Run 详情展开（计划面板——EventSource 消费 plan.*/tool.*/run.* 事件，**点分命名(029)**，fold 与后端 PlanState.view 同构，断线重放免费） | 主聊天视图迁移 FW 站（渐进）；Run Store 外置（多实例触发） |
 | evals | ✅ **evalkit 内核**（src/agent/evalkit：指标/指纹判定/归因/judge 解析纯函数，零依赖可拿走，024）+ evals 壳（三路并评+miss 归因，30 题形态分层，8 万字混合语料，022 混合检索裁定不立项）+ LLM-as-judge 回答质量(基线 13/13 合格, 0% 错误, 全轮 ¥0.011) | 更难的对抗题库 + 回答质量回归 |
@@ -136,6 +139,7 @@
 | M7 ✅ | 工业 RAG：向量库持久化(Chroma) + 增量更新（弃全量重建）｜evals/文档治理并入收官 | 向量库、增量索引 |
 | M7.5 ✅ | 生产加固：网关四件套（记账+重试超时+精确缓存/语义缓存默认关(029)+熔断）｜降级链 + 优雅兜底 | 容错、可观测性、成本控制 |
 | M6.4 ✅ | 记忆固化：对话→分类萃取→审查→硬校验→长时记忆沉淀（data/learned/*.md，退出复盘） | 分层记忆、萃取纪律、防幻觉污染 |
+| M6.5 ✅ | 用户级记忆位置（[034](decisions/034-m6.5-user-memory.md)：021 护城河从项目级扩到个人级）：固化管线 scope 分流（铁律从「用户级不记」→「分流仓库外」）、~/.personal-agent/user.md 单文件（同款行格式零翻译）、主 agent 注入【用户记忆】段、敏感凭证硬禁令、审查从宽、子 agent 不注入；位置 env 注入化（CORTEX_USER_MEMORY） | 作用域分离、隐私位置设计、Write-Path 权衡 |
 | MCP ✅ | 外部工具动态发现（三次顺延的集结号，coding agent 最直接积木）｜stdio+HTTP 双传输、配置化装配、真三方验收 | 协议、动态工具 |
 | streaming ✅ | 流式输出：generate_stream 接口（默认伪流，老实现零改动）+ 真流实现 + 分片重组纯函数 + 网关四衣流式语义；用户取消复用中断通道 | 增量协议、生成器惰性 |
 | 阶段二 | —— coding agent 产品化（2026-09-13 规划拍板，方向提前定、细节临期定）—— | 实战整合 |
@@ -202,6 +206,7 @@
 | [031-s6b-parallel-spawn](decisions/031-s6b-parallel-spawn.md) | S6b 并行 spawn | 四拍板（只并行 spawn/确认缝 _confirm_lock 串行化/结果按点菜顺序回填/描述中性引导）；切批+ThreadPoolExecutor 并行（IO-bound 无需进程）；_execute_tool_calls 抽函数；实踩入档（merge_stream_chunks 按 index 归并、测试 _call 缺 index 导致同轮多 spawn arguments 拼接） |
 | [032-memory-system-principles](decisions/032-memory-system-principles.md) | 记忆体系调研裁定 | Trae/Qoder/Pi 三系记忆调研对照 cortex 现状：不搬 5 大类（user_preference 撞隐私红线）；借「目录树先行+按需检索」挂 v2 触发信号（注入 token 成本阈值——v1「文件数>10」是死信号已废弃：文件数=分类数=3 结构常数）；显式区分 append-only vs 可删（下一站顺手做）；反思保持异步旁路（Qoder 四缺陷教训）+ 条目腐烂实证（行号/时点快照类条目变假知识）；Knowledge 归知识层不混记忆层；Mycelium 反设计不适用（flash 档判断力不足）；Tombstone/DeepSeek 前缀缓存列为待确认不立项 |
 | [033-s6c-orchestration](decisions/033-s6c-orchestration.md) | S6c 真编排 | 焊点认知（make_plan 与 spawn_subagent 两条平行线靠模型临场手工桥接——会忘/错位/重复，spawn_step 把手工桥变程序焊缝）；四拍板（新工具不加参数/自动回写保留步骤间掌舵/串行为主+步骤级并行挂触发信号/子 agent 禁 spawn_step）；_FAILURE_PREFIXES 成败判据；S6 全站收官（拆→派→隔离→并发→汇总最小闭环） |
+| [034-m6.5-user-memory](decisions/034-m6.5-user-memory.md) | M6.5 用户级记忆 | 位置 ~ /personal-agent/user.md 单文件（Trae 两层参照，仓库外不进任何 git）；scope 分流（铁律 2 从「不记」→「分流」，M6.4 红线解扣）；敏感凭证正则硬禁令（宁误杀不漏放）；审查对 user 从宽（跨项目污染代价）；子 agent 不注入（临期修正：执行器非陪伴者）；面板分栏挂可选子项 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）

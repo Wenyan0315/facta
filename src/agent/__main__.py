@@ -15,7 +15,7 @@ from agent.memory.plan import PlanBoard
 from agent.memory.store import archive_session, derive_title, save_session
 from agent.memory.title import summarize_title
 from agent.orchestrator.assemble import MEMORY_PATH, assemble, ensure_persona
-from agent.paths import LEARNED_DIR, SESSIONS_DIR
+from agent.paths import LEARNED_DIR, SESSIONS_DIR, user_memory_path
 
 VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
 
@@ -55,9 +55,12 @@ def main() -> None:
             save_session(session, MEMORY_PATH)
             print(f"对话历史已保存：{len(session.messages)} 条 → {MEMORY_PATH}")
 
-            # M6.4 记忆固化：退出复盘——since=本轮启动消息数，
+            # M6.4 记忆固化 + M6.5 用户级分流：退出复盘——since=本轮启动消息数，
             # 无新对话（启动即退出）→ consolidate 内部直接跳过
-            print(consolidate(session, internal_llm, LEARNED_DIR, since=loaded_len))
+            print(consolidate(
+                session, internal_llm, LEARNED_DIR,
+                since=loaded_len, user_memory_path=user_memory_path(),
+            ))
 
             if reason != EXIT_NEW:
                 break
