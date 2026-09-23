@@ -32,6 +32,7 @@ from agent.memory.store import Session
 from agent.paths import WORKSPACE_ROOT
 
 if TYPE_CHECKING:
+    from agent.knowledge.graph import GraphStore  # 仅类型标注（S7a）
     from agent.memory.todos import TodoStore
     from agent.tools.web import WebSearchClient  # 仅类型标注用，运行时不导入（防循环）
 
@@ -68,3 +69,7 @@ class ToolContext:
     # paths.py——这里是引用传播，不是第二真值源；notes_dir 禁默认是因为
     # 它因环境而异必须组装层拍板。子 agent 覆盖时必显式。
     workspace_root: Path = WORKSPACE_ROOT
+    # 知识图谱（S7a）：None=graph 工具不上菜单（条件注册惯例）。
+    # 传 GraphStore 对象本身（非副本）——查询原语读活对象，与 history
+    # 的列表身份契约同理（同步层原地变异时工具看得见最新图）。
+    graph: GraphStore | None = None
