@@ -53,12 +53,14 @@ from agent.tools.worktree import (
 # - 计划三件：分派语义是「主 agent 已规划好，子 agent 执行」；子 agent 再
 #   规划=规划套规划，主 plan 事件流被稀释（挂触发信号：真实使用出现
 #   「子任务本身够复杂需要二级计划」再开，届时 S6 编排也该上了）
+# - sync_graph（S7a）：图谱是主 agent 维护的共享知识资产——子 agent 是
+#   执行者，不重抽/改写共享图谱（它写的笔记要进图谱，让主 agent 收口）
 # - 历史两件（评审修复轮）：search_history/read_history 的闭包绑着【父会话】
 #   messages——默认子集含它们=「子上下文看不到本对话」的 prompt 承诺被
 #   工具层击穿（子 agent 能检索父会话全部内容，噪声隔离反向泄漏）
 _FORBIDDEN = frozenset({
     "spawn_subagent", "spawn_step", "make_plan", "update_plan_step", "finish_plan",
-    "search_history", "read_history",
+    "sync_graph", "search_history", "read_history",
 })
 
 DEFAULT_ROUNDS = 3

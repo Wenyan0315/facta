@@ -95,7 +95,12 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             return f"已存在同名笔记 {filename}，如需修改请先读取原文，或换一个文件名"
         try:
             path.write_text(content, encoding="utf-8")
-            return f"已写入 {filename}（{len(content)} 字）"
+            # S7a 闭环提示：新笔记默认只进向量库（下次启动/手动同步才进图谱）
+            # ——用户说「把它加进图谱」时点 sync_graph（界面可操作拍板）
+            return (
+                f"已写入 {filename}（{len(content)} 字）。"
+                "如需把这篇笔记的概念关系抽进知识图谱，可调用 sync_graph。"
+            )
         except OSError as e:
             return f"写入失败：{e}"
 

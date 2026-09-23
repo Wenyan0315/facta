@@ -1,13 +1,17 @@
-"""S7a query_graph 工具：图谱查询原语上菜单（agent 消费入口）。
+"""S7a 图谱工具族：query_graph（查询）+ sync_graph（抽取更新）。
 
-三个原语（S7a 草案 P4，一等公民款式）：
+query_graph 三个原语（一等公民款式）：
 - neighbors：概念的直接关系（1 跳，可按关系类型过滤）
 - path：两概念间的最短链路（BFS ≤3 跳，无向）——「A 和 B 什么关系」
 - overview：全图统计（概念数/关系分布/孤岛/枢纽）——「我学过什么全貌」
 
-单工具 + action 枚举（不拆三件）：菜单已 29 件，图谱是一个领域不是
-三个动词；参数按 action 校验，缺参/错参返回错误串指路（M5 反馈环
-惯例——错误文案即提示词）。
+sync_graph（界面可操作拍板，2026-09-23）：图谱更新不能只是启动时的
+隐式行为——用户在对话里新建/修改笔记后，说「把它加进图谱」即可触发
+增量抽取（指纹差集自动只抽改动篇）。force=True 清空指纹全量重抽
+（换更强模型后想全部重抽的真实场景）。不设确认缝：幂等重建、不碰
+用户数据、不可逆三判据全不沾（内部花钱与 search_and_summarize 同
+判据，审计可见）。落盘与回报在这层（管线只管抽取，落盘归工具——
+与启动路径 assemble 分工不同但同一份管线）。
 
 实现注记：schema 参数名用 from/to（对模型自然），但 from 是 Python
 关键字——func 收 **kwargs 再取键（registry.execute 的 func(**args)
@@ -16,7 +20,9 @@
 
 from __future__ import annotations
 
+from agent.knowledge.extract import sync_graph as _run_sync
 from agent.knowledge.graph import RELATIONS, GraphStore
+from agent.paths import GRAPH_PATH
 from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
 
@@ -146,4 +152,55 @@ def register_graph_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         },
         func=_query_graph,
         is_readonly=True,   # L0 只读：纯查询无副作用
+    ))
+
+    # ---- sync_graph：界面可操作的图谱更新（用户拍板 2026-09-23）----
+    # ctx.llm 缺席 = 不上菜单（教学组合无抽取通道，spawn 同款条件注册）
+    if ctx.llm is None:
+        return
+    extract_llm = ctx.llm   # 局部窄化：闭包捕获局部变量（mypy 闭包窄化惯例）
+
+    def _sync(force: bool = False) -> str:
+        if force:
+            # 全量重抽：清空指纹（不动图——merge_note 的原子替换保证旧边
+            # 在各篇重抽时逐篇失效；中途失败也不会留下半张空图）
+            store.note_hashes.clear()
+        report = _run_sync(store, ctx.notes_dir, extract_llm)
+        if report.extracted or report.removed:
+            store.save(GRAPH_PATH)
+        if report.extracted == 0 and report.skipped == 0 and report.failed == 0:
+            return (
+                f"图谱已是最新（{report.unchanged} 篇笔记未变，零抽取）。"
+                "笔记改动后再调本工具，或 force=true 全量重抽。"
+            )
+        parts = [f"抽取 {report.extracted} 篇 / 不变 {report.unchanged} 篇"]
+        if report.removed:
+            parts.append(f"删除 {report.removed} 篇")
+        if report.failed:
+            parts.append(f"失败 {report.failed} 篇（已跳过，不影响其他篇）")
+        stats = store.overview()
+        tail = f"。当前图谱：{stats['nodes']} 个概念 / {stats['edges']} 条关系边"
+        return "图谱同步完成：" + "，".join(parts) + tail
+
+    registry.register(Tool(
+        name="sync_graph",
+        description=(
+            "更新知识图谱：把笔记目录的改动增量抽取进图谱（指纹差集——"
+            "只抽新建/修改过的笔记，没变的零成本）。用户新建或修改笔记后"
+            "说「更新图谱」「把它加进图谱」时用本工具。force=true 清空"
+            "指纹全量重抽（换了更强的模型想重建全图时用）。抽取由内部"
+            "模型完成，结果落盘 data/graph.json。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "force": {
+                    "type": "boolean",
+                    "description": "是否全量重抽（默认 false 增量）",
+                },
+            },
+            "required": [],
+        },
+        func=_sync,
+        is_readonly=False,   # L1：改图谱（幂等重建，不碰用户笔记原文）
     ))

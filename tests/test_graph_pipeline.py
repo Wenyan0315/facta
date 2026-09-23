@@ -20,9 +20,9 @@ def _extract_llm(payload) -> ScriptedLLM:
     return ScriptedLLM([Message(role="assistant", content=json.dumps(payload, ensure_ascii=False))])
 
 
-def _tool_registry(store: GraphStore) -> ToolRegistry:
+def _tool_registry(store: GraphStore, notes_dir=None, llm=None) -> ToolRegistry:
     registry = ToolRegistry()
-    ctx = ToolContext(notes_dir=None, graph=store)   # type: ignore[arg-type]
+    ctx = ToolContext(notes_dir=notes_dir, graph=store, llm=llm)   # type: ignore[arg-type]
     register_graph_tools(registry, ctx)
     return registry
 
@@ -237,3 +237,84 @@ def test_query_graph_missing_param_guides():
     registry = _tool_registry(_demo_store())
     out = registry.execute("query_graph", json.dumps({"action": "neighbors"}))
     assert "entity" in out   # 缺参指路
+
+
+# ---------- sync_graph 工具（界面可操作） ----------
+
+
+def _sync_env(tmp_path, monkeypatch):
+    """装配带抽取通道的图谱工具环境。
+
+    GRAPH_PATH 的 patch 必须用 pytest monkeypatch（作用域=单测试，结束自动
+    还原）——曾试过 generator+finally 手工还原：list() 耗尽 generator 时
+    patch 就撤了，工具落盘会打到真项目 data/graph.json（S6a「patch 消费方
+    模块」血案的变体——patch 的生命周期与使用窗口必须对齐）。
+    """
+    import agent.tools.graph as graph_tools_mod
+    monkeypatch.setattr(graph_tools_mod, "GRAPH_PATH", tmp_path / "graph.json")
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "A.md").write_text("A 依赖 B。", encoding="utf-8")
+    store = GraphStore()
+    payload = {
+        "nodes": [{"name": "A"}, {"name": "B"}],
+        "edges": [{"source": "A", "target": "B", "relation": "依赖"}],
+    }
+    # 两条同款脚本：增量一次 + force 重抽一次（ScriptedLLM 弹完会兜底纯文本
+    # → 解析失败——force 测试的两次 sync 各要一条合法 JSON）
+    llm = ScriptedLLM([
+        Message(role="assistant", content=json.dumps(payload, ensure_ascii=False)),
+        Message(role="assistant", content=json.dumps(payload, ensure_ascii=False)),
+    ])
+    registry = _tool_registry(store, notes_dir=notes, llm=llm)
+    return registry, store, tmp_path / "graph.json"
+
+
+def test_sync_graph_tool_extracts_and_saves(tmp_path, monkeypatch):
+    registry, store, graph_file = _sync_env(tmp_path, monkeypatch)
+    out = registry.execute("sync_graph", "{}")
+    assert "抽取 1 篇" in out and "2 个概念" in out
+    assert graph_file.exists()                      # 落盘（知识资产）
+    import json as _json
+    data = _json.loads(graph_file.read_text(encoding="utf-8"))
+    assert data["nodes"] and data["edges"]
+
+
+def test_sync_graph_tool_zero_change_hint(tmp_path, monkeypatch):
+    registry, store, _ = _sync_env(tmp_path, monkeypatch)
+    registry.execute("sync_graph", "{}")            # 第一次：抽取
+    out = registry.execute("sync_graph", "{}")      # 第二次：指纹相同零抽取
+    assert "已是最新" in out and "零抽取" in out
+
+
+def test_sync_graph_tool_force_full_reextract(tmp_path, monkeypatch):
+    registry, store, _ = _sync_env(tmp_path, monkeypatch)
+    registry.execute("sync_graph", "{}")
+    # force=True：清指纹全量重抽（换更强模型的场景）
+    out = registry.execute("sync_graph", '{"force": true}')
+    assert "抽取 1 篇" in out
+
+
+def test_sync_graph_not_registered_without_llm(tmp_path):
+    # 条件注册：ctx.llm 缺席 → sync_graph 不上菜单（query_graph 仍在）
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    registry = _tool_registry(GraphStore(), notes_dir=notes, llm=None)
+    assert "query_graph" in registry.names()
+    assert "sync_graph" not in registry.names()
+
+
+def test_sync_graph_forbidden_to_subagent():
+    from agent.tools.spawn import _FORBIDDEN
+    assert "sync_graph" in _FORBIDDEN   # 子 agent 不动共享图谱
+
+
+def test_write_note_hints_sync_graph(tmp_path):
+    # 闭环引导：写完笔记提示图谱更新入口（make_plan 回灌同款）
+    from agent.tools.builtin import register_builtin
+    registry = ToolRegistry()
+    ctx = ToolContext(notes_dir=tmp_path)
+    register_builtin(registry, ctx)
+    out = registry.execute("write_note", json.dumps(
+        {"filename": "新概念.md", "content": "新概念是……"}))
+    assert "sync_graph" in out
