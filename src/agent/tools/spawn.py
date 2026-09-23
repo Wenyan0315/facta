@@ -37,6 +37,7 @@ from agent.orchestrator.agent import Agent
 from agent.orchestrator.loop import RunResult, run_turn
 from agent.tools.context import ToolContext
 from agent.tools.files import register_file_tools
+from agent.tools.plan import format_view
 from agent.tools.registry import Tool, ToolRegistry
 from agent.tools.terminal import register_terminal_tools
 from agent.tools.worktree import (
@@ -47,7 +48,8 @@ from agent.tools.worktree import (
 )
 
 # 禁止清单（程序侧硬编码，显式指定也不放行）：
-# - spawn_subagent：递归防护（子 agent 不再派子 agent，规划深度=2 层封顶）
+# - spawn_subagent / spawn_step（S6c）：递归防护（子 agent 不再派子 agent，
+#   也不派发计划步骤——它是执行者不是编排者，规划深度=2 层封顶）
 # - 计划三件：分派语义是「主 agent 已规划好，子 agent 执行」；子 agent 再
 #   规划=规划套规划，主 plan 事件流被稀释（挂触发信号：真实使用出现
 #   「子任务本身够复杂需要二级计划」再开，届时 S6 编排也该上了）
@@ -55,12 +57,17 @@ from agent.tools.worktree import (
 #   messages——默认子集含它们=「子上下文看不到本对话」的 prompt 承诺被
 #   工具层击穿（子 agent 能检索父会话全部内容，噪声隔离反向泄漏）
 _FORBIDDEN = frozenset({
-    "spawn_subagent", "make_plan", "update_plan_step", "finish_plan",
+    "spawn_subagent", "spawn_step", "make_plan", "update_plan_step", "finish_plan",
     "search_history", "read_history",
 })
 
 DEFAULT_ROUNDS = 3
 MAX_ROUNDS = 10
+
+# spawn 的固定失败信号（spawn_subagent 造的，不可能是子 agent 正常结论）：
+# spawn_step 靠它判断步骤 done/failed——子 agent 正常结论是它自己写的摘要，
+# 不会恰好以这两个前缀开头。worktree 收尾把结论拼在前面，前缀判断稳定。
+_FAILURE_PREFIXES = ("子任务失败：", "子任务被取消")
 
 TASK_TEMPLATE = (
     "你是被派来执行一项具体任务的专项执行员。任务：{task}\n"
@@ -241,3 +248,58 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         func=_spawn,
         receives_confirm=True,   # S5c：确认缝透传给子执行流（registry 注入 confirm 参数）
     ))
+
+    # ---- S6c spawn_step：计划步骤派发（真编排的焊缝）----
+    # 把「计划的一步」绑定「一个子任务」：标 in_progress → 派子任务 → 按
+    # 成败回写 done/failed（自动回写，模型不用手动 update_plan_step）。
+    # 需要 ctx.session（计划载体）——缺席则不上菜单（条件注册惯例）。
+    if ctx.session is not None:
+        board = ctx.session.plan
+
+        def _spawn_step(step_id: int, task: str, worktree: bool = False, confirm=None) -> str:
+            # 校验在 board.update_step 里统一做（薄包装原则，与 plan.py 工具同款）：
+            # 无活跃计划 / step_id 不在计划 / 已终态，都 ValueError → 错误串回灌
+            try:
+                board.update_step(step_id, "in_progress", note="子任务执行中")
+            except ValueError as e:
+                return f"步骤派发被拒：{e}"
+
+            # 复用 spawn_subagent 全套（噪声隔离/工具子集/worktree 隔离/确认透传）
+            result = spawn_subagent(
+                task, llm=sub_llm, registry=registry,
+                worktree=worktree, ctx=ctx, confirm=confirm,
+            )
+
+            # 成败回写：spawn 的失败是固定信号（_FAILURE_PREFIXES），其余皆视为
+            # 完成（子 agent 的结论即步骤产出）
+            status, prefix = ("failed", "执行失败") if result.startswith(_FAILURE_PREFIXES) else ("done", "执行完成")
+            try:
+                board.update_step(step_id, status, note=result)
+            except ValueError as e:   # 理论上不会（前面已校验 + 同步执行）
+                return f"步骤已派发但回写失败：{e}\n子任务结果：{result}"
+            return (
+                f"步骤 #{step_id} {prefix}（子任务结论）：\n{result}\n\n"
+                f"当前计划：\n{format_view(board.view())}"
+            )
+
+        registry.register(Tool(
+            name="spawn_step",
+            description=(
+                "把当前计划里的一个步骤派给子 agent 执行，完成后自动回写该步骤状态"
+                "（成功标 done、失败标 failed），无需你手动再调 update_plan_step。"
+                "用它与 make_plan 配合：先 make_plan 拆步骤，再逐个 spawn_step 执行，"
+                "最后 finish_plan 收官。step_id 是计划里的步骤编号（以最新计划为准）。"
+                "worktree=True 时子任务在独立 git worktree 沙箱里改文件，改动经确认后合回。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "step_id": {"type": "integer", "description": "计划步骤编号（以最新计划为准）"},
+                    "task": {"type": "string", "description": "这一步的执行任务书：做什么、产出什么结论（自包含）"},
+                    "worktree": {"type": "boolean", "description": "是否在独立 git worktree 沙箱里改文件（改代码类步骤用 true）"},
+                },
+                "required": ["step_id", "task"],
+            },
+            func=_spawn_step,
+            receives_confirm=True,   # worktree 合回确认透传（S6a 同款）
+        ))
