@@ -221,6 +221,8 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "max_rounds 是其工具循环预算（默认 3）。注意：子上下文没有本对话的历史。"
             "worktree=True 时子上下文在独立的 git worktree 沙箱里改文件——改动不碰"
             "当前工作区，跑完经用户确认后合回（拒绝则整棵丢弃）。"
+            "有多件互不依赖的杂活要同时做时，可一次调用多个 spawn_subagent"
+            "（同一轮回复里并列点菜），它们会并行执行。"
         ),
         parameters={
             "type": "object",

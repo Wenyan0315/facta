@@ -68,6 +68,11 @@ class Run:
     _seq: int = 0
     _confirm_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _confirm_decision: bool | None = field(default=None, repr=False)
+    # S6b 并行确认锁：单槽位（confirm_pending/_confirm_decision）在多 spawn
+    # 并行时会被踩——两个子 agent 同时触发确认，第二个 clear event 把第一个
+    # 的裁决通道冲掉。锁串行化裁决：同一时刻只处理一个确认，其余排队——
+    # 语义正确（人一次只能看一个确认弹窗，确认本就该串行）。
+    _confirm_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -127,22 +132,27 @@ class Run:
         无对应 resolved 则前端重新弹窗（确认不随断线丢失）。
         等待中取消视为拒绝：确认挂起不挡取消通道。
         """
-        prev, self.status = self.status, STATUS_WAITING
-        self.confirm_pending = True
-        self._confirm_event.clear()
-        self._confirm_decision = None
-        self.emit("confirm.request", {"tool": tool, "arguments": arguments})
-        while True:
-            if self._confirm_event.wait(timeout=0.2):
-                approved = bool(self._confirm_decision)
-                break
-            if self.cancel_requested:
-                approved = False
-                break
-        self.confirm_pending = False
-        self.status = prev
-        self.emit("confirm.resolved", {"tool": tool, "approved": approved})
-        return approved
+        # S6b 并行确认锁：整个「挂起→等裁决→复位」临界区串行化。并行
+        # spawn 的多个确认请求排队处理——单槽位不会被并发 clear/write 踩踏
+        # （旧代码两个子 agent 同时确认时，第二个 clear 会把第一个的裁决
+        # 通道冲掉）。wait 循环在锁内，第二个确认等第一个裁决完才进入。
+        with self._confirm_lock:
+            prev, self.status = self.status, STATUS_WAITING
+            self.confirm_pending = True
+            self._confirm_event.clear()
+            self._confirm_decision = None
+            self.emit("confirm.request", {"tool": tool, "arguments": arguments})
+            while True:
+                if self._confirm_event.wait(timeout=0.2):
+                    approved = bool(self._confirm_decision)
+                    break
+                if self.cancel_requested:
+                    approved = False
+                    break
+            self.confirm_pending = False
+            self.status = prev
+            self.emit("confirm.resolved", {"tool": tool, "approved": approved})
+            return approved
 
     def resolve_confirm(self, approved: bool) -> bool:
         """用户裁决落子（confirm 端点调用）；无 pending 确认时返回 False。"""

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from enum import Enum
 
@@ -29,6 +30,11 @@ from agent.orchestrator.agent import Agent
 from agent.tools.plan import format_view
 
 logger = logging.getLogger(__name__)
+
+# S6b 并行 spawn：唯一「设计上可证明安全」的并行工具（独立 Session +
+# worktree 隔离、IO-bound）。普通工具保持串行——模型常期待「先读 A 再
+# 决定读 B」，并行会打乱它的预期顺序（保守默认，与 needs_confirmation 同哲学）
+_SPAWN_TOOL = "spawn_subagent"
 
 # （S5a）SYSTEM_PROMPT 已搬家：行为定义从引擎代码搬进 Agent 对象
 # （agent.py::DEFAULT_SYSTEM_PROMPT）——行为定义与执行引擎分离；
@@ -150,6 +156,93 @@ def _route_first_menu(agent: Agent, user_text: str, schemas: list[dict]) -> list
     return schemas or None   # complex
 
 
+def _split_tool_batches(tool_calls: list[dict]) -> list[tuple[bool, list[dict]]]:
+    """把一轮 tool_calls 切成批：连续 spawn 段 = 可并行批（True），
+    其余逐个 = 串行批（False）。
+
+    只对「连续 spawn」开并行——穿插的普通工具拆成单元素串行批，保持
+    原顺序。结果按批顺序回填，模型看到的顺序与点菜顺序一致。
+    """
+    batches: list[tuple[bool, list[dict]]] = []
+    i = 0
+    n = len(tool_calls)
+    while i < n:
+        if tool_calls[i]["name"] == _SPAWN_TOOL:
+            j = i
+            while j < n and tool_calls[j]["name"] == _SPAWN_TOOL:
+                j += 1
+            batches.append((True, tool_calls[i:j]))
+            i = j
+        else:
+            batches.append((False, [tool_calls[i]]))
+            i += 1
+    return batches
+
+
+def _run_parallel(tool_calls: list[dict], agent: Agent, on_confirm: Callable | None) -> list[str]:
+    """并行执行一批 spawn（线程池）；结果按提交顺序返回（点菜顺序=确定性）。
+
+    spawn 是 IO-bound（子 agent 大量时间等 LLM），GIL 不碍事——线程池
+    就够，不必上进程。f.result() 按 futures 提交序取，非完成序——
+    结果顺序与模型点菜顺序一致（它靠位置对应 tool_call_id）。
+    """
+    with ThreadPoolExecutor(max_workers=len(tool_calls)) as ex:
+        futures = [
+            ex.submit(agent.execute, tc["name"], tc["arguments"], confirm=on_confirm)
+            for tc in tool_calls
+        ]
+        results: list[str] = []
+        for f in futures:
+            try:
+                results.append(f.result())
+            except Exception as exc:  # agent.execute 已兜底（registry 返回错误串），这里是意外
+                results.append(f"错误：并行执行失败（{exc}）")
+        return results
+
+
+def _execute_tool_calls(
+    tool_calls: list[dict],
+    session: Session,
+    payload: list[Message],
+    agent: Agent,
+    on_confirm: Callable | None,
+    on_event: Callable | None,
+    should_cancel: Callable | None,
+) -> bool:
+    """执行一轮的全部工具调用（S6b 切批：连续 spawn 段并行，其余串行）。
+
+    结果按点菜顺序回填（tool 消息与 tool_call_id 一一对应，模型靠位置认）。
+    返回 False = 取消命中（已 trim 半截轮），调用方应返回 CANCELLED。
+    """
+    for parallel_ok, batch in _split_tool_batches(tool_calls):
+        # 协作式取消检查点②：每个批执行前（批粒度，非逐工具）
+        if should_cancel and should_cancel():
+            trim_incomplete_round(session.messages)
+            return False
+        # tool_started：并行批先全发（表示都开始了），串行批逐发
+        for tc in batch:
+            if on_event:
+                on_event("tool_started", {"name": tc["name"], "arguments": tc["arguments"]})
+        # 执行：连续 spawn 段用线程池并行，其余串行
+        if parallel_ok and len(batch) > 1:
+            results = _run_parallel(batch, agent, on_confirm)
+        else:
+            results = [agent.execute(tc["name"], tc["arguments"], confirm=on_confirm) for tc in batch]
+        # 按序回填（点菜顺序，确定性——模型靠位置对应 tool_call_id）
+        for tc, result in zip(batch, results, strict=True):
+            # S5b 针②：工具执行后立刻 drain 计划事件——在 tool_result 之前
+            # 转发（plan.* 是这次执行的一部分，因果序在前）。事件走既有
+            # on_event 缝，零新缝；server 侧点分命名默认透传，前端免费收到
+            _forward_plan_events(session.plan, on_event)
+            if on_event:
+                on_event("tool_result", {"name": tc["name"], "result": result})
+            # 结果以 role="tool" 回填，tool_call_id 对应是哪次调用
+            tool_msg = Message(role="tool", tool_call_id=tc["id"], content=result)
+            session.messages.append(tool_msg)
+            payload.append(tool_msg)
+    return True
+
+
 def run_turn(
     session: Session,
     user_text: str,
@@ -258,24 +351,13 @@ def run_turn(
             session.messages.append(reply)
             payload.append(reply)
 
-            for tc in reply.tool_calls:   # 模型一次可能点多个菜
-                # 协作式取消检查点②：每次工具执行前
-                if should_cancel and should_cancel():
-                    trim_incomplete_round(session.messages)
-                    return RunResult.CANCELLED, None
-                if on_event:
-                    on_event("tool_started", {"name": tc["name"], "arguments": tc["arguments"]})
-                result = agent.execute(tc["name"], tc["arguments"], confirm=on_confirm)
-                # S5b 针②：工具执行后立刻 drain 计划事件——在 tool_result 之前
-                # 转发（plan.* 是这次执行的一部分，因果序在前）。事件走既有
-                # on_event 缝，零新缝；server 侧点分命名默认透传，前端免费收到
-                _forward_plan_events(session.plan, on_event)
-                if on_event:
-                    on_event("tool_result", {"name": tc["name"], "result": result})
-                # 结果以 role="tool" 回填，tool_call_id 对应是哪次调用
-                tool_msg = Message(role="tool", tool_call_id=tc["id"], content=result)
-                session.messages.append(tool_msg)
-                payload.append(tool_msg)
+            # S6b 切批执行：连续 spawn 段并行（线程池），普通工具串行。
+            # 结果仍按点菜顺序回填——并行只是「怎么跑」变了，「模型看到
+            # 什么」与串行逐字节一致（外部行为不变，冒烟套件把关）。
+            if not _execute_tool_calls(
+                reply.tool_calls, session, payload, agent, on_confirm, on_event, should_cancel
+            ):
+                return RunResult.CANCELLED, None
             # M10 半路由归还：第一次模型调用结束后，菜单恢复全量——工具结果
             # 已回灌，循环决策权归还模型（bench 三层分解：Jev 管第一步，
             # 循环内决策归模型/harness）。direct 场景模型直答即 return，到不了这里
