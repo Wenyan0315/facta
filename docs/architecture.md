@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.67（2026-09-23）｜随着里程碑推进持续迭代此文档
+> 版本：v0.68（2026-09-24）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [product.md](product.md) v2）：个人执行助手——执行主轴 + 记忆护城河 + 通用外延（[021](decisions/021-direction-decisions.md)）
 
@@ -20,7 +20,8 @@
 ┌──────────────────────────────────────────────────────────────┐
 │                        用户交互层                              │
 │  ✅ CLI 壳 ｜ ✅ Web：对话视图 + 任务视图（列表+计划面板，S5c）  │
-│            + 记忆面板（025）｜ 以后：IM 渠道（S8）              │
+│            + 记忆面板（025）+ 知识图谱面板（S7b 力导向图）        │
+│            ｜ 以后：IM 渠道（S8）                                 │
 └──────────────────────────┬───────────────────────────────────┘
                            │
 ┌──────────────────────────▼───────────────────────────────────┐
@@ -61,10 +62,11 @@
 │ ✅ 向量库+增量  │          │    + FallbackLLM 降级链）        │
 │   data/notes/  │          │  ✅ LLM 接口+OpenAICompatible    │
 │   （数据外置）  │          │  ✅ Jev 决策模型（M10：JevClient  │
-│ 以后：知识图谱  │          │    + ScenarioRouter 三态）       │
-│ （S7）         │          │  ✅ evalkit 纯函数（024）        │
-└────────────────┘          │  以后：更多供应商+多模型路由      │
-                           └────────────────────────────────┘
+│ ✅ 知识图谱     │          │    + ScenarioRouter 三态）       │
+│   （S7：抽取   │          │  ✅ evalkit 纯函数（024）        │
+│   +增量同步    │          │ 以后：更多供应商+多模型路由      │
+│   +查询原语）  │          │                                │
+└────────────────┘          └────────────────────────────────┘
        │
 ┌──────▼───────────────────────────────────────────────────────┐
 │  memory/  记忆层                                               │
@@ -108,10 +110,10 @@
 | core 地基 | ✅ types / llm 接口+实现 / 网关四件套 / 账本 / 向量数学 / **Jev 决策模型接入（M10：JevClient+ScenarioRouter，urllib 零依赖、三态生命周期、选项空间封闭注入免疫）**——最底层不反认上层（S2a 依赖方向拨正） | 更多供应商 + 多模型路由 |
 | orchestrator 主循环 | ✅ ReAct 雏形 + M5.5 Agentic RAG：决策→执行→观察→再决策（5轮保险丝）；检索权已移交模型，主循环不再直连 kb；streaming 流式消费（分片边收边打→merge 拼回复；内部调用照旧非流）；S2a 内核/外设分离：run_turn 零 input/print，I/O 走 on_text/on_event/should_cancel/on_confirm 四条缝（S4b 加确认缝）；S2b 协作式取消两检查点；run_turn 返回 RunResult 三态枚举（COMPLETED/CANCELLED/FAILED，取消/模型全挂不再靠 None 二义反推，S4 评审修复轮）；**S5a Agent 对象**：行为定义与执行引擎分离（agent.py 六字段 frozen；SYSTEM_PROMPT 外置为 DEFAULT_SYSTEM_PROMPT，learned 三桶 AGENTS.md 式快照注入 prompt 尾）；run_turn agent 化（registry 参数退场、空菜单折叠回 None 防「不传≠空」API 坑、幻觉点菜 assert 炸→错误串反馈环）；**S5b plan-then-act 两针**：活跃计划投影注入（`_plan_stamp`，时间戳同款手法，无活跃零开销）+ 计划事件 drain 转发（工具执行后、tool_result 前，因果序，零新缝）；**M10 场景路由轮首一针**：`_route_first_menu`（direct 藏菜单进语义缓存命中区/single_tool 单工具菜单 LLM 只填参数/complex 全量自决；半路由——工具结果回灌后循环尾归还全量菜单，循环决策权归还模型） | 并行工具调用 / 更复杂的规划策略 |
 | LLM 接入 | ✅ OpenAI兼容统一类+配置表(deepseek/deepseek-flash/siliconflow，M10 备用链按 prefix 去重——同供应商同故障域不陪葬) + 进程内网关(M7.5：记账/重试超时/精确缓存+语义缓存默认关(029：跨上下文串味，env 开关)/熔断三态/降级链+优雅兜底)；主力默认 deepseek-flash（M10，bench 题86%+ECE 0.042） | 更多供应商 + 多模型路由 |
-| knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集)；检索命中带溯源（SearchHit=块+相似度+来源面单，query 全链路透出，S4 评审修复轮）；**知识图谱（S7a）**：graph.py 三层结构（值对象/GraphStore 三道校验闸门/查询原语 resolve-neighbors-path-overview）+ extract.py 封闭抽取（关系白名单+实体挂靠+禁推断；出处签名强制）+ sync_graph 指纹差集增量（graph.json 知识资产进 git） | 图谱可视化（S7b） |
+| knowledge | ✅ Embedder接口+词袋/BGE双实现 + loader(数据外置) + VectorStore接口+双实现(M7：InMemory教学版/Chroma工业版落盘) + 增量同步(内容指纹差集)；检索命中带溯源（SearchHit=块+相似度+来源面单，query 全链路透出，S4 评审修复轮）；**知识图谱（S7a）**：graph.py 三层结构（值对象/GraphStore 三道校验闸门/查询原语 resolve-neighbors-path-overview）+ extract.py 封闭抽取（关系白名单+实体挂靠+禁推断；出处签名强制）+ sync_graph 指纹差集增量（graph.json 知识资产进 git）+ GRAPH_LOCK 图级并发锁（S7b：跨线程共享资产串行） | 图谱质量迭代轮（触发信号在活清单） |
 | memory | ✅ 会话内记忆 + 跨会话 JSON 持久化（M6.1）+ 摘要压缩（M6.2）+ 温层检索 search_history/read_history（M6.3）+ Session 状态整体持久化（压缩缓存随底片落盘，重启不再重压）+ 记忆固化 data/learned（M6.4：萃取→审查→硬校验→落盘）+ 多会话管理（S1：active+archive，/new 归档重开）+ restore_session 原语（S2a：归档写回 active 后删除，move 语义）+ **plan 计划域（S5b）**：PlanBoard/PlanState/事件史（append 修订、fold 视图、显式终态制），生命周期=会话随 session.json 落盘，老文件宽进 + **用户级记忆（M6.5）**：固化管线 scope 分流→~/.personal-agent/user.md 仓库外落盘（不进任何 git），主 agent prompt 注入【用户记忆】段（项目桶之后，元记忆首轮必加载），敏感凭证正则硬禁令，审查对 user 条目从宽（跨项目污染代价高），子 agent 不注入（执行器非陪伴者） | 记忆面板用户级分栏；检索分层（032 v2 信号） |
 | tools | ✅ Tool+ToolRegistry+内置工具按家族分件（time/history/notes 三族，S4a 拆分）；write_note 安全栅栏+查重闸门；**read_notes 越界读修复(029：与 write_note 同款 resolve+is_relative_to 防线)**；search_notes=Agentic RAG 入口；search_and_summarize=复合工具(内部调LLM，Sub-agent原型)；联网工具 web_search/fetch_web（015：Tavily Provider+SSRF 栅栏+条件注册）；MCP 外部工具配置化接入；文件四件 read_file/search_code/list_dir/write_file+diff（S4a，workspace 围栏：__file__ 锚定+敏感黑名单读都不行，**search_code rglob 也挡 .env(029)**）；终端执行 run_command（S4b：白名单只读免确认/L2 确认缝 registry 收口/批准拒绝都落审；评审修复轮加参数级拦截——find -exec/sort -o 等「只读命令名+危险参数」也弹确认）；计划三件（S5b）：make_plan（人审掌舵点，复用确认缝）/update_plan_step（状态回写+回灌带最新视图）/finish_plan（显式终态程序闸）；spawn_subagent（S5c：子 agent 分派只回传结论=噪声隔离，禁止单硬编码防递归，**_FORBIDDEN 含历史工具(029：防父会话泄漏)**，receives_confirm 确认缝透传，worktree 沙箱+并行(S6a/S6b)）；spawn_step（S6c：计划步骤派发——标 in_progress→派子任务→自动回写 done/failed，make_plan→spawn_step→finish_plan 编排链，_FORBIDDEN 封死子 agent 编排）；**图谱双件（S7a）**：query_graph（三原语 neighbors/path/overview，错误串指路，L0 只读）/sync_graph（界面可操作增量抽取+force 全量重抽+落盘回报；ctx.llm 缺席不上菜单；子 agent 禁用）；write_note 回灌带 sync_graph 闭环提示 | 更多工具 + skills |
-| server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子、**广播模型(029)：订阅者独立队列+终态补发哨兵，聊天页+任务页同时订阅不竞争**）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + 静态三件零构建链；只绑 127.0.0.1。验收修复轮：人设保证（ensure_persona 装配不变量）、每轮落盘、取消检查点③（流中即时）、任务视图最小版（/tasks+GET /api/runs）、历史回放（GET /api/messages）、md 渲染（marked vendored，**escape-before-parse+协议白名单(029)**）、Enter/Esc 键盘。S4b：waiting_approval 挂起态（进单锁口径、取消视拒、confirm.request/resolved 事件断线重放重弹）+ confirm 裁决端点 + 前端确认弹窗。S5c：任务视图 Run 详情展开（计划面板——EventSource 消费 plan.*/tool.*/run.* 事件，**点分命名(029)**，fold 与后端 PlanState.view 同构，断线重放免费） | 主聊天视图迁移 FW 站（渐进）；Run Store 外置（多实例触发） |
+| server Web 壳 | ✅ S2b：FastAPI+SSE（web 可选组）——Run 三接口分离（创建 202/事件订阅/取消）+ 内存 Run Store（状态机单一终态、事件 append-only 带 seq、单锁 create_if_idle 原子、**广播模型(029)：订阅者独立队列+终态补发哨兵，聊天页+任务页同时订阅不竞争**）+ Last-Event-ID 断线重放 + 会话列表/新开/切回 + 静态三件零构建链；只绑 127.0.0.1。验收修复轮：人设保证（ensure_persona 装配不变量）、每轮落盘、取消检查点③（流中即时）、任务视图最小版（/tasks+GET /api/runs）、历史回放（GET /api/messages）、md 渲染（marked vendored，**escape-before-parse+协议白名单(029)**）、Enter/Esc 键盘。S4b：waiting_approval 挂起态（进单锁口径、取消视拒、confirm.request/resolved 事件断线重放重弹）+ confirm 裁决端点 + 前端确认弹窗。S5c：任务视图 Run 详情展开（计划面板——EventSource 消费 plan.*/tool.*/run.* 事件，**点分命名(029)**，fold 与后端 PlanState.view 同构，断线重放免费）。S7b：知识图谱面板（/graph 页面伺服 + GET /api/graph 全量 nodes/edges/stats + POST /api/graph/rebuild force 重抽——与对话内 sync_graph 工具共用 GRAPH_LOCK 图级锁，常驻进程下面板重建端点（请求线程）与工具调用（worker 线程）互斥） | 主聊天视图迁移 FW 站（渐进）；Run Store 外置（多实例触发） |
 | evals | ✅ **evalkit 内核**（src/agent/evalkit：指标/指纹判定/归因/judge 解析纯函数，零依赖可拿走，024）+ evals 壳（三路并评+miss 归因，30 题形态分层，8 万字混合语料，022 混合检索裁定不立项）+ LLM-as-judge 回答质量(基线 13/13 合格, 0% 错误, 全轮 ¥0.011) | 更难的对抗题库 + 回答质量回归 |
 | data | ✅ data/notes/*.md 笔记库(与evals/线上共用同一语料)；agent 可自主写入(自我进化闭环已验证)；data/memory/session.json 对话记忆(M6.1，gitignore 运行时数据)；data/learned/*.md 项目级长时记忆(M6.4，进 git；S5a 起兼任 Agent prompt 注入源——AGENTS.md 式读取侧)；**data/graph.json 知识图谱（S7a，进 git——notes 的结构化投影，知识资产可审查可 diff）** | 长文档、多来源 |
 
@@ -148,11 +150,11 @@
 | S2 ✅ | 产品骨架 v1 对话视图：S2a 清账（agent_loop 正名 orchestrator 编排层、run_turn 内核/外设分离、assemble 装配单一真值源）→ S2b Web 壳（FastAPI+SSE：Run 三接口分离、内存 Run Store 单锁状态机、断线重连重放、会话切回、零构建链前端三件）；任务视图当时按双视图预留未实现（后由 FW 站 v2 + S5c 计划面板兑现） | 前后端、SSE、Run 状态机 |
 | S3 ✅ | 安全底座：工具权限分级（L0 只读/L1 写/L2 确认留 S4）+ 注入界碑（外部内容包裹声明+免疫条款）+ 审计日志（registry 收口 append-only jsonl 按天滚动，分级截断） | 安全 |
 | S4 ✅ | 工具访问三件套：文件读写 / 代码定位 / 终端执行（coding agent 的腿）；工业版目标=LSP 反馈环（Shadow Workspace 思路）。**S4a ✅ 文件四件（read/search_code/list_dir/write_file+diff）+ builtin 拆分（time/history/notes 三族）+ workspace 围栏（__file__ 锚定+敏感黑名单）**；**S4b ✅ 终端执行 run_command + L2 确认机制（只读白名单免确认/registry 确认缝第四条缝/waiting_approval 挂起/Web 弹窗+CLI input/批准拒绝都落审）** | 文件系统、进程调度 |
-| FW ✅ | 前端基建（021 裁定兑现，见 [023](decisions/023-fw-preact-pilot.md)）：Preact+Vite 脚手架（frontend/ 源码 → static/fw/ 产物，产物进 git）；任务视图 v2 试点完成（状态驱动替代 innerHTML 同步矩阵，JSX 自动转义结构性免疫注入）；构建链第一课：子路径部署必须 base:"/fw/"。**记忆面板 v1 ✅（[025](decisions/025-memory-panel.md)，护城河可视化）：learned 三桶查看/编辑/删除 + 行号定位协议 + 坏行宽容（幻觉清理入口）**。下一步：主聊天视图渐进迁移 | 声明式渲染、状态驱动 |
+| FW ✅ | 前端基建（021 裁定兑现，见 [023](decisions/023-fw-preact-pilot.md)）：Preact+Vite 脚手架（frontend/ 源码 → static/fw/ 产物，产物进 git）；任务视图 v2 试点完成（状态驱动替代 innerHTML 同步矩阵，JSX 自动转义结构性免疫注入）；构建链第一课：子路径部署必须 base:"/fw/"。**记忆面板 v1 ✅（[025](decisions/025-memory-panel.md)，护城河可视化）：learned 三桶查看/编辑/删除 + 行号定位协议 + 坏行宽容（幻觉清理入口）**。**知识图谱面板 ✅（S7b，[036](decisions/036-s7b-graph-visualization.md)，第三入口）：自研 SVG 力导向 + 进阶交互（路径高亮/搜索定位/类型过滤）**。下一步：主聊天视图渐进迁移 | 声明式渲染、状态驱动 |
 | S5 | 执行架构（2026-09-18 重定义，[021](decisions/021-direction-decisions.md)）：**Agent 对象抽象**（独立 system prompt/工具子集/预算/记忆——吸收原 skill 站的 SYSTEM_PROMPT 外置与 AGENTS.md 式 learned 读取侧，二者本就是 Agent 对象的属性）+ **plan-then-act**（轻量规划，plan 即 Human on the Loop 掌舵点；plan 载体=独立最小结构挂 Run 事件流）+ **spawn_subagent**（子 agent 只回传结论=噪声隔离，S6 判据提前兑现）；技能包格式后置并入 S6。对抗机制（critic）不内置——Agent 对象落地后从机制变配置，触发信号见 [026](decisions/026-adversarial-critic-deferred.md)。**S5a ✅ Agent 对象**（[027](decisions/027-s5-execution-architecture.md)：三拍板定 S5b 形状——模型自判/append 修订/显式终态制；六字段 frozen、菜单与执行分离、两段式验收 sha256 锁死搬家等价、learned 快照三原则）。**S5b ✅ plan-then-act**（[027](decisions/027-s5-execution-architecture.md)：三层结构 值对象/PlanState/PlanBoard，事件溯源最小版——append 修订+fold 视图；双视图 轮首快照+工具结果回灌导航；修订复用 make_plan 状态机分叉；人审掌舵复用 S4b 确认缝）。**S5c ✅ spawn_subagent + 计划面板**（[027](decisions/027-s5-execution-architecture.md)：噪声隔离=主底片只多一条结论消息，临时会话不落盘不受单锁；禁止单程序侧硬编码防递归；receives_confirm 显式通道人审不分主子；任务面板=任务视图 Run 详情展开，SSE 消费 plan.* 事件 fold 与后端同构）。**S5 全站收官** | 执行架构、规划 |
 | S6 ✅ | 多 agent 协作：worktree 隔离机制 + 真编排（技能包格式自 S5 后置并入；spawn_subagent 已在 S5 兑现噪声隔离判据；2026-09-22 优先级拍板 B 先行已落地——冒烟套件作 S6 安全网，spawn 内部重构外部行为自动把关）。**S6a ✅ worktree 隔离**（[030](decisions/030-s6a-worktree-isolation.md)：WORKSPACE_ROOT 注入化+确认缝合回+子 registry 重锚+残留回收；跨进程挂触发信号）。**S6b ✅ 并行 spawn**（[031](decisions/031-s6b-parallel-spawn.md)：连续 spawn 段线程池并行+确认缝 _confirm_lock 串行化+结果按点菜顺序回填）。**S6c ✅ 真编排 spawn_step**（[033](decisions/033-s6c-orchestration.md)：计划步骤派发自动回写 done/failed，make_plan→spawn_step→finish_plan 编排链；步骤级并行挂触发信号）。**S6 全站收官**——拆→派→隔离→并发→汇总最小闭环；技能包格式与跨进程仍挂触发信号 | 编排 |
 | M10 ✅ | 场景路由与快慢分工（2026-09-21，[028](decisions/028-m10-scenario-routing.md)，model-bench 评测结论落地）：**决策/生成分离**——Jev choice 管意图识别（bench 路由 19/20，成本 1/20）挂 Agent.router 轮首一针；deepseek-flash 管生成（题库轨道 86% 第一、ECE 0.042）；参数填充归 LLM、循环决策归 harness（bench 三层分解）。三态生命周期硬约束（无 key 条件装配/单次故障 fail-open/持续故障熔断同款参数），route() 永不抛、返回 None=原生路径（无 Jev=cortex 功能完整）。确认闸门程序侧硬编码不动（bench：五模型安全确认无一全对，DS-V4-Pro 唯一裸奔）。（S5c 已于其后收官，`ee4efd4`） | 决策外包、fail-open、选项封闭注入免疫 |
-| S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止）。**S7a ✅ 数据层**（[035](decisions/035-s7a-knowledge-graph.md)：graph.py 三层结构+extract.py 封闭抽取+sync_graph 指纹差集增量+query_graph/sync_graph 双工具+实机闭环验收——孤岛诊断→补笔记→缺口自愈）。**S7b 图可视化**：前端第三入口（力导向图+「重建图谱」按钮，技术选型 S7b 开工拍） | 结构化知识、图可视化 |
+| S7 | 知识图谱：实体关系抽取 + 图可视化（M8 支线并入；RepoWiki 为工业形态参照，v0.1 够用即止）。**S7a ✅ 数据层**（[035](decisions/035-s7a-knowledge-graph.md)：graph.py 三层结构+extract.py 封闭抽取+sync_graph 指纹差集增量+query_graph/sync_graph 双工具+实机闭环验收——孤岛诊断→补笔记→缺口自愈）。**S7b ✅ 图可视化**（[036](decisions/036-s7b-graph-visualization.md)：前端第三入口 /graph——自研 SVG 力导向+进阶交互（拖拽/缩放/邻居高亮/路径高亮/搜索定位/类型过滤）+重建图谱按钮；GET /api/graph 全量+POST /api/graph/rebuild（force 重抽）；GRAPH_LOCK 图级并发锁）。**S7 全站收官** | 结构化知识、图可视化 |
 | S8 | 多入口 Gateway：IM 渠道（飞书/Telegram 等）消息归一化接入 agent_loop，与 headless 合并（gateway 常驻进程——重审「不 daemon 化」原则） | 事件驱动、常驻服务 |
 | 〔另排期〕 L1 | 本地模型接入：Ollama（OpenAI 兼容端点零代码接入，Qwen3 档起步；触发信号=需要零成本/离线验收链路时排期） | 本地推理 |
 | 〔支线·可跳〕 M9 | 论文推送：cron 触发 + headless 任务 + arXiv 接入 + 语义过滤 | 外部API、无头任务、信息流过滤 |
@@ -209,6 +211,7 @@
 | [033-s6c-orchestration](decisions/033-s6c-orchestration.md) | S6c 真编排 | 焊点认知（make_plan 与 spawn_subagent 两条平行线靠模型临场手工桥接——会忘/错位/重复，spawn_step 把手工桥变程序焊缝）；四拍板（新工具不加参数/自动回写保留步骤间掌舵/串行为主+步骤级并行挂触发信号/子 agent 禁 spawn_step）；_FAILURE_PREFIXES 成败判据；S6 全站收官（拆→派→隔离→并发→汇总最小闭环） |
 | [034-m6.5-user-memory](decisions/034-m6.5-user-memory.md) | M6.5 用户级记忆 | 位置 ~ /personal-agent/user.md 单文件（Trae 两层参照，仓库外不进任何 git）；scope 分流（铁律 2 从「不记」→「分流」，M6.4 红线解扣）；敏感凭证正则硬禁令（宁误杀不漏放）；审查对 user 从宽（跨项目污染代价）；子 agent 不注入（临期修正：执行器非陪伴者）；面板分栏挂可选子项 |
 | [035-s7a-knowledge-graph](decisions/035-s7a-knowledge-graph.md) | S7a 知识图谱数据层 | 设计原则第 7 条首个实证（曾以语料小砍范围被纠正，按一等公民规格建）；五拍板（封闭抽取三防线/出处签名强制/graph.json 进 git/查询三原语/界面可操作 sync_graph）；实机闭环全通（孤岛诊断→补笔记→增量抽取→缺口自愈——知识地图告诉你哪里没学透）；三实踩入档（patch 生命周期对齐/并行会话暂存范围/ScriptedLLM 多调用备脚本） |
+| [036-s7b-graph-visualization](decisions/036-s7b-graph-visualization.md) | S7b 图谱可视化面板 | 两选型（自研 SVG 力导向零依赖/进阶交互——用户再纠「基础版」推荐，原则 7 条二次实证）；图数据一次全量拉回前端（搜索/路径 BFS/过滤全在内存算）；重建端点复用抽取管线；GRAPH_LOCK 图级并发锁（面板重建 vs 对话内 sync_graph，常驻进程新并发面，锁属数据层）；AppContext 挂 graph；实机抓首帧 bug（派生数据初始化必须早于首帧消费渲染——useEffect 是渲染后） |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
