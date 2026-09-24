@@ -28,6 +28,7 @@ graph.json 是 notes 的结构化投影：文本可读、可审查、可 diff—
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,13 @@ from pathlib import Path
 # 关系类型注册表（封闭白名单）：抽取提示词与数据校验共用同一份——
 # 单一真值源。新关系类型在这里加一格，抽取层自动跟进
 RELATIONS = ("依赖", "包含", "对比", "引用")
+
+# 图级并发锁（S7b）：图是跨线程共享的知识资产——Web 常驻进程下，面板
+# 「重建图谱」端点（请求线程）与对话内 sync_graph 工具（worker 线程）
+# 可能并发读写同一 GraphStore。sync_graph 是多步复合操作（删边→重抽→
+# 加边指纹），单步 dict 的 GIL 原子性不覆盖整段流程——批量操作方持锁串行。
+# 放 graph.py 而非 app.py：并发协议属于数据层，调用方（工具/server）都是客户
+GRAPH_LOCK = threading.Lock()
 
 MAX_PATH_HOPS = 3   # path 查询的跳数上限：个人知识图谱的概念链路 3 跳够用且防漫游
 

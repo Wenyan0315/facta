@@ -129,6 +129,13 @@ def test_tasks_page_serves_html():
     assert "任务" in resp.text
 
 
+def test_graph_page_serves_html():
+    # 知识图谱面板（S7b）：第三入口真页面，含「知识图谱」标题
+    resp = _make_client().get("/graph")
+    assert resp.status_code == 200
+    assert "知识图谱" in resp.text
+
+
 def test_ensure_persona_three_branches():
     # 装配不变量：会话必须带 agent 的 system_prompt 开工——Web 入口曾跑过无人设会话
     from agent.core.types import Message
@@ -436,3 +443,59 @@ def test_confirm_reject_flow_end_to_end(tmp_path, monkeypatch):
     tool_results = [e["data"]["result"] for e in events if e["type"] == "tool.result"]
     assert any("用户拒绝了" in r for r in tool_results)
     assert not (tmp_path / "pwned.txt").exists()   # 拒绝 = 根本没执行
+
+
+# ---------- S7b：知识图谱面板端点 ----------
+
+
+def _graph_ctx() -> AppContext:
+    """带预填图的 ctx：两个实体一条边——panels 数据返回的最小非空样本。"""
+    from agent.knowledge.graph import GraphStore
+
+    ctx = _make_ctx()
+    graph = GraphStore()
+    graph.add_node("Embedding")
+    graph.add_node("向量数据库")
+    graph.add_edge("Embedding", "向量数据库", "依赖", "RAG.md")
+    ctx.graph = graph
+    return ctx
+
+
+def test_graph_data_endpoint_returns_nodes_edges_stats():
+    # 面板一次拉全量：nodes + edges（含出处）+ overview 统计，前端不再算统计
+    client = TestClient(create_app(_graph_ctx()))
+
+    data = client.get("/api/graph").json()
+    assert [n["id"] for n in data["nodes"]] == ["Embedding", "向量数据库"]
+    assert len(data["edges"]) == 1
+    assert data["edges"][0]["relation"] == "依赖"
+    assert data["edges"][0]["source_note"] == "RAG.md"   # 出处随边透出（可溯源）
+    assert data["stats"]["nodes"] == 2
+    assert data["stats"]["edges"] == 1
+
+
+def test_graph_rebuild_forces_full_resync(tmp_path, monkeypatch):
+    # 「重建图谱」= force 全量：清空指纹 → sync_graph。internal_llm 是
+    # ScriptedLLM([])（抽取输出非法 JSON → failed），但端点行为可断言：
+    # 指纹被清空（force 生效）、report/stats 结构返回、失败不记指纹
+    import agent.server.app as app_module
+    from agent.knowledge.graph import GraphStore
+
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "a.md").write_text("# 概念A\n依赖概念B", encoding="utf-8")
+    monkeypatch.setattr(app_module, "NOTES_DIR", notes)
+    monkeypatch.setattr(app_module, "GRAPH_PATH", tmp_path / "graph.json")
+
+    ctx = _make_ctx()
+    ctx.graph = GraphStore()
+    ctx.graph.note_hashes["a.md"] = "stale-fingerprint"   # 预置指纹，验证 force 清空
+    client = TestClient(create_app(ctx))
+
+    resp = client.post("/api/graph/rebuild")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["report"]["failed"] == 1   # ScriptedLLM 抽取失败（非法 JSON）
+    assert set(body["report"]) == {"extracted", "unchanged", "removed", "skipped", "failed"}
+    # force 清空后失败篇不记指纹 → 指纹保持空（下次 rebuild 会再试）
+    assert ctx.graph.note_hashes == {}

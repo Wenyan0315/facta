@@ -24,6 +24,8 @@ from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
+from agent.knowledge.extract import sync_graph
+from agent.knowledge.graph import GRAPH_LOCK
 from agent.memory.consolidate import CATEGORIES, consolidate
 from agent.memory.learned import delete_line, read_learned, update_line
 from agent.memory.plan import PlanBoard
@@ -42,7 +44,7 @@ from agent.orchestrator.assemble import (
     ensure_persona,
 )
 from agent.orchestrator.loop import RunResult, run_turn
-from agent.paths import LEARNED_DIR, SESSIONS_DIR, user_memory_path
+from agent.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, SESSIONS_DIR, user_memory_path
 from agent.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -459,6 +461,41 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             raise HTTPException(404, "条目不存在") from None
         return {"ok": True}
 
+    # 知识图谱面板（S7b）：图数据 + 重建图谱。图是 notes 的结构化投影
+    # （知识资产），面板一次拉全量——图小，搜索定位/路径高亮/类型过滤
+    # 全在前端内存算，无需额外交互端点。「重建图谱」= force 全量重抽
+    # （同步端点，花 LLM 钱——前端 loading 状态等待），与对话内
+    # sync_graph 工具共用 GRAPH_LOCK 串行（图级并发协议见 graph.py）。
+    @app.get("/api/graph")
+    def graph_data():
+        d = ctx.graph.to_dict()
+        return {
+            "nodes": d["nodes"],
+            "edges": d["edges"],
+            "stats": ctx.graph.overview(),
+        }
+
+    @app.post("/api/graph/rebuild")
+    def graph_rebuild():
+        try:
+            with GRAPH_LOCK:
+                ctx.graph.note_hashes.clear()   # force：清空指纹全量重抽（不动图）
+                report = sync_graph(ctx.graph, NOTES_DIR, ctx.internal_llm)
+                if report.extracted or report.removed:
+                    ctx.graph.save(GRAPH_PATH)
+        except RuntimeError as exc:   # 删除安全阀：笔记目录疑似异常，如实上报
+            raise HTTPException(503, str(exc)) from None
+        return {
+            "report": {
+                "extracted": report.extracted,
+                "unchanged": report.unchanged,
+                "removed": report.removed,
+                "skipped": report.skipped,
+                "failed": report.failed,
+            },
+            "stats": ctx.graph.overview(),
+        }
+
     # 任务视图（S2 双视图的另一半）：FW 站 v2（Preact，021 裁定）——
     # 源码 frontend/，构建产物 static/fw/（进 git）；v1 vanilla 版已删（git 史可查）
     @app.get("/tasks")
@@ -469,6 +506,11 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     @app.get("/memory")
     def memory_page():
         return FileResponse(static_dir / "fw" / "memory.html")
+
+    # 知识图谱面板页面（FW 新栈第三入口，S7b）：与 /tasks /memory 同款伺服
+    @app.get("/graph")
+    def graph_page():
+        return FileResponse(static_dir / "fw" / "graph.html")
 
     # 前端静态文件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）。
     # no-cache（每次 revalidate，未变时 304 也快）：浏览器对无 Cache-Control 的

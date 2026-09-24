@@ -71,7 +71,7 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  position: relative;   # 会话行操作按钮的定位锚
+  position: relative;   /* 会话行操作按钮的定位锚 */
 }
 
 #session-list li:hover { background: var(--bg); }
@@ -357,3 +357,47 @@ body {
   flex: 1; border: 1px solid var(--accent); border-radius: 6px;
   padding: 6px 8px; font-size: 14px; font-family: inherit; resize: vertical;
 }
+
+/* 知识图谱面板（S7b，FW 新栈第三入口） */
+.graph-main { max-width: none; }   /* 力导向图要全宽，覆盖 #chat 的 820px 列表宽度 */
+.graph-panel { display: flex; flex-direction: column; height: 100%; gap: 10px; }
+.graph-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.graph-stats { display: flex; align-items: baseline; gap: 8px; }
+.graph-stats strong { font-size: 16px; }
+.graph-search {
+  flex: 1; min-width: 180px; padding: 6px 10px; font-size: 14px;
+  border: 1px solid var(--border); border-radius: 6px; font-family: inherit;
+}
+.graph-filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.graph-chip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
+  padding: 3px 9px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--panel); color: var(--text); cursor: pointer;
+}
+.graph-chip.off { opacity: 0.4; text-decoration: line-through; }
+.chip-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.graph-rebuild {
+  padding: 6px 12px; border: none; border-radius: 6px;
+  background: var(--accent); color: #fff; cursor: pointer; font-size: 13px;
+}
+.graph-rebuild:disabled { opacity: 0.5; cursor: default; }
+.graph-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.legend-line { width: 18px; height: 3px; border-radius: 2px; display: inline-block; }
+.graph-search-drop {
+  position: absolute; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); z-index: 5;
+  max-height: 220px; overflow-y: auto;
+}
+.graph-search-hit { padding: 8px 12px; font-size: 13px; cursor: pointer; }
+.graph-search-hit:hover { background: var(--user); }
+.graph-msg {
+  font-size: 12px; color: var(--accent); background: var(--user);
+  border-radius: 6px; padding: 6px 10px;
+}
+.graph-svg {
+  flex: 1; width: 100%; min-height: 480px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--panel); cursor: grab; touch-action: none;
+}
+.graph-svg:active { cursor: grabbing; }
+.graph-node-label { font-size: 11px; fill: var(--text); pointer-events: none; user-select: none; }

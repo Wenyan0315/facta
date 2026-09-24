@@ -21,7 +21,7 @@ sync_graph（界面可操作拍板，2026-09-23）：图谱更新不能只是启
 from __future__ import annotations
 
 from agent.knowledge.extract import sync_graph as _run_sync
-from agent.knowledge.graph import RELATIONS, GraphStore
+from agent.knowledge.graph import GRAPH_LOCK, RELATIONS, GraphStore
 from agent.paths import GRAPH_PATH
 from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
@@ -161,13 +161,14 @@ def register_graph_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     extract_llm = ctx.llm   # 局部窄化：闭包捕获局部变量（mypy 闭包窄化惯例）
 
     def _sync(force: bool = False) -> str:
-        if force:
-            # 全量重抽：清空指纹（不动图——merge_note 的原子替换保证旧边
-            # 在各篇重抽时逐篇失效；中途失败也不会留下半张空图）
-            store.note_hashes.clear()
-        report = _run_sync(store, ctx.notes_dir, extract_llm)
-        if report.extracted or report.removed:
-            store.save(GRAPH_PATH)
+        with GRAPH_LOCK:   # 图级串行：与面板「重建图谱」端点互斥（S7b 并发协议）
+            if force:
+                # 全量重抽：清空指纹（不动图——merge_note 的原子替换保证旧边
+                # 在各篇重抽时逐篇失效；中途失败也不会留下半张空图）
+                store.note_hashes.clear()
+            report = _run_sync(store, ctx.notes_dir, extract_llm)
+            if report.extracted or report.removed:
+                store.save(GRAPH_PATH)
         if report.extracted == 0 and report.skipped == 0 and report.failed == 0:
             return (
                 f"图谱已是最新（{report.unchanged} 篇笔记未变，零抽取）。"

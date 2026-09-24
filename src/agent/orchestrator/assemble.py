@@ -73,6 +73,7 @@ class AppContext:
     agent: Agent        # 主 agent（S5a）：行为定义收口——prompt/菜单/预算/learned 快照
     todos: TodoStore    # 个人待办仓库（2026-09-17）：工具与 Web API 共用同一实例
     mcp_clients: list = field(default_factory=list)   # 最终退出时统一 close，不留孤儿进程
+    graph: GraphStore = field(default_factory=GraphStore)   # S7a/S7b 知识图谱（活对象：查询原语与图表面板共用最新图）
 
 
 def ensure_persona(session: Session, agent: Agent) -> None:
@@ -282,4 +283,5 @@ def assemble(provider: str) -> AppContext:
         agent=agent,
         todos=todos,
         mcp_clients=mcp_clients,
+        graph=graph,   # S7b：图谱挂上 AppContext——surface 面板端点在 server 层读
     )

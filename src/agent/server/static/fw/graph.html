@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>知识图谱 · Personal Agent</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" crossorigin src="/fw/assets/graph.js"></script>
+  <link rel="modulepreload" crossorigin href="/fw/assets/hooks.module.js">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <button id="new-session" onclick="location.href='/'">← 返回对话</button>
+      <span class="muted" style="font-size:12px;">笔记的结构化投影——概念与关系的地图</span>
+    </div>
+    <ul id="session-list"><li class="muted">知识图谱</li></ul>
+  </aside>
+
+  <main id="chat" class="graph-main">
+    <div id="messages">
+      <div id="graph-root"></div>
+    </div>
+  </main>
+
+</body>
+</html>
