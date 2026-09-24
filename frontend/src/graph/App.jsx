@@ -77,6 +77,7 @@ export default function App() {
   const load = useCallback(async () => {
     try {
       const data = await fetchGraph();
+      positionsRef.current = initLayout(data.nodes.length, W, H);   // 数据一到位就初始化位置——渲染时已就绪（勿放 useEffect：渲染后才跑，会读空数组）
       setState({ data });
       setSelected(null);
       setGoal(null);
@@ -106,17 +107,16 @@ export default function App() {
     return { idToIdx, edgeIndices, degree, neighbors };
   }, [state.data]);
 
-  // 数据就位 → 初始化布局 + 启动力模拟（能量收敛自动停摆）
+  // 数据就位 → 启动力模拟（能量收敛自动停摆）；位置已在 load 里初始化
   useEffect(() => {
     if (!prep) return;
-    const n = prep.idToIdx.size;
-    positionsRef.current = initLayout(n, W, H);
+    const edgeIndices = prep.edgeIndices;
     let raf = 0;
     let running = true;
     const loop = () => {
       if (!running) return;
       const pos = positionsRef.current;
-      tick(pos, prep.edgeIndices, W, H);
+      tick(pos, edgeIndices, W, H);
       if (dragRef.current?.kind === "node") {   // 拖拽节点钉住：速度清零，位置随鼠标
         const p = pos[dragRef.current.idx];
         p.vx = 0;
