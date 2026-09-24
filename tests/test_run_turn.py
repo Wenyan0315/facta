@@ -10,7 +10,7 @@ from agent.core.types import Message
 from agent.memory.store import Session
 from agent.orchestrator.agent import Agent
 from agent.orchestrator.loop import RunResult, run_turn
-from agent.tools.registry import ToolRegistry
+from agent.tools.registry import Tool, ToolRegistry
 
 
 def _bare_agent() -> Agent:
@@ -103,3 +103,107 @@ def test_should_cancel_mid_stream_closes_underlying_generator():
     assert texts == ["第一块 "]                        # 只收到取消前的块
     assert llm.closed is True                          # 底层生成器被主动 close
     assert [m.role for m in session.messages] == ["system", "user"]
+
+
+# ---------- DSML 泄漏守卫（S6c 实机验收抓到的模型格式故障） ----------
+
+# 实机样本还原（deepseek-flash）：内部函数调用格式裸文本吐进 content，
+# 全角竖线——ScriptedLLM 时代测不出，实机编排链验收抓到
+_DSML_SAMPLE = '<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="finish_plan">'
+
+
+def _leak_agent() -> Agent:
+    """带一个真工具的 agent：泄漏 → 重试 → 改走标准点菜的链路需要真菜单。"""
+    reg = ToolRegistry()
+    reg.register(Tool(
+        name="get_current_time", description="", parameters={},
+        func=lambda: "2026-09-24 12:00",
+    ))
+    return Agent(name="test", system_prompt="sys", registry=reg)
+
+
+def test_dsml_leak_once_retries_then_recovers():
+    # 实机场景（S6c 验收）：泄漏 → 泄漏消息不入底片、提示注入投影重试
+    # → 模型改说人话 → 正常收尾
+    llm = ScriptedLLM([
+        Message(role="assistant", content=_DSML_SAMPLE),
+        Message(role="assistant", content="好的，任务已收官。"),
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+
+    texts: list[str] = []
+    result, reply = run_turn(
+        session, "收官", llm=llm, agent=_leak_agent(), on_text=texts.append,
+    )
+
+    assert result is RunResult.COMPLETED
+    assert reply is not None and reply.content == "好的，任务已收官。"
+    # 泄漏消息不入底片：system/user/最终回答，中间没有坏消息的坑位
+    assert [m.role for m in session.messages] == ["system", "user", "assistant"]
+    # 重试轮投影尾部带泄漏提示（ScriptedLLM.calls 快照可断言「模型看到了什么」）
+    assert len(llm.calls) == 2
+    hint = llm.calls[1][-1]
+    assert hint.role == "system" and "调用格式" in hint.content
+    # 流式输出诚实告知用户正在重试（已吐出的泄漏块收不回，但用户不懵）
+    assert any("自动重试" in t for t in texts)
+
+
+def test_dsml_leak_retry_recovers_to_tool_calls():
+    # 泄漏后的重试轮里模型改走标准 tool_calls——工具调用意图接回来，
+    # 链路继续（这正是实机故障现场：finish_plan 意图丢失导致计划未收官）
+    llm = ScriptedLLM([
+        Message(role="assistant", content=_DSML_SAMPLE),
+        Message(role="assistant", content="", tool_calls=[
+            {"id": "c1", "name": "get_current_time", "arguments": "{}"},
+        ]),
+        Message(role="assistant", content="当前时间是 2026-09-24 12:00。"),
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+
+    result, reply = run_turn(session, "几点了", llm=llm, agent=_leak_agent())
+
+    assert result is RunResult.COMPLETED
+    assert reply is not None and "12:00" in reply.content
+    # 底片：泄漏零坑位，点菜→工具→回答链路完整
+    assert [m.role for m in session.messages] == [
+        "system", "user", "assistant", "tool", "assistant",
+    ]
+    assert all("DSML" not in (m.content or "") for m in session.messages)
+
+
+def test_dsml_leak_persists_degrades_honestly():
+    # 1 次 + 2 次重试全是泄漏 → 没有第 4 次调用：超限按普通回答
+    # 诚实降级——泄漏文本原样入史（不装没事），用户至少看到真实输出
+    llm = ScriptedLLM([
+        Message(role="assistant", content=_DSML_SAMPLE),
+        Message(role="assistant", content=_DSML_SAMPLE),
+        Message(role="assistant", content=_DSML_SAMPLE),
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+
+    result, reply = run_turn(session, "再试", llm=llm, agent=_leak_agent())
+
+    assert result is RunResult.COMPLETED
+    assert len(llm.calls) == 3            # 上限即停：1 + 2 次重试
+    assert reply is not None and reply.content == _DSML_SAMPLE
+    # user 之后直接是降级回答——泄漏轮的坏消息一条都不入史
+    assert [m.role for m in session.messages] == ["system", "user", "assistant"]
+
+
+def test_dsml_halfwidth_lookalike_not_treated_as_leak():
+    # 半角仿制品（||DSML||）不触发守卫：标记精确匹配全角 ｜｜DSML｜｜，
+    # 普通回答里提到 DSML 字样不该被拦截重试
+    llm = ScriptedLLM([
+        Message(role="assistant", content="||DSML|| 只是回答正文里的普通字样。"),
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+
+    result, reply = run_turn(session, "说说 DSML", llm=llm, agent=_leak_agent())
+
+    assert result is RunResult.COMPLETED
+    assert len(llm.calls) == 1            # 一次调用即收尾：没当泄漏
+    assert reply is not None and "普通字样" in reply.content

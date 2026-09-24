@@ -42,6 +42,21 @@ _SPAWN_TOOL = "spawn_subagent"
 
 _WEEKDAYS = "一二三四五六日"
 
+# DSML 泄漏（S6c 实机验收抓到）：deepseek-flash 偶发把内部函数调用格式
+# 裸文本吐进 content，未被解析成合法 tool_calls——工具调用意图丢失
+# （实机样本：`<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="finish_plan">…`，
+# 全角竖线）。与 Qwen thinking 通道 / Gemma 空 content 同族：模型输出
+# 格式故障，ScriptedLLM 测不出。标记做元组——将来别家模型的泄漏标记可加
+_DSML_LEAK_MARKERS = ("<｜｜DSML｜｜",)
+# 泄漏重试上限（独立计数，不吃 rounds 预算）：防点菜上瘾的保险丝不该
+# 被格式故障消耗——模型病了不该扣它的行动额度
+_DSML_LEAK_RETRIES = 2
+_DSML_LEAK_HINT = (
+    "检测到刚才的输出把内部函数调用格式当作正文文本吐出，该调用并未被执行、"
+    "意图已丢失。请重试：如需调用工具，通过标准 tool_calls 字段发起；"
+    "如需作答，直接输出自然语言。正文中不要出现 <｜｜DSML｜｜ 等任何调用格式。"
+)
+
 
 class RunResult(Enum):
     """run_turn 的终态枚举——替代 None 二义性（S4 评审 #3）。
@@ -76,6 +91,56 @@ def _cancel_aware_stream(chunks, should_cancel):
             chunks.close()
             raise _RunCancelled()
         yield chunk
+
+
+def _is_dsml_leak(reply: Message) -> bool:
+    """merge 后判定：tool_calls 为空但 content 含内部调用格式标记 = 泄漏。
+
+    工具调用意图全在泄漏文本里，解析层一个都没接住——这条消息既不能
+    当最终回答（用户看到裸格式串），更不能入底片（会教坏后续轮次）。
+    """
+    if reply.tool_calls:
+        return False
+    content = reply.content or ""
+    return any(m in content for m in _DSML_LEAK_MARKERS)
+
+
+def _merge_with_leak_guard(
+    llm: LLM,
+    payload: list[Message],
+    tools: list[dict] | None,
+    should_cancel: Callable[[], bool] | None,
+    on_text: Callable[[str], None] | None,
+) -> Message:
+    """merge + DSML 泄漏检测/重试（工具循环与收尾段共用，方案 a 拍板）。
+
+    处置三件套：
+    - 泄漏消息不入底片（调用方 append 的是本函数返回的最终版）——trim
+      同理由：坏消息进历史会被摘要吸收，毒害后续行为
+    - 重试提示注入投影尾部——投影本轮作废，提示随轮蒸发，不进底片
+    - 重试独立计数上限 _DSML_LEAK_RETRIES，不吃 rounds 预算
+
+    超限后返回最后一次泄漏消息，调用方按普通回答诚实降级——无药可救
+    时把原样吐给用户（带故障文本），好过装作没事。
+
+    已外发的流式块收不回来（检查点③的流是边收边喂 on_text 的）——
+    用户会看到泄漏文本闪现后跟着正常回答，这是流式的固有 tradeoff，
+    比缓冲整个流式的替代方案（牺牲首字延迟）便宜得多。
+    """
+    leaks = 0
+    while True:
+        reply = merge_stream_chunks(
+            _cancel_aware_stream(llm.generate_stream(payload, tools), should_cancel),
+            on_text=on_text,
+        )
+        if not _is_dsml_leak(reply):
+            return reply
+        leaks += 1
+        if leaks > _DSML_LEAK_RETRIES:
+            return reply   # 超限：最后一次泄漏消息按普通回答降级
+        if on_text:
+            on_text("\n【检测到输出格式故障，正在自动重试…】\n")
+        payload.append(Message(role="system", content=_DSML_LEAK_HINT))
 
 
 def _plan_stamp(board: PlanBoard) -> Message | None:
@@ -331,11 +396,9 @@ def run_turn(
                 return RunResult.CANCELLED, None
 
             # 流式消费：分片边收边喂 on_text，收完 merge 拼回完整回复。
-            # 点菜轮 content 通常为空（不冒字），模型偶尔先冒半句再点菜
-            reply = merge_stream_chunks(
-                _cancel_aware_stream(llm.generate_stream(payload, tools), should_cancel),
-                on_text=on_text,
-            )
+            # 点菜轮 content 通常为空（不冒字），模型偶尔先冒半句再点菜。
+            # 泄漏守卫罩在外面：DSML 泄漏 → 不入史、提示重试（上限 2 次）
+            reply = _merge_with_leak_guard(llm, payload, tools, should_cancel, on_text)
 
             if not reply.tool_calls:   # 模型不点菜了 → 最终回答，退出循环
                 session.messages.append(reply)
@@ -365,11 +428,9 @@ def run_turn(
         # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
         if on_event:
             on_event("max_rounds", {})
-        # 最后一问不递菜单，逼它说话（同流式消费，同样罩检查点③）
-        reply = merge_stream_chunks(
-            _cancel_aware_stream(llm.generate_stream(payload, None), should_cancel),
-            on_text=on_text,
-        )
+        # 最后一问不递菜单，逼它说话（同流式消费，同样罩检查点③）；
+        # 泄漏守卫同款——保险丝已熔断再泄漏也无菜单可点，超限即降级
+        reply = _merge_with_leak_guard(llm, payload, None, should_cancel, on_text)
 
         session.messages.append(reply)
         return RunResult.COMPLETED, reply   # noqa: TRY300  # 紧贴 for 收尾段陈述「保险丝收尾也入史」，不挪 else
