@@ -1,6 +1,7 @@
-"""S2b Run Store 验收：状态机单一终态 + seq 自增 + 取消门 + 单锁。
+"""S2b Run Store 验收：状态机单一终态 + seq 自增 + 取消门 + 会话内单锁。
 
-S4b 增补：waiting_approval 挂起——阻塞裁决 / 取消视为拒绝 / 单锁口径。
+S4b 增补：waiting_approval 挂起——阻塞裁决 / 取消视为拒绝 / 准入口径。
+S8a 增补：单锁口径收窄到「一段对话一把」+ 全局并发上限。
 """
 
 import threading
@@ -22,11 +23,11 @@ def test_emit_increments_seq_and_pushes_to_subscriber():
     # 后才 subscribe，队列空 → get() 永久阻塞（全套 pytest 挂起的根因）。
     run = Run(run_id="r1")
     q = run.subscribe()          # 先订阅
-    e1 = run.emit("run.started") # 再 emit → 广播进队列
-    e2 = run.emit("text.delta", {"delta": "你好"})
+    run.emit("run.started")      # 再 emit → 广播进队列
+    run.emit("text.delta", {"delta": "你好"})
+    e1, e2 = run.events          # emit 不回传事件（要当回调直接用），从 events 取
 
     assert [e1.seq, e2.seq] == [1, 2]
-    assert run.events == [e1, e2]
     # 订阅者可依序读回同一条事件（对象身份一致）
     assert q.get(timeout=1) is e1
     assert q.get(timeout=1) is e2
@@ -70,16 +71,31 @@ def test_store_active_run_is_single_inflight():
     assert store.active_run() is None      # 终态后不再是 in-flight
 
 
-def test_create_if_idle_rejects_while_inflight():
+def test_create_if_idle_rejects_same_session_while_inflight():
     store = RunStore()
-    first = store.create_if_idle()
-    assert first is not None
+    first = store.create_if_idle("s1")
+    assert isinstance(first, Run)
 
-    # 第一个还 pending（未终态）→ 第二个被拒（单锁）
-    assert store.create_if_idle() is None
+    # 同会话第一个还 pending（未终态）→ 第二个被拒（会话内单锁）
+    assert isinstance(store.create_if_idle("s1"), str)
 
     first.finish(STATUS_COMPLETED)
-    assert store.create_if_idle() is not None   # 终态后可再创建
+    assert isinstance(store.create_if_idle("s1"), Run)   # 终态后可再创建
+
+
+def test_create_if_idle_allows_other_sessions_up_to_cap():
+    # S8a：单锁口径从「全进程一把」收窄到「一段对话一把」——
+    # 「长任务期间另开会话聊」的正确性就靠这条。
+    store = RunStore(max_in_flight=2)
+    assert isinstance(store.create_if_idle("s1"), Run)
+    assert isinstance(store.create_if_idle("s2"), Run)
+    # 并发上限（资源约束）：第三个会话也被拒，但原因不同于「该会话在忙」
+    rejected = store.create_if_idle("s3")
+    assert isinstance(rejected, str) and "上限" in rejected
+    busy = store.create_if_idle("s1")                   # 会话忙是另一条文案
+    assert isinstance(busy, str) and "在运行" in busy
+    assert store.list_runs("s1") and store.list_runs("s3") == []
+    assert store.active_run("s2") is not None
 
 
 # ---------- S4b：waiting_approval 确认挂起 ----------
@@ -143,10 +159,11 @@ def test_resolve_confirm_without_pending_is_noop():
     assert run.resolve_confirm(True) is False           # 没挂起 → confirm 端点 409 的判据
 
 
-def test_waiting_counts_as_inflight_for_single_lock():
+def test_waiting_counts_as_inflight_for_session_lock():
     store = RunStore()
-    first = store.create_if_idle()
+    first = store.create_if_idle("s1")
+    assert isinstance(first, Run)
     first.status = STATUS_WAITING                       # 挂起等确认也算在跑
 
-    assert store.create_if_idle() is None               # 单锁不放行
+    assert isinstance(store.create_if_idle("s1"), str)  # 会话锁不放行
     assert store.active_run() is first

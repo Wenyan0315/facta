@@ -7,18 +7,27 @@
 行号定位协议：GET 返回的 line = 文件 0-based 行号，原样传回 PUT/DELETE。
 可行依据：固化 append-only（只加尾行），读写窗口内已有行号稳定。
 写回用「原行数组整重写」保真——空行、手写行、注释原样保留。
-已知边界（v1 接受）：读写窗口内两个标签页并发互删会错位——单用户
-概率极低；窗口期固化 append 与写回重全文的竞争同理（git 兜底恢复）。
+已知边界：行号是 GET 时拍的快照，两个标签页并发互删仍会错位——
+LEARNED_LOCK 能保证文件不被撕裂、固化 append 不被整重写抹掉，但保证
+不了「你手里那个行号还指向那一行」（git 兜底恢复）。
 """
 
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 # 行格式：- [YYYY-MM-DD] 内容（consolidate._append 的落盘契约）
 _LINE_RE = re.compile(r"^- \[(\d{4}-\d{2}-\d{2})\] (.*)$")
+
+# 记忆文件的进程级互斥（S8a）：写入侧（consolidate 的 append）与编辑侧
+# （本模块的读改写整重写）共用同一批 LEARNED_DIR/*.md。整重写是「读全文
+# → 改 → 覆盖」，不锁就会把窗口期内固化刚 append 的行连旧内容一起抹掉
+# ——那是真丢记忆。多会话并发收官抬高了固化频率，v1 那句「单用户概率
+# 极低」的前提已过期。
+LEARNED_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -54,14 +63,16 @@ def update_line(path: Path, line: int, content: str) -> None:
 
     line 越界抛 IndexError（API 层转 404）。
     """
-    lines = path.read_text(encoding="utf-8").splitlines()
-    m = _LINE_RE.match(lines[line])
-    lines[line] = f"- [{m.group(1)}] {content}" if m else content
-    _rewrite(path, lines)
+    with LEARNED_LOCK:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        m = _LINE_RE.match(lines[line])
+        lines[line] = f"- [{m.group(1)}] {content}" if m else content
+        _rewrite(path, lines)
 
 
 def delete_line(path: Path, line: int) -> None:
     """删除一行（越界抛 IndexError）。删完的空文件保留（固化 append 的目标位）。"""
-    lines = path.read_text(encoding="utf-8").splitlines()
-    del lines[line]
-    _rewrite(path, lines)
+    with LEARNED_LOCK:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        del lines[line]
+        _rewrite(path, lines)

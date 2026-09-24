@@ -29,6 +29,7 @@ from pathlib import Path
 
 from agent.core.llm import LLM
 from agent.core.types import Message
+from agent.memory.learned import LEARNED_LOCK
 from agent.memory.store import Session
 
 CATEGORIES = ("decisions", "constraints", "other")
@@ -192,20 +193,24 @@ def _append(entries: list[Entry], learned_dir: Path, user_memory_path: Path | No
     written: list[str] = []
     learned_dir.mkdir(parents=True, exist_ok=True)
     today = date.today().isoformat()
-    for entry in entries:
-        if entry.scope == "user":
-            assert user_memory_path is not None   # 上游过滤的契约（防御性）
-            user_memory_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(user_memory_path, "a", encoding="utf-8") as f:
-                f.write(f"- [{today}] {entry.content}\n")
-            if "user" not in written:
-                written.append("user")
-        else:
-            path = learned_dir / f"{entry.category}.md"
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(f"- [{today}] {entry.content}\n")
-            if entry.category not in written:
-                written.append(entry.category)
+    # 与记忆面板编辑侧（learned.update_line/delete_line 的读改写整重写）互斥：
+    # 整重写会把窗口期内这里 append 的行连旧内容一起覆盖掉。一批条目一次
+    # 拿锁写完，不逐条抢——锁内只有本地文件 append（微秒级），饿不死编辑请求。
+    with LEARNED_LOCK:
+        for entry in entries:
+            if entry.scope == "user":
+                assert user_memory_path is not None   # 上游过滤的契约（防御性）
+                user_memory_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(user_memory_path, "a", encoding="utf-8") as f:
+                    f.write(f"- [{today}] {entry.content}\n")
+                if "user" not in written:
+                    written.append("user")
+            else:
+                path = learned_dir / f"{entry.category}.md"
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(f"- [{today}] {entry.content}\n")
+                if entry.category not in written:
+                    written.append(entry.category)
     return written
 
 

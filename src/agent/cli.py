@@ -89,7 +89,7 @@ def run_chat(
 
     退出原因是「信号上抛、执行下放」的载体：cli 不碰文件（分层约定），但
     用户敲 quit 还是 /new 只有它知道——于是把原因编码进返回值，让装配层
-    按原因决定「收官」还是「先存后清再开一轮」。
+    按原因决定「收官」还是「收官后另起一段」。
 
     agent（S5a）：执行单元。None=裸会话兜底（无工具 + 默认人设）——壳层
     舒适原则，测试传 None 照常工作；内核 run_turn 仍要求显式 agent。
@@ -104,12 +104,14 @@ def run_chat(
         agent = Agent(
             name="bare", system_prompt=DEFAULT_SYSTEM_PROMPT, registry=ToolRegistry()
         )
-    # 会话状态：从外部注入（__main__ 从 session.json 载入 Session 后传入），
-    # 底片（messages）+ 压缩缓存（summary/summarized_upto）整体进出。
+    # 会话状态：从外部注入（__main__ 从会话仓库 load 后传入），底片（messages）
+    # + 压缩缓存（summary/summarized_upto）整体进出。
     # 人设两段式：Session.messages 永远是个列表（可能是空），空则原地种人设。
-    # 绝不 rebind（重新赋值）session.messages——search_history 工具的闭包抓的
-    # 是 __main__ 传入的那个列表对象本身；一旦 rebind 成新列表，工具看到的
-    # 永远是旧空列表，首次运行的新会话会静默失明（列表身份陷阱）
+    # 本函数内绝不 rebind（重新赋值）session.messages——search_history 工具的
+    # 闭包抓的是传进来的那个列表对象本身；一旦 rebind 成新列表，工具看到的
+    # 永远是旧空列表（列表身份陷阱）。
+    # S8a 后「换新会话」不再靠原地 clear + 补种人设，而是 __main__ 另建 Session
+    # 并重造 agent —— 闭包与会话同生共死，这条纪律的适用范围缩回本函数内部。
     if session is None:
         session = Session()
     if not session.messages:

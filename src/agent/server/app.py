@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
+import re
 import threading
 from pathlib import Path
 
@@ -26,30 +28,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 from agent.knowledge.extract import sync_graph
 from agent.knowledge.graph import GRAPH_LOCK
-from agent.memory.consolidate import CATEGORIES, consolidate
+from agent.memory.consolidate import CATEGORIES
 from agent.memory.learned import delete_line, read_learned, update_line
-from agent.memory.plan import PlanBoard
-from agent.memory.store import (
-    archive_session,
-    derive_title,
-    list_archived_sessions,
-    load_session,
-    restore_session,
-    save_session,
-)
-from agent.memory.title import summarize_title
-from agent.orchestrator.assemble import (
-    MEMORY_PATH,
-    AppContext,
-    ensure_persona,
-)
+from agent.memory.store import Session
+from agent.orchestrator.assemble import AppContext, settle_session
 from agent.orchestrator.loop import RunResult, run_turn
-from agent.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, SESSIONS_DIR, user_memory_path
+from agent.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR
 from agent.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_RUNNING,
+    Run,
     RunStore,
 )
 from agent.server.sse import encode_heartbeat, encode_sse
@@ -64,19 +54,27 @@ _EVENT_MAP = {
 
 _HEARTBEAT_SECONDS = 15.0   # 无事件时的保活间隔（模型推理可能几十秒静默）
 
-# 会话状态互斥锁（S2 验收修复轮#3）：ctx.session 是共享可变对象 + 归档/切回
-# 动的是文件系统。真实使用踩中「快速点击会话列表，归档数时多时少」——两个
-# 切换请求交错执行（一个已 clear、另一个还在 save），文件系统被打成半成品。
-# 锁域 = 会话写操作（创建 Run / 开新会话 / 切换会话 + worker 落盘）；
-# 读操作（列表/历史/事件）不加锁。与 RunStore._lock 是两把独立锁，获取顺序
-# 恒为 _SESSION_LOCK → RunStore._lock，无环无死锁。
-_SESSION_LOCK = threading.Lock()
+_TIME_RE = re.compile(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})")
+
+
+def _time_label(sid: str) -> str:
+    """会话 id（时间戳）→ 清单里的一行时间标签「09-15 23:15」。
+
+    身份即时间戳，所以展示时间不需要另存字段——从 id 解析即可。
+    """
+    m = _TIME_RE.match(sid)
+    return f"{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}" if m else ""
 
 
 class CreateRunRequest(BaseModel):
-    """创建 Run 的请求体。系统边界处用 JSON Schema 校验（与工具同一纪律）。"""
+    """创建 Run 的请求体。系统边界处用 JSON Schema 校验（与工具同一纪律）。
+
+    session_id 可省：省略即「新开一段对话」——前端首次发送不必先建会话，
+    响应里带回真实 id，客户端从此认它。
+    """
 
     text: str
+    session_id: str | None = None
 
 
 class CreateTodoRequest(BaseModel):
@@ -109,21 +107,31 @@ class LearnedUpdateRequest(BaseModel):
     content: str
 
 
-def _run_worker(ctx: AppContext, run, user_text: str) -> None:
+def _run_worker(ctx: AppContext, run: Run, user_text: str) -> None:
     """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。
 
-    每轮落盘（finally，先于终态哨兵）：Web 壳是常驻进程，没有 CLI 的退出
-    保存钩子——不落盘，服务被杀/崩溃就丢掉上次归档以来的全部对话（强杀
-    丢数据边界的 web 版，真实使用踩中：会话只在点归档类操作时才写盘）。
+    S8a 起 worker 自带会话生命周期：进场 load、出场 save，中间独占。
+    「独占」不是靠锁而是靠准入——RunStore.create_if_idle 保证同一会话
+    同时只有一个 in-flight Run，所以这里的 load/改/save 不会与别人交错。
+    agent 也是每轮现造（ctx.build_agent）：人设由工厂保证，且 learned/ 与
+    用户记忆的快照因此每轮都是新的——常驻 agent 会让本轮刚固化的记忆
+    要等重启才进 prompt。
+
+    收尾（settle_session：补标题 → 增量固化 → 落盘）放在 finally，且必须先于
+    run.finish：Web 壳是常驻进程，没有 CLI 的退出保存钩子，不收尾就在服务被杀
+    时丢掉这一整轮对话；而 finish 一推终态就释放准入，同会话的下一轮可能立刻
+    load——save 落在 finish 之后，新一轮就读到旧状态（lost update）。
     """
     run.status = STATUS_RUNNING
     run.emit("run.started", {})
     status = STATUS_FAILED
+    session: Session | None = None
     try:
+        session = ctx.store.load(run.session_id)
         result, reply = run_turn(
-            ctx.session,
+            session,
             user_text,
-            agent=ctx.agent,
+            agent=ctx.build_agent(session),
             llm=ctx.llm,
             summarizer=ctx.internal_llm,
             on_text=lambda text: run.emit("text.delta", {"delta": text}),
@@ -140,84 +148,57 @@ def _run_worker(ctx: AppContext, run, user_text: str) -> None:
     except Exception as exc:   # 防御性兜底：run_turn 已捕获 LLMUnavailableError，这里是意外
         run.emit("error", {"message": str(exc)})
     finally:
-        try:
-            # 落盘也进互斥域：与切换会话的 save/clear 序列化，防交错写半成品
-            with _SESSION_LOCK:
-                save_session(ctx.session, MEMORY_PATH)
-        except Exception as exc:   # 落盘失败不吞终态：告知用户，流照常收口
-            run.emit("error", {"message": f"会话落盘失败：{exc}"})
+        if session is not None:
+            try:
+                run.emit("run.settling", {})   # 收尾可能几秒（标题/固化都要调 LLM），别让用户以为是卡死
+                settle_session(session, run.session_id, ctx.store, ctx.internal_llm)
+            except Exception as exc:   # 收尾失败不吞终态：告知用户，流照常收口
+                run.emit("error", {"message": f"会话收尾失败：{exc}"})
         run.finish(status)
 
 
-def _archive_current(ctx: AppContext) -> bool:
-    """切出当前会话：提炼标题 → save → 复盘 → 归档 → 清空内存（原地 clear，不 rebind）。
-
-    与 CLI /new 同一序列。标题在 save 之前提炼写进 session.title——save 落盘、
-    归档复制（copy2）都带它，列表读取零 LLM 调用（提炼成本只在归档时付一次）。
-    提炼失败 fallback 到首句派生，不阻断归档。
-
-    空会话守卫（S2 验收修复轮#3）：没有 user 消息的会话不进仓库——此前切换时
-    把空当前会话无条件归档，列表里长出「（空会话）」垃圾记录。返回是否归档。
-    调用方（_switch_session/端点）必须在 _SESSION_LOCK 内调本函数。
-    """
-    if not any(m.role == "user" for m in ctx.session.messages):
-        return False
-    # 手工名优先（评审修复轮）：title 非空=用户 rename 过（或上次归档已提炼）
-    # ——不再重新生成。此前无条件覆盖，用户整理的名称被 LLM 重新提炼顶掉
-    # （「自动生成用于填空，不覆盖用户主动编辑」——计划名/记忆标签同此原则）
-    if ctx.session.title is None:
-        ctx.session.title = summarize_title(ctx.session, ctx.internal_llm) or derive_title(ctx.session)
-    save_session(ctx.session, MEMORY_PATH)
-    consolidate(
-        ctx.session, ctx.internal_llm, LEARNED_DIR,
-        since=0, user_memory_path=user_memory_path(),
-    )   # v1 简化：全量复盘；M6.5 起用户级条目分流仓库外
-    archive_session(MEMORY_PATH, SESSIONS_DIR)
-    ctx.session.messages.clear()
-    ctx.session.summary = None
-    ctx.session.summarized_upto = 1
-    ctx.session.title = None
-    ctx.session.plan = PlanBoard()   # 评审修复轮：旧任务的活跃计划不随 /new 清空——泄进新会话投影（CLI /new 同修）
-    ensure_persona(ctx.session, ctx.agent)   # 清空连 system 一起清了——第二场会话前必须补种，否则裸会话（语言/画像/政策全失效）
-    save_session(ctx.session, MEMORY_PATH)   # 收尾落盘（与 CLI /new 同款）：active 立即反映为新空会话——不落盘则磁盘残留旧会话，服务被杀后重启会「复活」已归档对话
-    return True
-
-
-def _switch_session(ctx: AppContext, archive_path) -> None:
-    """切回历史会话：切出当前 → 切入目标（move 语义）→ 内存原地换血。
-
-    换血无条件清（浏览器验收抓到的 bug）：_archive_current 对空会话不动内存，
-    若此处不显式 clear，残留消息会与目标会话拼接——真实使用中 active 里攒出
-    4 条重复 system（每次空会话切换漏一次清）。换血的语义就是「全换」，
-    不依赖上一步是否清过。
-    """
-    _archive_current(ctx)
-    restored = restore_session(archive_path, MEMORY_PATH)   # 归档写回 active 后消失
-    ctx.session.messages.clear()      # 无条件清：不信任上一步的清（空会话路径没清）
-    ctx.session.messages.extend(restored.messages)
-    ctx.session.summary = restored.summary
-    ctx.session.summarized_upto = restored.summarized_upto
-    ctx.session.title = restored.title
-    ctx.session.plan = restored.plan   # 评审修复轮：换血漏了 plan——归档文件里明明存着（S5b 序列化），恢复时却被丢弃
-    # 旧归档可能无 system（人设保证上线前的文件）——幂等补插+游标对齐
-    ensure_persona(ctx.session, ctx.agent)
-
-
 def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
-    store = store or RunStore()
+    # 并发上限（S8a）：默认 3——「长任务在跑，我另开一段对话问点别的」是真实
+    # 需求，而不是要上多进程（architecture.md 待讨论区「多进程演进」的关键修正）。
+    store = store or RunStore(max_in_flight=int(os.environ.get("CORTEX_MAX_CONCURRENT_RUNS", "3")))
     app = FastAPI(title="Personal Agent")
     static_dir = Path(__file__).parent / "static"
 
+    def _require_session(sid: str) -> None:
+        """会话 id 是 HTTP 路径/请求体来的外部输入：格式与存在性都要过一遍。
+        格式非法直接 400（store.path 会抛 ValueError，那是信任边界的兜底，
+        不该以 500 的形式漏给客户端）。
+        """
+        try:
+            exists = ctx.store.path(sid).is_file()
+        except ValueError:
+            raise HTTPException(400, "非法会话 id") from None
+        if not exists:
+            raise HTTPException(404, "会话不存在")
+
+    def _require_writable(sid: str) -> None:
+        """写会话前的准入检查：该会话有 in-flight Run 时拒绝。
+
+        不是加锁而是定策略——worker 在整轮里独占这段对话（load→改→save），
+        此时任何外部写都会在 worker 落盘时被覆盖（lost update）。与其用锁把
+        写排队到几十秒后，不如直接告诉用户「这段对话正在被写」。
+        """
+        if store.active_run(sid) is not None:
+            raise HTTPException(409, "该会话有任务在运行，请等它结束")
+
     @app.post("/api/runs", status_code=202)
     def create_run(body: CreateRunRequest):
-        # 锁防竞态：created run 期间会话不可被切换（同一互斥域）
-        with _SESSION_LOCK:
-            run = store.create_if_idle(title=body.text[:60])
-            if run is None:
-                raise HTTPException(409, "已有任务在运行，请稍候再发")
-            # daemon 线程：服务退出时不留阻塞；请求线程立即 202 返回
-            threading.Thread(target=_run_worker, args=(ctx, run, body.text), daemon=True).start()
-        return {"run_id": run.run_id}
+        sid = body.session_id
+        if sid is None:
+            sid = ctx.store.create(Session())   # 省略 session_id = 新开一段对话
+        else:
+            _require_session(sid)
+        run = store.create_if_idle(sid, title=body.text[:60])
+        if isinstance(run, str):
+            raise HTTPException(409, run)
+        # daemon 线程：服务退出时不留阻塞；请求线程立即 202 返回
+        threading.Thread(target=_run_worker, args=(ctx, run, body.text), daemon=True).start()
+        return {"run_id": run.run_id, "session_id": sid}
 
     @app.get("/api/runs/{run_id}/events")
     def events(run_id: str, request: Request):
@@ -286,105 +267,78 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             return {"status": "approved" if body.approve else "rejected"}
         raise HTTPException(409, "当前没有待确认的操作")
 
-    # 会话列表与切回（S2 会话列表原料 = store.list_archived_sessions）
-    # 列表 = 当前 active（置顶高亮，current: true）+ 归档历史——完整会话视图。
-    # 修复「时隐时现」：move 语义下切回的会话从列表消失、归档后又回来，
-    # CLI 时代合理但在 Web 列表产品里反直觉（真实使用三轮反馈）。当前
-    # 会话必须常驻可见，高亮标识。
+    # 会话清单（S8a）：身份=文件名，没有「active」这个特例——正在聊的那段
+    # 也只是清单里的一行，靠 running 字段标出来。老布局要把 active 置顶拼进
+    # 清单（还得防「切回的会话从列表消失」），那是 move 语义的产物。
     @app.get("/api/sessions")
     def list_sessions():
-        # time 从文件名解析（身份=时间戳，展示层格式化）——「09-15 23:15」
-        import re
+        return [
+            {
+                "id": m.id,
+                "title": m.title,
+                "time": _time_label(m.id),
+                "collapsed": m.collapsed,
+                "running": store.active_run(m.id) is not None,
+            }
+            for m in ctx.store.list_metas()   # 已按最后修改时刻降序
+        ]
 
-        def _time_from_name(name: str) -> str:
-            m = re.match(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})", name)
-            return f"{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}" if m else ""
-
-        # active 置顶（正在聊的常驻可见）+ 归档新→旧（时间倒序，2026-09-17
-        # 体验轮：正序要把最近会话翻到底部，与「最近使用优先」直觉相悖）。
-        # 倒序在端点做而非 list_archived_sessions——那个函数的升序语义
-        # （字典序=时间序）是归档命名的底层契约，不随展示需求翻转
-        items = [{
-            "name": "active",
-            "title": ctx.session.title or derive_title(ctx.session),   # 重命名优先于首句派生
-            "time": "",
-            "current": True,
-        }]
-        items.extend(
-            {"name": path.name, "title": title, "time": _time_from_name(path.name)}
-            for path, title in reversed(list_archived_sessions(SESSIONS_DIR))
-        )
-        return items
-
-    @app.post("/api/sessions/new")
+    @app.post("/api/sessions", status_code=201)
     def new_session():
-        with _SESSION_LOCK:
-            if store.active_run() is not None:
-                raise HTTPException(409, "有任务在运行，无法开新会话")
-            _archive_current(ctx)
-        return {"ok": True}
+        """显式新建一段空会话（前端「新对话」按钮）。
 
-    @app.put("/api/sessions/{name}")
-    def rename_session(name: str, body: RenameSessionRequest):
+        空会话也进清单（跟主流聊天产品一致：刚点的新建不该凭空消失）。
+        与 POST /api/runs 省略 session_id 的区别：这条不发消息，只占位。
+        """
+        return {"id": ctx.store.create(Session())}
+
+    @app.put("/api/sessions/{sid}")
+    def rename_session(sid: str, body: RenameSessionRequest):
         """重命名（2026-09-17 体验轮）：改的是 title 标签，身份（文件名）不动。"""
         title = body.text.strip()
         if not title:
             raise HTTPException(400, "标题不能为空")
-        if name == "active":   # 当前会话：改内存 + 立即落盘（不等下一轮）
-            with _SESSION_LOCK:
-                ctx.session.title = title
-                save_session(ctx.session, MEMORY_PATH)
-            return {"ok": True}
-        if "/" in name or ".." in name:
-            raise HTTPException(400, "非法会话名")
-        path = SESSIONS_DIR / name
-        if not path.is_file():
-            raise HTTPException(404, "会话不存在")
-        session = load_session(path)
+        _require_session(sid)
+        _require_writable(sid)
+        session = ctx.store.load(sid)
         session.title = title
-        save_session(session, path)
+        ctx.store.save(sid, session)
         return {"ok": True}
 
-    @app.delete("/api/sessions/{name}")
-    def delete_session(name: str):
-        """删除归档会话（2026-09-17 体验轮）。active 是活会话不删——先归档再删。"""
-        if name == "active":
-            raise HTTPException(400, "当前会话不能删除（先归档或切走再删）")
-        if "/" in name or ".." in name:
-            raise HTTPException(400, "非法会话名")
-        path = SESSIONS_DIR / name
-        if not path.is_file():
-            raise HTTPException(404, "会话不存在")
-        path.unlink()
-        return {"ok": True, "deleted": name}
+    @app.delete("/api/sessions/{sid}")
+    def delete_session(sid: str):
+        """删除会话（2026-09-17 体验轮）。S8a 起没有「active 不能删」的特例——
+        任何会话都能删，只要它当下没在跑。
+        """
+        _require_session(sid)
+        _require_writable(sid)
+        ctx.store.delete(sid)
+        return {"ok": True, "deleted": sid}
 
-    @app.post("/api/sessions/{name}/switch")
-    def switch_session(name: str):
-        with _SESSION_LOCK:
-            if store.active_run() is not None:
-                raise HTTPException(409, "有任务在运行，无法切换会话")
-            archive_path = SESSIONS_DIR / name
-            if not archive_path.is_file():
-                raise HTTPException(404, "会话不存在")
-            _switch_session(ctx, archive_path)
-        return {"title": derive_title(ctx.session)}
-
-    # 历史消息：当前 active 会话的 user/assistant 轮（system=人设、tool=中间产物，
-    # 不进对话回放；空 content 的纯点菜轮跳过——历史回放只讲故事线）
-    @app.get("/api/messages")
-    def messages():
+    # 历史消息（S8a：按 session id 取，不再有「当前会话」这个隐含主语）
+    # 只回放 user/assistant 轮——system=人设、tool=中间产物，不进对话回放；
+    # 空 content 的纯点菜轮跳过（历史回放只讲故事线）
+    @app.get("/api/sessions/{sid}/messages")
+    def messages(sid: str):
+        _require_session(sid)
         return [
             {"role": m.role, "content": m.content}
-            for m in ctx.session.messages
+            for m in ctx.store.load(sid).messages
             if m.role in ("user", "assistant") and m.content
         ]
 
-    # 任务列表：Run Store 全量（新的在前），任务视图原料
+    # 任务列表：Run Store（新的在前），任务视图原料；给 session_id 则只列该会话的
     @app.get("/api/runs")
-    def runs():
+    def runs(session_id: str | None = None):
         return [
-            {"run_id": r.run_id, "status": r.status, "title": r.title, "preview": r.preview}
-            for r in store.list_runs()
+            {
+                "run_id": r.run_id,
+                "session_id": r.session_id,
+                "status": r.status,
+                "title": r.title,
+                "preview": r.preview,
+            }
+            for r in store.list_runs(session_id)
         ]
 
     # 个人待办（014 语义：任务=个人待办）：UI 直连 store，与 agent 工具共用同一实例

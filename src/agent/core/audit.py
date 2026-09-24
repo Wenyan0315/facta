@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -26,7 +27,10 @@ class AuditLog:
 
     def __init__(self, base_dir: Path) -> None:
         self._dir = base_dir
-        self._lock = None  # 单进程 append 模式下不需要锁；留位多线程高频写时补
+        # S8a 起「多线程高频写」成真：多个会话的 worker 并发跑，工具调用都从
+        # registry.execute 这一个口子落审。缓冲文件的一次 flush 可能拆成多个
+        # write 系统调用，交错了就是一行 jsonl 被撕成两半——审计流不再可解析。
+        self._lock = threading.Lock()
 
     def record(
         self,
@@ -47,7 +51,7 @@ class AuditLog:
             }
             self._dir.mkdir(parents=True, exist_ok=True)
             path = self._dir / f"audit-{datetime.now():%Y%m%d}.jsonl"
-            with open(path, "a", encoding="utf-8") as f:
+            with self._lock, open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event, ensure_ascii=False) + "\n")
         except OSError:
             pass   # 审计写盘失败静默：工具本身的结果更重要，不能因审计炸了主流程

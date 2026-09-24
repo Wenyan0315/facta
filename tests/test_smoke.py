@@ -18,10 +18,10 @@ from fastapi.testclient import TestClient
 
 from agent.core.llm import ScriptedLLM
 from agent.core.types import Message
-from agent.memory.store import Session
+from agent.memory.store import Session, SessionStore
 from agent.memory.todos import TodoStore
 from agent.orchestrator.agent import Agent
-from agent.orchestrator.assemble import AppContext
+from agent.orchestrator.assemble import AppContext, ensure_persona
 from agent.server.app import create_app
 from agent.tools.context import ToolContext
 from agent.tools.plan import register_plan_tools
@@ -30,12 +30,10 @@ from agent.tools.spawn import register_spawn_tools
 
 
 @pytest.fixture(autouse=True)
-def _isolate_session_file(tmp_path, monkeypatch):
-    """隔离真实会话文件（与 test_app.py 同款 fixture）。"""
-    import agent.server.app as app_module
-    monkeypatch.setattr(app_module, "MEMORY_PATH", tmp_path / "session.json")
-    monkeypatch.setattr(app_module, "SESSIONS_DIR", tmp_path / "sessions")
-    monkeypatch.setattr(app_module, "LEARNED_DIR", tmp_path / "learned")
+def _isolate_disk_state(tmp_path, monkeypatch):
+    """隔离真实磁盘状态（与 test_app.py 同款 fixture）：worker 收官会真落盘。"""
+    monkeypatch.setattr("agent.server.app.LEARNED_DIR", tmp_path / "learned")
+    monkeypatch.setattr("agent.orchestrator.assemble.LEARNED_DIR", tmp_path / "learned")
 
 
 def _call(name: str, args: dict) -> dict:
@@ -73,45 +71,50 @@ def _make_ctx(
 ) -> AppContext:
     """冒烟测试专用 AppContext：按需注册 plan/spawn 工具。
 
-    plan 工具需要 ToolContext.session（PlanBoard 住 Session 上）；
-    spawn 工具需要 ToolContext.llm（子 agent 的 LLM = internal_llm）。
-    session 对象在 AppContext 与 ToolContext 间共享（同 test_app.py 的身份契约）。
+    S8a 起工具集在 build_agent 工厂里现造（与 assemble 的 session_registry 同一
+    形状）：plan 工具需要 ToolContext.session（PlanBoard 住 Session 上）、spawn
+    工具需要 ToolContext.llm（子 agent 的 LLM = internal_llm），两者都必须抓
+    worker 从仓库 load 出来的那个会话对象——所以只能等工厂拿到 session 再建。
     """
-    session = Session()
-    registry = ToolRegistry()
-    ctx = ToolContext(
-        notes_dir=None,
-        llm=internal_llm or ScriptedLLM([]),
-        history=session.messages,
-        session=session,
-    )
-    if with_plan:
-        register_plan_tools(registry, ctx)
-    if with_spawn:
-        # 子 agent 需要一个工具可用（echo 搜索工具）
-        registry.register(Tool(
-            name="search_notes",
-            description="冒烟 echo 工具",
-            parameters={
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
-            },
-            func=lambda query, **kw: f"搜索结果：{query}",
-        ))
-        register_spawn_tools(registry, ctx)
+    sub_llm = internal_llm or ScriptedLLM([])
 
-    agent = Agent(name="smoke", system_prompt="冒烟测试人设", registry=registry)
+    def build_agent(session: Session) -> Agent:
+        registry = ToolRegistry()
+        tool_ctx = ToolContext(
+            notes_dir=None,
+            llm=sub_llm,
+            history=session.messages,
+            session=session,
+        )
+        if with_plan:
+            register_plan_tools(registry, tool_ctx)
+        if with_spawn:
+            # 子 agent 需要一个工具可用（echo 搜索工具）
+            registry.register(Tool(
+                name="search_notes",
+                description="冒烟 echo 工具",
+                parameters={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+                func=lambda query, **kw: f"搜索结果：{query}",
+            ))
+            register_spawn_tools(registry, tool_ctx)
+
+        agent = Agent(name="smoke", system_prompt="冒烟测试人设", registry=registry)
+        ensure_persona(session, agent)   # 工厂契约：还的 agent 与会话都保证带人设
+        return agent
+
     return AppContext(
         provider="mock",
         ledger=None,
         embedder=None,
         llm=main_llm,
-        internal_llm=internal_llm or ScriptedLLM([]),
+        internal_llm=sub_llm,
         kb=None,
-        session=session,
-        registry=registry,
-        agent=agent,
+        store=SessionStore(Path(tempfile.mkdtemp()) / "sessions"),
+        build_agent=build_agent,
         todos=TodoStore(Path(tempfile.mkdtemp()) / "todos.json"),
     )
 
@@ -270,8 +273,8 @@ def test_smoke_route_degradation_no_router():
     现有 test_jev 验了 ScenarioRouter 单元层，这里验 HTTP 端到端：无 router 不炸。
     """
     ctx = _make_ctx(ScriptedLLM([Message(role="assistant", content="你好")]))
-    # 显式断言：无 JEV_API_KEY 时 agent.router 是 None（条件装配的结果）
-    assert ctx.agent.router is None
+    # 显式断言：工厂造的 agent 无 router（条件装配的结果）
+    assert ctx.build_agent(Session()).router is None
 
     client = TestClient(create_app(ctx))
     run_id = client.post("/api/runs", json={"text": "你好"}).json()["run_id"]

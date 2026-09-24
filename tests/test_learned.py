@@ -83,13 +83,13 @@ def _client(monkeypatch, tmp_path):
 
     from agent.core.llm import ScriptedLLM
     from agent.core.types import Message
-    from agent.memory.store import Session
+    from agent.memory.store import SessionStore
+    from agent.orchestrator.agent import Agent
     from agent.orchestrator.assemble import AppContext
     from agent.server.app import create_app
+    from agent.tools.registry import ToolRegistry
 
     monkeypatch.setattr("agent.server.app.LEARNED_DIR", tmp_path)
-    from agent.orchestrator.agent import Agent
-    from agent.tools.registry import ToolRegistry
 
     ctx = AppContext(
         provider="mock",
@@ -98,9 +98,9 @@ def _client(monkeypatch, tmp_path):
         llm=ScriptedLLM([Message(role="assistant", content="ok")]),
         internal_llm=ScriptedLLM([]),
         kb=None,
-        session=Session(),
-        registry=None,
-        agent=Agent(
+        store=SessionStore(tmp_path / "sessions"),
+        # 记忆面板端点不跑 worker，工厂只需满足类型（不会真被调用）
+        build_agent=lambda session: Agent(
             name="test", system_prompt="测试人设", registry=ToolRegistry()
         ),
         todos=None,

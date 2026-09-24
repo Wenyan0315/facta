@@ -1,13 +1,12 @@
-"""S2 验收修复轮：会话标题提炼（LLM）+ 列表优先读提炼标签。"""
+"""S2 验收修复轮：会话标题提炼（LLM）。
+
+（清单展示「提炼标签优先、缺失回落首句」的验收随 S8a 迁到 test_sessions.py 的
+list_metas 组——那是 SessionStore 的职责，不再是归档清单的。）
+"""
 
 from agent.core.llm import LLM, LLMUnavailableError, ScriptedLLM
 from agent.core.types import Message
-from agent.memory.store import (
-    Session,
-    archive_session,
-    list_archived_sessions,
-    save_session,
-)
+from agent.memory.store import Session
 from agent.memory.title import summarize_title
 
 
@@ -54,23 +53,3 @@ def test_summarize_title_empty_session_returns_none():
     llm = ScriptedLLM([])
     assert summarize_title(Session(), llm) is None
     assert llm.calls == []   # 没调过模型
-
-
-def test_list_prefers_llm_title_over_first_message(tmp_path):
-    # 归档文件带 title 字段时，列表展示提炼标签而非首句
-    session = _session_with_talk()
-    session.title = "PHP 工具封装"
-    save_session(session, tmp_path / "session.json")
-    archive_session(tmp_path / "session.json", tmp_path / "sessions")
-
-    items = list_archived_sessions(tmp_path / "sessions")
-    assert items[0][1] == "PHP 工具封装"   # 不是首句「PHP 结合 AI Agent 可以做什么」
-
-
-def test_list_falls_back_when_no_title(tmp_path):
-    # 旧归档无 title → 首句派生（兼容）
-    save_session(_session_with_talk(), tmp_path / "session.json")
-    archive_session(tmp_path / "session.json", tmp_path / "sessions")
-
-    items = list_archived_sessions(tmp_path / "sessions")
-    assert items[0][1].startswith("PHP 结合 AI Agent")   # 首句派生（20 字截断 + 省略号）

@@ -1,39 +1,54 @@
-"""S2b FastAPI 壳验收：Run 生命周期三接口 + 事件流。"""
+"""FastAPI 壳验收：Run 生命周期三接口 + 事件流 + S8a 会话 CRUD。
+
+S8a 起 ctx 不带 session/agent（多会话并发要求「一段对话一套 agent」），
+改带 store（会话仓库）+ build_agent（工厂）——本文件的 _make_ctx 因此
+从「塞一个 Session 进去」变成「造一个 tmp 目录的仓库 + 一个最小工厂」。
+"""
 
 import json
+import tempfile
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from agent.core.llm import ScriptedLLM
 from agent.core.types import Message
-from agent.memory.store import Session
-from agent.orchestrator.assemble import AppContext
+from agent.memory.store import Session, SessionStore
+from agent.memory.todos import TodoStore
+from agent.orchestrator.agent import Agent
+from agent.orchestrator.assemble import AppContext, ensure_persona
 from agent.server.app import create_app
+from agent.tools.registry import ToolRegistry
 
 
 @pytest.fixture(autouse=True)
-def _isolate_session_file(tmp_path, monkeypatch):
-    """隔离真实会话文件：每轮落盘上线后，跑 Run 的测试会写真 session.json
-    ——持久状态的系统必须 fixture 隔离（M6.3「测试污染」血案的同款复发，
-    本次是它第一次真烧掉用户数据）。"""
-    import agent.server.app as app_module
-    monkeypatch.setattr(app_module, "MEMORY_PATH", tmp_path / "session.json")
-    monkeypatch.setattr(app_module, "SESSIONS_DIR", tmp_path / "sessions")
-    monkeypatch.setattr(app_module, "LEARNED_DIR", tmp_path / "learned")
+def _isolate_disk_state(tmp_path, monkeypatch):
+    """隔离真实磁盘状态：跑 Run 的测试会真落盘（会话 + 记忆）。
+
+    持久状态的系统必须 fixture 隔离（M6.3「测试污染」血案的同款复发，
+    那次是它第一次真烧掉用户数据）。S8a 后会话不再有 active 固定位，
+    隔离对象从「app 模块的 MEMORY_PATH」变成「SessionStore 的根目录」——
+    仓库由 _make_ctx 注入一次性 tmp 目录，这里补还住在模块级的路径常量
+    （app.LEARNED_DIR 供记忆面板端点，assemble.LEARNED_DIR 供收官固化）。
+    """
+    monkeypatch.setattr("agent.server.app.LEARNED_DIR", tmp_path / "learned")
+    monkeypatch.setattr("agent.orchestrator.assemble.LEARNED_DIR", tmp_path / "learned")
 
 
 def _make_ctx(reply: str = "你好！", llm=None, registry=None) -> AppContext:
-    # 最小 AppContext：ScriptedLLM 回纯文本（不点菜），registry 传 None 也可。
-    # todos 指到临时目录（mkdtemp 每次唯一，测试间不串）——避免调用 todos
-    # 端点的测试踩到 None 路径。llm/registry 可注入（S4b 确认流端到端用）；
-    # agent 包 registry（S5a：_run_worker/ensure_persona 消费 ctx.agent）
-    import tempfile
-    from pathlib import Path
+    """最小 AppContext：ScriptedLLM 回纯文本（不点菜），registry 传 None 也可。
 
-    from agent.memory.todos import TodoStore
-    from agent.orchestrator.agent import Agent
-    from agent.tools.registry import ToolRegistry
+    build_agent 是工厂契约的最小实现：还一个 agent，并顺手保证会话带人设
+    （与 assemble 里的真工厂同一条不变量，只是工具集换成注入的 registry）。
+    todos 指到 mkdtemp（每次唯一，测试间不串）——避免 todos 端点踩 None。
+    """
+    tools = registry or ToolRegistry()
+
+    def build_agent(session: Session) -> Agent:
+        agent = Agent(name="test", system_prompt="测试人设", registry=tools)
+        ensure_persona(session, agent)
+        return agent
 
     return AppContext(
         provider="mock",
@@ -42,11 +57,8 @@ def _make_ctx(reply: str = "你好！", llm=None, registry=None) -> AppContext:
         llm=llm or ScriptedLLM([Message(role="assistant", content=reply)]),
         internal_llm=ScriptedLLM([]),
         kb=None,
-        session=Session(),
-        registry=registry,
-        agent=Agent(
-            name="test", system_prompt="测试人设", registry=registry or ToolRegistry()
-        ),
+        store=SessionStore(Path(tempfile.mkdtemp()) / "sessions"),
+        build_agent=build_agent,
         todos=TodoStore(Path(tempfile.mkdtemp()) / "todos.json"),
     )
 
@@ -62,6 +74,13 @@ def _read_events(client, run_id: str) -> list[dict]:
             if line.startswith("data: "):
                 events.append(json.loads(line[len("data: "):]))
     return events
+
+
+def _run_to_completion(client, text: str) -> str:
+    """发一轮消息并读完事件流（= worker 已收官落盘），返回 session_id。"""
+    body = client.post("/api/runs", json={"text": text}).json()
+    _read_events(client, body["run_id"])
+    return body["session_id"]
 
 
 def test_run_lifecycle_create_stream_complete_cancel():
@@ -90,36 +109,54 @@ def test_run_lifecycle_create_stream_complete_cancel():
     assert runs[0]["status"] == "completed"
 
 
+def test_run_without_session_id_opens_a_new_session():
+    # 省略 session_id = 新开一段对话：前端首次发送不必先建会话，响应带回真实
+    # id，客户端从此认它；这一轮的 Run 也记在这个 id 名下
+    client = _make_client()
+    sid = _run_to_completion(client, "你好")
+
+    assert sid
+    assert client.get("/api/runs").json()[0]["session_id"] == sid
+    assert [s["id"] for s in client.get("/api/sessions").json()] == [sid]
+
+
 def test_messages_endpoint_filters_to_storyline():
     # 历史回放只讲故事线：system=人设、tool=中间产物、空 content 纯点菜轮都滤掉
     ctx = _make_ctx()
-    ctx.session.messages.append(Message(role="system", content="人设"))
-    ctx.session.messages.append(Message(role="user", content="你好"))
-    ctx.session.messages.append(Message(role="assistant", content="", tool_calls=[
+    session = Session()
+    session.messages.append(Message(role="system", content="人设"))
+    session.messages.append(Message(role="user", content="你好"))
+    session.messages.append(Message(role="assistant", content="", tool_calls=[
         {"id": "c1", "name": "get_current_time", "arguments": "{}"}
     ]))
-    ctx.session.messages.append(Message(role="tool", tool_call_id="c1", content="12:00"))
-    ctx.session.messages.append(Message(role="assistant", content="现在 12 点"))
+    session.messages.append(Message(role="tool", tool_call_id="c1", content="12:00"))
+    session.messages.append(Message(role="assistant", content="现在 12 点"))
+    sid = ctx.store.create(session)
     client = TestClient(create_app(ctx))
 
-    assert client.get("/api/messages").json() == [
+    assert client.get(f"/api/sessions/{sid}/messages").json() == [
         {"role": "user", "content": "你好"},
         {"role": "assistant", "content": "现在 12 点"},
     ]
+    assert client.get("/api/sessions/20260913-101956/messages").status_code == 404
 
 
-def test_runs_list_newest_first():
+def test_runs_list_newest_first_and_filter_by_session():
     from agent.server.run_store import STATUS_COMPLETED, RunStore
 
-    store = RunStore()
-    old = store.create(title="旧任务")
+    run_store = RunStore()
+    old = run_store.create(title="会话A的任务", session_id="20260913-101956")
     old.finish(STATUS_COMPLETED)
-    store.create(title="新任务")   # pending
+    run_store.create(title="会话B的任务", session_id="20260915-230000")   # pending
 
-    client = TestClient(create_app(_make_ctx(), store=store))
+    client = TestClient(create_app(_make_ctx(), store=run_store))
     runs = client.get("/api/runs").json()
-    assert [r["title"] for r in runs] == ["新任务", "旧任务"]   # 新的在前
+    assert [r["title"] for r in runs] == ["会话B的任务", "会话A的任务"]   # 新的在前
     assert runs[1]["status"] == "completed"
+
+    # 任务视图按会话过滤（「这段对话跑过哪些任务」）
+    only_a = client.get("/api/runs", params={"session_id": "20260913-101956"}).json()
+    assert [r["title"] for r in only_a] == ["会话A的任务"]
 
 
 def test_tasks_page_serves_html():
@@ -136,13 +173,120 @@ def test_graph_page_serves_html():
     assert "知识图谱" in resp.text
 
 
+# ---------- 会话收官（settle_session：补标题 → 增量固化 → 落盘） ----------
+
+
+def test_run_persists_session_each_turn():
+    # 每轮落盘：Web 壳常驻无退出钩子——worker 在 finally 里收官，且必须先于
+    # 终态哨兵（读到 run.completed 时盘上必须有这轮的 user+assistant）
+    ctx = _make_ctx()
+    client = TestClient(create_app(ctx))
+    sid = _run_to_completion(client, "记住这句")
+
+    contents = [m.content for m in ctx.store.load(sid).messages]
+    assert "记住这句" in contents and "你好！" in contents
+
+
+def test_worker_seeds_persona_into_session():
+    # 人设不变量（S8a 收口进 build_agent 工厂）：新会话跑一轮后，盘上第一条
+    # 必须是 system 且只有一条——「有 agent 但没人设」在结构上不存在。
+    # 真实复踩过：归档 clear 连 system 一起清，新会话里中文提问收到英文回复。
+    ctx = _make_ctx()
+    client = TestClient(create_app(ctx))
+    sid = _run_to_completion(client, "你好")
+
+    messages = ctx.store.load(sid).messages
+    assert messages[0].role == "system"
+    assert messages[0].content == "测试人设"
+    assert sum(1 for m in messages if m.role == "system") == 1
+
+
+def test_settle_sets_llm_title():
+    # 收官补标题：internal_llm 第 1 次调用 = 提炼标题，写进会话文件
+    #（清单读取零 LLM 调用，所以标签必须在收官时就落盘）
+    ctx = _make_ctx()
+    ctx.internal_llm = ScriptedLLM([Message(role="assistant", content="PHP 工具封装")])
+    client = TestClient(create_app(ctx))
+    sid = _run_to_completion(client, "PHP 结合 AI Agent 可以做什么")
+
+    assert ctx.store.load(sid).title == "PHP 工具封装"   # 不是首句截断
+
+
+# ---------- S8a 会话 CRUD（身份=文件名，无 active 特例） ----------
+
+
+def test_new_session_endpoint_creates_placeholder():
+    # 显式新建（前端「新对话」按钮）：空会话也进清单——刚点的新建不该凭空消失
+    ctx = _make_ctx()
+    client = TestClient(create_app(ctx))
+
+    resp = client.post("/api/sessions")
+    assert resp.status_code == 201
+    sid = resp.json()["id"]
+
+    items = client.get("/api/sessions").json()
+    assert [s["id"] for s in items] == [sid]
+    assert set(items[0]) == {"id", "title", "time", "collapsed", "running"}
+    assert items[0]["title"] == "（空会话）"
+    assert items[0]["running"] is False and items[0]["collapsed"] is False
+    assert items[0]["time"]   # 身份即时间戳 → 展示时间从 id 解析，不另存字段
+
+
+def test_rename_and_delete_session():
+    ctx = _make_ctx()
+    client = TestClient(create_app(ctx))
+    sid = client.post("/api/sessions").json()["id"]
+
+    # 重命名改的是 title 标签，身份（文件名）不动
+    assert client.put(f"/api/sessions/{sid}", json={"text": "  改的名字  "}).status_code == 200
+    assert client.get("/api/sessions").json()[0]["title"] == "改的名字"
+    assert ctx.store.load(sid).title == "改的名字"
+
+    assert client.delete(f"/api/sessions/{sid}").json() == {"ok": True, "deleted": sid}
+    assert client.get("/api/sessions").json() == []
+
+
+def test_session_guards():
+    client = _make_client()
+    assert client.put("/api/sessions/20260913-101956", json={"text": "x"}).status_code == 404
+    assert client.delete("/api/sessions/20260913-101956").status_code == 404
+    assert client.put("/api/sessions/20260913-101956", json={"text": "  "}).status_code == 400
+
+
+def test_illegal_session_id_is_400_not_500():
+    # 会话 id 是 HTTP 路径来的外部输入：格式非法必须 400——store.path 抛的
+    # ValueError 是信任边界兜底，不该以 500 的形式漏给客户端
+    client = _make_client()
+    assert client.get("/api/sessions/abc/messages").status_code == 400
+    assert client.put("/api/sessions/abc", json={"text": "x"}).status_code == 400
+    assert client.delete("/api/sessions/abc").status_code == 400
+
+
+def test_write_endpoints_409_while_session_running():
+    # 准入策略代替锁：worker 整轮独占这段对话（load→改→save），此时任何外部
+    # 写都会在 worker 落盘时被覆盖（lost update）。与其用锁把写排队到几十秒后，
+    # 不如直接 409 告诉用户「这段对话正在被写」。
+    from agent.server.run_store import STATUS_RUNNING, RunStore
+
+    ctx = _make_ctx()
+    sid = ctx.store.create(Session())
+    run_store = RunStore()
+    run_store.create_if_idle(sid).status = STATUS_RUNNING
+
+    client = TestClient(create_app(ctx, store=run_store))
+    assert client.put(f"/api/sessions/{sid}", json={"text": "x"}).status_code == 409
+    assert client.delete(f"/api/sessions/{sid}").status_code == 409
+    # 同一会话的第二轮也被准入挡住（create_if_idle 返回拒绝理由 → 409）
+    assert client.post("/api/runs", json={"text": "再来一轮", "session_id": sid}).status_code == 409
+    assert client.get("/api/sessions").json()[0]["running"] is True
+
+
+# ---------- 人设保证（ensure_persona 三分支，S8a 收口进工厂） ----------
+
+
 def test_ensure_persona_three_branches():
     # 装配不变量：会话必须带 agent 的 system_prompt 开工——Web 入口曾跑过无人设会话
-    from agent.core.types import Message
-    from agent.memory.store import Session
-    from agent.orchestrator.agent import DEFAULT_SYSTEM_PROMPT, Agent
-    from agent.orchestrator.assemble import ensure_persona
-    from agent.tools.registry import ToolRegistry
+    from agent.orchestrator.agent import DEFAULT_SYSTEM_PROMPT
 
     agent = Agent(name="test", system_prompt=DEFAULT_SYSTEM_PROMPT, registry=ToolRegistry())
 
@@ -169,120 +313,8 @@ def test_ensure_persona_three_branches():
     assert normal.messages[0].content == "人设"
 
 
-def test_run_persists_session_each_turn(tmp_path, monkeypatch):
-    # 每轮落盘：Web 壳常驻无退出钩子——finally 落盘且先于终态哨兵
-    # （读到 run.completed 时盘上必须有这轮的 user+assistant）
-    import agent.server.app as app_module
-
-    mem = tmp_path / "session.json"
-    monkeypatch.setattr(app_module, "MEMORY_PATH", mem)
-    client = TestClient(create_app(_make_ctx()))
-
-    resp = client.post("/api/runs", json={"text": "记住这句"})
-    _read_events(client, resp.json()["run_id"])   # 读完事件流 = worker 已收尾
-
-    data = json.loads(mem.read_text(encoding="utf-8"))
-    contents = [m.get("content") for m in data["messages"]]
-    assert "记住这句" in contents and "你好！" in contents
-
-
-def test_archive_new_session_sets_llm_title(tmp_path):
-    # S2 验收修复轮：归档时用 LLM 提炼标题写进归档文件（列表读取零 LLM 调用）
-    from agent.memory.store import load_session
-
-    ctx = _make_ctx()
-    # internal_llm 第 1 次调用 = 提炼标题；后续 consolidate 调用吃兜底（parse 失败不写）
-    ctx.internal_llm = ScriptedLLM([Message(role="assistant", content="PHP 工具封装")])
-    ctx.session.messages.append(Message(role="user", content="PHP 结合 AI Agent 可以做什么"))
-    ctx.session.messages.append(Message(role="assistant", content="PHP 当工具层，决策交给大模型"))
-
-    client = TestClient(create_app(ctx))
-    assert client.post("/api/sessions/new").status_code == 200
-
-    # fixture 已把 SESSIONS_DIR monkeypatch 到 tmp_path/sessions
-    archived = list((tmp_path / "sessions").glob("*.json"))
-    assert len(archived) == 1
-    assert load_session(archived[0]).title == "PHP 工具封装"   # 不是首句截断
-
-
-def test_empty_session_new_archives_nothing(tmp_path):
-    # S2 验收修复轮#3：空会话不进仓库——此前「点新会话」把空会话无条件归档，
-    # 列表长出「（空会话）」垃圾记录（会话数量感「变多」的一半根因）
-    client = TestClient(create_app(_make_ctx()))   # ctx.session 无任何消息
-    assert client.post("/api/sessions/new").status_code == 200
-    assert list((tmp_path / "sessions").glob("*.json")) == []
-
-
-def test_new_session_reseeds_persona_after_clear(tmp_path):
-    # S2 验收修复轮#4：归档 clear 连 system 一起清——第二场会话曾变裸会话
-    # （真实复踩：新会话里中文提问收到英文回复）。修复后归档即补种人设
-    # （S5a 起人设来自 ctx.agent），新 active 落盘/内存都带 system。
-    ctx = _make_ctx()
-    ctx.session.messages.append(Message(role="system", content=ctx.agent.system_prompt))
-    ctx.session.messages.append(Message(role="user", content="第一场对话"))
-
-    client = TestClient(create_app(ctx))
-    assert client.post("/api/sessions/new").status_code == 200
-
-    assert [m.role for m in ctx.session.messages] == ["system"]   # 内存：新会话带人设
-    assert ctx.session.messages[0].content == ctx.agent.system_prompt
-    # 落盘：新 active 文件同样带人设（读回验证）
-    from agent.memory.store import load_session
-    assert load_session(tmp_path / "session.json").messages[0].role == "system"
-
-
-def test_switch_with_empty_current_does_not_archive_empty(tmp_path):
-    # 切换时若当前会话为空：不归档空会话、只消耗目标（move 语义），归档数只减不增
-    from agent.memory.store import save_session
-
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir()
-    target = sessions_dir / "20260913-101956.json"
-    save_session(
-        Session(messages=[
-            Message(role="user", content="目标会话内容"),
-            Message(role="assistant", content="回复"),
-        ]),
-        target,
-    )
-
-    client = TestClient(create_app(_make_ctx()))   # 当前会话为空
-    assert client.post("/api/sessions/20260913-101956.json/switch").status_code == 200
-
-    assert list(sessions_dir.glob("*.json")) == []   # 目标已切回、空会话未被归档
-
-
-def test_sessions_list_includes_current_on_top(tmp_path):
-    # 「时隐时现」修复：列表 = 当前 active（current:true 置顶）+ 归档——
-    # 当前会话常驻可见，不再随切回/归档消失重现
-    from agent.memory.store import save_session
-
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir()
-    save_session(
-        Session(messages=[Message(role="user", content="归档过的对话")]),
-        sessions_dir / "20260915-230000.json",
-    )
-
-    ctx = _make_ctx()
-    ctx.session.messages.append(Message(role="system", content="人设"))
-    ctx.session.messages.append(Message(role="user", content="正在聊的对话"))
-    client = TestClient(create_app(ctx))
-
-    items = client.get("/api/sessions").json()
-    assert items[0] == {"name": "active", "title": "正在聊的对话", "time": "", "current": True}
-    assert items[1]["name"] == "20260915-230000.json"
-    assert "current" not in items[1]
-
-
 def test_ensure_persona_merges_duplicate_system_messages():
     # 换血 bug 时期残留自愈：头部多条 system 合并为一条，游标左移
-    from agent.core.types import Message
-    from agent.memory.store import Session
-    from agent.orchestrator.agent import Agent
-    from agent.orchestrator.assemble import ensure_persona
-    from agent.tools.registry import ToolRegistry
-
     s = Session()
     s.messages = [Message(role="system", content="人设A"), Message(role="system", content="人设B"),
                   Message(role="system", content="人设C"), Message(role="user", content="你好")]
@@ -293,24 +325,7 @@ def test_ensure_persona_merges_duplicate_system_messages():
     assert s.summarized_upto == 2              # 4 - 2 条重复
 
 
-def test_switch_replaces_memory_completely(tmp_path):
-    # 换血无条件清：空会话切换不残留旧消息（4 条 system 的根因）
-    from agent.memory.store import save_session
-
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir()
-    target = sessions_dir / "20260913-101956.json"
-    save_session(Session(messages=[Message(role="system", content="目标人设"),
-                                   Message(role="user", content="目标会话")]), target)
-
-    ctx = _make_ctx()   # 当前空会话（仅启动时的 system？不——空 Session 无消息）
-    client = TestClient(create_app(ctx))
-    assert client.post("/api/sessions/20260913-101956.json/switch").status_code == 200
-
-    # 换血后内存 = 目标会话原样，不与切换前的任何残留拼接
-    assert [m.role for m in ctx.session.messages] == ["system", "user"]
-    assert ctx.session.messages[1].content == "目标会话"
-    assert sum(1 for m in ctx.session.messages if m.role == "system") == 1
+# ---------- 个人待办 ----------
 
 
 def test_todos_api_roundtrip():
@@ -344,12 +359,15 @@ def test_todos_update_and_delete_api():
     assert client.put("/api/todos/99", json={"text": "x"}).status_code == 404
 
 
+# ---------- 取消与未知 run ----------
+
+
 def test_cancel_interrupts_running_run():
     # 用注入的 store 造一个正在运行的 Run——避免真线程跑太快、cancel 追不上的竞态
     from agent.server.run_store import STATUS_RUNNING, RunStore
 
     store = RunStore()
-    run = store.create_if_idle()
+    run = store.create_if_idle("20260913-101956")
     run.status = STATUS_RUNNING
 
     client = TestClient(create_app(_make_ctx(), store=store))
@@ -400,11 +418,10 @@ def test_confirm_endpoint_409_without_pending_404_unknown_run():
     assert client.post("/api/runs/nope/confirm", json={"approve": True}).status_code == 404
 
 
-def test_confirm_approve_flow_end_to_end(tmp_path, monkeypatch):
+def test_confirm_approve_flow_end_to_end(tmp_path):
     # 全链路：worker 挂起 → POST confirm(approve) → 命令真执行 → run 完成
     # 副作用验证（审计佐证思路）：看文件落没落地，不看模型嘴说
     from agent.tools.context import ToolContext
-    from agent.tools.registry import ToolRegistry
     from agent.tools.terminal import register_terminal_tools
 
     registry = ToolRegistry()
@@ -423,10 +440,9 @@ def test_confirm_approve_flow_end_to_end(tmp_path, monkeypatch):
     assert (tmp_path / "approved.txt").exists()   # 批准后命令真跑了
 
 
-def test_confirm_reject_flow_end_to_end(tmp_path, monkeypatch):
+def test_confirm_reject_flow_end_to_end(tmp_path):
     # 拒绝不炸会话：拒绝提示作为工具结果回灌，模型收尾回答，run 正常完成
     from agent.tools.context import ToolContext
-    from agent.tools.registry import ToolRegistry
     from agent.tools.terminal import register_terminal_tools
 
     registry = ToolRegistry()

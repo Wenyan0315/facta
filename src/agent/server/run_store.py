@@ -33,7 +33,7 @@ STATUS_FAILED = "failed"         # 模型挂/异常终态
 STATUS_CANCELLED = "cancelled"   # 用户取消终态
 
 _TERMINAL = {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED}
-_IN_FLIGHT = {STATUS_PENDING, STATUS_RUNNING, STATUS_WAITING}   # 单锁口径：等待确认也算在跑
+_IN_FLIGHT = {STATUS_PENDING, STATUS_RUNNING, STATUS_WAITING}   # 准入口径：等待确认也算在跑（人在裁决，会话仍被占着）
 
 
 @dataclass
@@ -58,6 +58,9 @@ class Run:
     """
 
     run_id: str
+    # S8a：这个 Run 属于哪段对话。session_id 是并发隔离的单位——「同一会话只能
+    # 有一个在跑的 Run」（并发会互踩 session.messages），不同会话可并行。
+    session_id: str = ""
     status: str = STATUS_PENDING
     title: str = ""
     preview: str = ""
@@ -78,13 +81,17 @@ class Run:
         self._seq += 1
         return self._seq
 
-    def emit(self, type: str, data: dict | None = None) -> RunEvent:
-        """记录一条事件并广播给所有订阅者（append-only，seq 自增）。"""
+    def emit(self, type: str, data: dict | None = None) -> None:
+        """记录一条事件并广播给所有订阅者（append-only，seq 自增）。
+
+        返回 None 而不是 RunEvent：emit 的一个主要用途是直接当 run_turn 的
+        on_text/on_event 回调，而那两处要 Callable[..., None]——返回事件会让
+        lambda 形式过不了类型检查。要读事件走 run.events。
+        """
         event = RunEvent(seq=self._next_seq(), type=type, data=data or {})
         self.events.append(event)
         for q in self._subscribers:
             q.put(event)
-        return event
 
     def subscribe(self) -> queue.Queue:
         """新订阅者获得独立队列（广播模型）；断开时必须 unsubscribe 防泄漏。
@@ -170,46 +177,77 @@ class RunStore:
     「先内存打通事件协议，再换底层」）。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_in_flight: int = 1) -> None:
+        # S8a：并发上限。默认 1 = S2b 起的老语义（全进程只跑一个 Run），
+        # 直接构造 RunStore() 的调用方行为不变；服务端从
+        # CORTEX_MAX_CONCURRENT_RUNS 注入更大的值以支持「长任务期间另开会话聊」。
         self._runs: dict[str, Run] = {}
-        self._lock = threading.Lock()   # 保护 _runs 与「单锁」检查+创建的原子性
+        self._max_in_flight = max(1, int(max_in_flight))
+        self._lock = threading.Lock()   # 保护 _runs 与「准入」检查+创建的原子性
 
-    def create(self, title: str = "") -> Run:
-        run = Run(run_id=uuid.uuid4().hex, title=title)
+    @property
+    def max_in_flight(self) -> int:
+        return self._max_in_flight
+
+    def create(self, title: str = "", session_id: str = "") -> Run:
+        """无条件创建（不走准入检查）——诊断/测试用的后门。"""
+        run = Run(run_id=uuid.uuid4().hex, session_id=session_id, title=title)
         with self._lock:
             self._runs[run.run_id] = run
         return run
 
-    def create_if_idle(self, title: str = "") -> Run | None:
-        """原子地「无 in-flight 才创建」——单锁的检查与创建不可分割。
+    def create_if_idle(self, session_id: str, title: str = "") -> Run | str:
+        """原子地「准入通过才创建」——检查与创建不可分割。
 
-        单锁理由：会话是单内存状态（session 是共享可变对象），并发两个 Run
-        会互相踩 session.messages。多并发留给 S6（worktree/子 agent 隔离）。
+        准入两条（S8a 起单锁口径从「全进程一把」收窄到「一段对话一把」）：
+          1. 同一会话已有 in-flight → 拒。真正的正确性约束：session.messages
+             是共享可变列表，两个 Run 并发 append 会互相踩（工具历史/滚动摘要
+             都会错位）。
+          2. 全局 in-flight 数达上限 → 拒。资源约束：每个 Run 一个线程 + 一条
+             模型长连接，无上限会让「开 20 个标签页」变成 20 路并发。
+
+        返回 Run = 成功；返回 str = 被拒原因（调用方直接当 409 的 detail）。
+        不用 None：那会丢掉「该会话在忙」vs「全局满了」的区分，而前端要按
+        原因显示不同文案（前者提示切会话，后者只能等）。
         """
         with self._lock:
-            if any(r.status in _IN_FLIGHT for r in self._runs.values()):
-                return None
-            run = Run(run_id=uuid.uuid4().hex, title=title)
+            in_flight = [r for r in self._runs.values() if r.status in _IN_FLIGHT]
+            if any(r.session_id == session_id for r in in_flight):
+                return "该会话已有任务在运行，请稍候再发"
+            if len(in_flight) >= self._max_in_flight:
+                return f"并发任务已达上限（{self._max_in_flight}），请等待其中一个完成"
+            run = Run(run_id=uuid.uuid4().hex, session_id=session_id, title=title)
             self._runs[run.run_id] = run
             return run
 
-    def list_runs(self) -> list[Run]:
-        """全部 Run，新的在前（任务视图原料）。
+    def list_runs(self, session_id: str | None = None) -> list[Run]:
+        """Run 清单，新的在前（任务视图原料）；给 session_id 则只列该会话的。
 
         dict 保插入序 = 创建序；v1 全在内存、重启即空（已知边界，外置触发
         信号=多实例部署）。
         """
         with self._lock:
-            return list(reversed(self._runs.values()))
+            runs = (
+                self._runs.values()
+                if session_id is None
+                else (r for r in self._runs.values() if r.session_id == session_id)
+            )
+            return list(runs)[::-1]
 
     def get(self, run_id: str) -> Run | None:
         with self._lock:
             return self._runs.get(run_id)
 
-    def active_run(self) -> Run | None:
-        """当前唯一 in-flight 的 Run（供诊断/测试；单锁由 create_if_idle 原子保证）。"""
+    def active_run(self, session_id: str | None = None) -> Run | None:
+        """当前 in-flight 的 Run（供诊断/测试）；给 session_id 则限该会话。
+
+        S8a 后「当前唯一」只在会话内成立（create_if_idle 原子保证），
+        全局可同时有 max_in_flight 个。
+        """
         with self._lock:
             for run in self._runs.values():
-                if run.status in _IN_FLIGHT:
+                if run.status not in _IN_FLIGHT:
+                    continue
+                if session_id is None or run.session_id == session_id:
                     return run
             return None

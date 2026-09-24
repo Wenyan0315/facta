@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,10 +32,19 @@ from agent.knowledge.graph import GraphStore
 from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
 from agent.knowledge.sync import sync_notes
 from agent.knowledge.vector_store import ChromaVectorStore
-from agent.memory.store import Session, load_session
+from agent.memory.consolidate import consolidate
+from agent.memory.store import Session, SessionStore, derive_title
+from agent.memory.title import summarize_title
 from agent.memory.todos import TodoStore
 from agent.orchestrator.agent import Agent, build_default_agent
-from agent.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, WORKSPACE_ROOT, user_memory_path
+from agent.paths import (
+    GRAPH_PATH,
+    LEARNED_DIR,
+    NOTES_DIR,
+    SESSIONS_DIR,
+    WORKSPACE_ROOT,
+    user_memory_path,
+)
 from agent.tools.builtin import register_builtin
 from agent.tools.context import ToolContext
 from agent.tools.graph import register_graph_tools
@@ -42,6 +52,7 @@ from agent.tools.graph import register_graph_tools
 logger = logging.getLogger(__name__)
 
 from agent.tools.files import register_file_tools  # noqa: E402  # 历史结构：logger 居中，保持原样
+from agent.tools.history import register_history_tools  # noqa: E402
 from agent.tools.mcp_config import assemble_servers, load_server_specs
 from agent.tools.plan import register_plan_tools
 from agent.tools.registry import ToolRegistry
@@ -52,15 +63,26 @@ from agent.tools.web import get_web_search, register_web_tools
 from agent.tools.worktree import cleanup_stale_worktrees
 
 # 组装层唯一真值源：CLI / Web 都从这里拿路径，不在各自入口重定义
-MEMORY_PATH = Path("data/memory/session.json")   # M6：会话记忆落盘位置（无工具用，不进 ctx）
+MEMORY_PATH = Path("data/memory/session.json")   # S8a 退役为「一次性迁移源」：老 active 固定位，启动时 move 进 SESSIONS_DIR
 VECTOR_DB_DIR = Path("data/vector_db")           # M7：向量库落盘位置（运行时数据，.gitignore 已排除）
 TODOS_PATH = Path("data/todos.json")             # 个人待办（2026-09-17）：跨会话资产，独立于 session
 AUDIT_DIR = Path("data/audit")                   # S3 审计日志（2026-09-17）：工具调用 append-only jsonl 按天滚动
 
+# 增量固化阈值（S8a）：距上次固化攒够这么多条消息才跑一次复盘。
+# 老口径是「归档/退出时全量固化一次」——S8a 没有归档动作了，触发点必须换成
+# 「攒够就固化」，否则一段长对话的记忆永远不落 learned/。
+CONSOLIDATE_THRESHOLD = max(1, int(os.environ.get("CORTEX_CONSOLIDATE_THRESHOLD", "20")))
+
 
 @dataclass
 class AppContext:
-    """assemble 的产物：一套完整的运行依赖，CLI / Web 共用。"""
+    """assemble 的产物：一套完整的运行依赖，CLI / Web 共用。
+
+    S8a 起不再持有单数的 session / agent / registry —— 多会话并发要求
+    「一段对话一套 agent」。取而代之的是 store（会话仓库，纯磁盘）+
+    build_agent（per-session agent 工厂）。全局资源（kb/todos/graph/llm/
+    MCP 子进程）仍是单例，被工厂造的每个 agent 共享。
+    """
 
     provider: str
     ledger: UsageLedger
@@ -68,9 +90,11 @@ class AppContext:
     llm: LLM            # 用户链（带语义档），服务用户聊天流量
     internal_llm: LLM   # 内部链（无语义档），给压缩器/工具内调用
     kb: KnowledgeBase
-    session: Session
-    registry: ToolRegistry
-    agent: Agent        # 主 agent（S5a）：行为定义收口——prompt/菜单/预算/learned 快照
+    store: SessionStore   # S8a：会话仓库（身份=文件名，见 memory/store.py 头注记）
+    # S8a：per-session agent 工厂。契约：给一个 Session，还一个【已保证带人设】
+    # 的 Agent（ensure_persona 在工厂内部执行，调用方无处可忘）。
+    # 副作用：会往空会话里种 system 消息 —— 那是人设不变量本身，不是意外。
+    build_agent: Callable[[Session], Agent]
     todos: TodoStore    # 个人待办仓库（2026-09-17）：工具与 Web API 共用同一实例
     mcp_clients: list = field(default_factory=list)   # 最终退出时统一 close，不留孤儿进程
     graph: GraphStore = field(default_factory=GraphStore)   # S7a/S7b 知识图谱（活对象：查询原语与图表面板共用最新图）
@@ -85,12 +109,11 @@ def ensure_persona(session: Session, agent: Agent) -> None:
     - 历史遗留的无 system 会话（早期 Web 保存的文件）：头部补插；
       摘要游标随位移 +1 对齐（summarized_upto 数的是消息位置）
 
-    调用时机（S2 验收修复轮#4 补）：①服务启动（assemble 内，S5a 起挪到
-    agent 构建后——人设来自 agent.system_prompt，而 agent 要等 registry
-    装完；不变量语义不变）②归档清空后（Web _archive_current / CLI /new）
-    ③切回换血后（_switch_session）——清空/换血动作发生在运行时，本函数
-    只在启动跑一次的话，新会话=裸会话（真实复踩：英文回复再现）。
-    幂等，多处调用无副作用。
+    调用时机（S8a 收口）：只有一个——build_agent 工厂内部。
+    S8a 之前有三个调用点（服务启动 / 归档清空后 / 切回换血后），漏一个就是
+    裸会话（真实复踩过：英文回复再现）。现在 agent 与人设同时诞生，
+    「有 agent 但没人设」这个状态在结构上不存在了。
+    幂等，重复调用无副作用（CLI 壳里的老守卫可安全并存）。
 
     自愈（浏览器验收补）：头部连续多条 system（换血 bug 时期的残留）合并为
     一条——保留第一条，删其余；摘要游标随删除数左移。
@@ -114,6 +137,47 @@ def ensure_persona(session: Session, agent: Agent) -> None:
         session.messages.insert(0, Message(role="system", content=agent.system_prompt))
         if session.summarized_upto:
             session.summarized_upto += 1
+
+
+def settle_session(
+    session: Session,
+    sid: str,
+    store: SessionStore,
+    internal_llm: LLM,
+    *,
+    flush: bool = False,
+) -> str:
+    """收尾一段对话：补标题 → 增量固化 → 落盘。返回固化报告（CLI 打印，Web 忽略）。
+
+    两个壳共用一份（与 ensure_persona 同一纪律）：这三步的**顺序**是正确性约束，
+    复制两份必然漂移。顺序有讲究——固化推进的是 consolidated_upto 游标，
+    必须在 save 之前：游标只活在磁盘上，不落盘就丢，下一轮把同一段对话
+    重烧一遍 LLM（learned/ 长出重复条目）。
+
+    调用时机：Web 在 worker 的准入窗口内（run.finish 之前），因此与「同会话的
+    下一轮」天然串行；CLI 在退出 / `/new` 换新之前。
+    flush=True → 阈值降到 1：没有「下一轮」了，把剩下的全冲掉。
+    """
+    # 标题（每段对话只提炼一次）：手工名优先——title 非空说明用户 rename 过，
+    # 不用 LLM 顶掉（「自动生成用于填空，不覆盖用户主动编辑」，计划名/记忆标签同此原则）
+    if session.title is None and any(m.role == "user" for m in session.messages):
+        session.title = summarize_title(session, internal_llm) or derive_title(session)
+
+    since = session.consolidated_upto
+    report = "记忆固化：未达阈值，跳过复盘"
+    if len(session.messages) - since >= (1 if flush else CONSOLIDATE_THRESHOLD):
+        report = consolidate(
+            session,
+            internal_llm,
+            LEARNED_DIR,
+            since=since,
+            user_memory_path=user_memory_path(),
+        )
+        # 游标只在固化没抛异常时推进：失败就下轮重来，宁可重复萃取也不丢记忆
+        session.consolidated_upto = len(session.messages)
+
+    store.save(sid, session)
+    return report
 
 
 def assemble(provider: str) -> AppContext:
@@ -186,22 +250,23 @@ def assemble(provider: str) -> AppContext:
     if g_report.extracted or g_report.removed:
         graph.save(GRAPH_PATH)
 
-    # 4) 会话记忆（M6）：启动时载入【完整会话状态】——底片(消息) + 压缩缓存(摘要游标)
-    #    关键细节：必须在登记工具之前载入——search_history 的闭包要抓这个列表对象
-    session = load_session(MEMORY_PATH)
-    restored = len(session.messages)
-    # （S5a）人设种入挪到 agent 构建后：ensure_persona 需要 agent.system_prompt，
-    # 而 agent 要等 registry 装完——顺序：载入 → 工具 → MCP → agent → 人设。
-    # 不变量语义不变（启动时装一次）；restored 口径反而更准（纯载入条数）
-    if restored:
-        logger.info("已恢复 %s 条历史消息（%s）", restored, MEMORY_PATH)
+    # 4) 会话仓库（S8a）：启动时不再载入「那一个」会话——身份=文件名，
+    #    载入动作下沉到真正要用它的时候（Web：worker 每轮进场 load、出场 save；
+    #    CLI：启动时 load 一次，进程内常驻）。
+    #    一次性迁移：老布局的 active 固定位搬进仓库（老归档文件名本就是合法 id，
+    #    原地不动即完成迁移，历史清单一条不丢）
+    store = SessionStore(SESSIONS_DIR)
+    migrated = store.migrate_legacy_active(MEMORY_PATH)
+    if migrated:
+        logger.info("已迁移老 active 会话 → sessions/%s.json", migrated)
 
-    # 5) 工具（M5）：登记内置工具，交给主循环
-    #    P1-2：依赖打包成 ToolContext——kb 给 search/write 查重检索、
-    #    llm 给 search_and_summarize 做内部摘要（内部链，不穿语义档——评审第 2 条）、
-    #    history 给会话内检索
-    #    （闭包注入，传列表对象本身而非副本——run_turn 原地 append，
-    #    工具才能实时看到全部历史）、notes_dir 消灭工具层写死的路径
+    # 5) 母 registry（S8a）：只装【全局资源】工具——锚 notes_dir / kb / todos /
+    #    graph / web / workspace_root 的那些，与「正在聊哪一段」无关，
+    #    全进程一份，被所有会话的 agent 共享（同一批 Tool 对象，闭包锚的资源随之共享）。
+    #    母 ctx 的 session / history 恒为 None：历史两件与计划三件靠既有的条件注册
+    #    惯例自然缺席（history.py:86 / plan.py:45），spawn 两件则干脆不在这里调
+    #    register_spawn_tools —— 于是「母 registry 里没有会话绑定工具」是结构事实，
+    #    不靠一份需要人肉维护的 skip 名单维持。
     # 5.5) 联网工具（2026-09-16）：工厂选搜索 Provider（BOCHA 优先/TAVILY 兜底），
     #      有 key 才上菜单（条件注册，与 kb=None 同语义——mock 路径不背联网依赖）
     web_client = get_web_search()
@@ -209,67 +274,101 @@ def assemble(provider: str) -> AppContext:
         logger.info("联网搜索：%s", web_client.name)
     todos = TodoStore(TODOS_PATH)   # 待办仓库：无外部依赖，恒构造（工具+API 共用）
     audit = AuditLog(AUDIT_DIR)     # S3 审计：registry 收口注入——所有工具调用自动落审
-    registry = ToolRegistry(audit=audit)
-    ctx = ToolContext(
+    mother = ToolRegistry(audit=audit)
+    mother_ctx = ToolContext(
         notes_dir=NOTES_DIR,
         kb=kb,
         llm=internal_llm,
-        history=session.messages,
         web=web_client,
         todos=todos,
-        session=session,   # S5b：计划工具的操作载体（传 Session 对象本身，与 history 同款身份契约）
         workspace_root=WORKSPACE_ROOT,   # S6a：主 agent 文件/终端锚点（子 agent 由 spawn 覆盖为 worktree）
         graph=graph,   # S7a：知识图谱（活对象注入——查询原语读最新图）
     )
-    register_builtin(registry, ctx)
-    register_file_tools(registry, ctx)   # S4a 文件四件：恒注册（S6a 起锚点随 ctx 注入）
-    register_terminal_tools(registry, ctx)   # S4b 终端执行：L2 确认缝裁决，白名单只读免确认
-    register_web_tools(registry, ctx)
-    register_todo_tools(registry, todos)
-    register_plan_tools(registry, ctx)   # S5b 计划三件：恒注册（无外部依赖）
-    register_spawn_tools(registry, ctx)   # S5c 子 agent 分派：ctx.llm 在即注册（内部链）
-    register_graph_tools(registry, ctx)   # S7a 图谱查询：ctx.graph 在即注册（图空时工具如实报空）
+    register_builtin(mother, mother_ctx)   # time + notes（history 两件因 ctx.history is None 自跳）
+    register_file_tools(mother, mother_ctx)   # S4a 文件四件：恒注册（S6a 起锚点随 ctx 注入）
+    register_terminal_tools(mother, mother_ctx)   # S4b 终端执行：L2 确认缝裁决，白名单只读免确认
+    register_web_tools(mother, mother_ctx)
+    register_todo_tools(mother, todos)
+    register_graph_tools(mother, mother_ctx)   # S7a 图谱查询：ctx.graph 在即注册（图空时工具如实报空）
 
     # 6) MCP 外部工具（MCP-config 配置化）：改 mcp_servers.json 加工具，零代码。
     #      命令型穿 stdio、URL 型穿 streamable HTTP；单台失败只警告不阻断；
     #      MCP_SERVERS 环境变量可指向个人配置（带 API key 的那种，不进仓库）
+    #      装进母 registry —— 子进程全进程一套，per-session registry 搬运同一批 Tool 对象
     try:
         specs = load_server_specs(Path(os.environ.get("MCP_SERVERS", "mcp_servers.json")))
     except ValueError as e:
         logger.warning("MCP 配置读取失败，本轮无外部工具：%s", e)
         specs = []
-    mcp_clients = assemble_servers(registry, specs)
-    logger.info("已装载工具：%s", ", ".join(registry.names()))
+    mcp_clients = assemble_servers(mother, specs)
+    logger.info("全局工具（%d 个）：%s", len(mother.names()), ", ".join(mother.names()))
 
-    # 7) Agent 对象（S5a）：主 agent = 默认全量工具 + learned 快照注入
-    #    （AGENTS.md 式：装配时读盘一次拼 prompt 尾部，会话中途固化不热刷新）。
-    #    人设保证（装配不变量）随 agent 到位：CLI/Web 两个入口都带着开工
+    def session_registry(session: Session) -> ToolRegistry:
+        """per-session registry = 母 registry 全套搬运 + 会话绑定七件重注册。
+
+        搬运：`mother.get(name)` 返回的是 Tool 对象引用，同一个对象注册进多个
+        registry 是 registry.py 明确支持的语义（闭包锚定的 kb/todos/graph/
+        MCP client 随之共享，子进程不重启）。
+        重注册：七件（history 二 + plan 三 + spawn 二）的闭包必须锚【本会话】的
+        messages 列表与 plan 棋盘 —— List identity trap：传对象本身，绝不 copy，
+        否则 run_turn 原地 append 后工具安静变瞎。
+        母 registry 里根本没有这七个名字，所以搬运不会覆盖它们（无需 skip 名单）。
+        """
+        sub = ToolRegistry(audit=audit)   # 审计同源（S3 单一必经点不分叉）
+        for name in mother.names():
+            tool = mother.get(name)
+            if tool is not None:
+                sub.register(tool)
+        sctx = replace(mother_ctx, session=session, history=session.messages)
+        register_history_tools(sub, sctx)
+        register_plan_tools(sub, sctx)   # S5b 计划三件：恒注册（无外部依赖）
+        register_spawn_tools(sub, sctx)   # S5c 子 agent 分派：ctx.llm 在即注册（内部链）
+        return sub
+
+    # 7) Agent 工厂（S5a → S8a）：agent = 完整工具菜单 + learned 快照注入
+    #    （AGENTS.md 式：构建时读盘一次拼 prompt 尾部，会话中途固化不热刷新）。
     #    M10 场景路由（条件装配，同 kb=None 不注册 notes 工具的模式）：
     #    JEV_API_KEY 缺席（CI/其他 clone 者）→ 不挂 router，行为与 v0.57
     #    逐字节一致；假模型路径（mock/echo/repeat）同样不挂——教学组合不背
     #    外部依赖。运行时故障（状态B）与熔断（状态C）不在这里：router 内部
     #    fail-open，装配期只管「有没有」
+    #
+    #    鸡生蛋：router 要的是【完整菜单】的说明书（少了计划三件，模型就不知道
+    #    自己能规划），而完整 registry 得先有一个会话才造得出来。解法是拿一个
+    #    空 Session 探一份 probe registry，只取 tool_descriptions()，永不执行。
+    #    router 本身与 session 无关（它只挑工具名），全进程一份被所有 agent 共享。
     router = None
     jev_key = os.environ.get("JEV_API_KEY")
     if jev_key and provider not in ("mock", "echo", "repeat"):
+        probe = session_registry(Session())
         router = ScenarioRouter(
             JevClient(
                 api_key=jev_key,
                 base_url=os.environ.get("JEV_BASE_URL", "https://api.typesafe.ai/v1/systemone"),
             ),
-            tools=registry.tool_descriptions(),   # dict：名字→说明书（Jev 的 choice criteria 原料）
+            tools=probe.tool_descriptions(),   # dict：名字→说明书（Jev 的 choice criteria 原料）
             ledger=ledger,
         )
-        logger.info("已启用 Jev 场景路由（工具 %d 个）", len(registry.names()))
+        logger.info("已启用 Jev 场景路由（工具 %d 个）", len(probe.names()))
     else:
         logger.info("未启用 Jev 场景路由，走 LLM 原生路径")
+
     # M6.5 用户级记忆：快照注入主 agent prompt 尾（子 agent 不注入——
     # 执行器不是陪伴者，spawn.py 头注记）；位置经 paths.user_memory_path()
     #（env 可覆写，测试注入点）。文件不存在=空收敛，无注入零开销
-    agent = build_default_agent(
-        registry, LEARNED_DIR, router=router, user_memory_path=user_memory_path()
-    )
-    ensure_persona(session, agent)
+    umem = user_memory_path()
+
+    def build_agent(session: Session) -> Agent:
+        """给一个会话造一个专属 agent，并保证它带着人设开工。
+
+        ensure_persona 收口在这里（S8a）：agent 与人设同时诞生，
+        「有 agent 但没人设」在结构上不存在——不用靠三个调用点各自记得。
+        """
+        agent = build_default_agent(
+            session_registry(session), LEARNED_DIR, router=router, user_memory_path=umem
+        )
+        ensure_persona(session, agent)
+        return agent
 
     return AppContext(
         provider=provider,
@@ -278,9 +377,8 @@ def assemble(provider: str) -> AppContext:
         llm=llm,
         internal_llm=internal_llm,
         kb=kb,
-        session=session,
-        registry=registry,
-        agent=agent,
+        store=store,
+        build_agent=build_agent,
         todos=todos,
         mcp_clients=mcp_clients,
         graph=graph,   # S7b：图谱挂上 AppContext——surface 面板端点在 server 层读

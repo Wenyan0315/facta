@@ -18,12 +18,21 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 
 from agent.paths import WORKSPACE_ROOT, WORKTREES_DIR
 
 _TIMEOUT = 30   # git 命令超时（本地操作，给足但不无限等）
+
+# 主仓库 git 元数据的进程级互斥（S8a 多会话并发）：worktree add/remove、
+# merge、branch 写的都是同一个 .git（index.lock / refs / worktrees 元数据）。
+# 两个会话的 spawn 同时合回，第二个必定撞 index.lock 而失败——改动虽还在
+# agent/<name> 分支上可手工抢救，用户看到的却是「子 agent 白跑了」。
+# 锁只圈碰主仓库的那几条命令：worktree 内的 add/commit 走私有 index，
+# 保持并发（那才是 worktree 隔离的意义所在）。
+WORKTREE_LOCK = threading.Lock()
 
 
 def _git(*args: str, cwd: Path | None = None) -> tuple[int, str]:
@@ -58,7 +67,8 @@ def create_worktree() -> tuple[Path, str]:
     name = uuid.uuid4().hex[:8]
     wt_dir = WORKTREES_DIR / name
     branch = f"agent/{name}"
-    code, out = _git("worktree", "add", str(wt_dir), "-b", branch)
+    with WORKTREE_LOCK:
+        code, out = _git("worktree", "add", str(wt_dir), "-b", branch)
     if code != 0:
         return wt_dir, f"worktree 创建失败：{out}"
     return wt_dir, ""
@@ -101,21 +111,25 @@ def commit_and_merge_back(wt: Path, message: str) -> str:
     if code_c != 0:
         return f"commit 失败：{out_c}（改动仍在 worktree：{wt}）"
 
-    code_m, out_m = _git("merge", "--no-edit", branch)
-    # 无论 merge 成败都清 worktree（成功=已进主分支；失败=错误串带回，
-    # 子 agent 改动在 agent/<name> 分支上仍可手工抢救——分支先不删）
-    code_r, out_r = _git("worktree", "remove", str(wt))
-    if code_m != 0:
-        return f"merge 失败：{out_m}（子 agent 改动保留在分支 {branch}，可手工处理；worktree 目录：{'已清理' if code_r == 0 else out_r}）"
-    _git("branch", "-d", branch)   # 合回成功才删分支
+    # 主仓库段（merge/remove/branch）持锁：与另一会话的 spawn 合回互斥。
+    # worktree 内的 add/commit 已在上面跑完（私有 index，不抢主仓库锁）。
+    with WORKTREE_LOCK:
+        code_m, out_m = _git("merge", "--no-edit", branch)
+        # 无论 merge 成败都清 worktree（成功=已进主分支；失败=错误串带回，
+        # 子 agent 改动在 agent/<name> 分支上仍可手工抢救——分支先不删）
+        code_r, out_r = _git("worktree", "remove", str(wt))
+        if code_m != 0:
+            return f"merge 失败：{out_m}（子 agent 改动保留在分支 {branch}，可手工处理；worktree 目录：{'已清理' if code_r == 0 else out_r}）"
+        _git("branch", "-d", branch)   # 合回成功才删分支
     return f"已合回主分支：\n{changes}"
 
 
 def discard_worktree(wt: Path) -> str:
     """丢弃：worktree remove --force + 删分支，零残留。"""
     branch = f"agent/{wt.name}"
-    code, out = _git("worktree", "remove", "--force", str(wt))
-    _git("branch", "-D", branch)   # -D：未合并的分支也删（丢弃语义）
+    with WORKTREE_LOCK:
+        code, out = _git("worktree", "remove", "--force", str(wt))
+        _git("branch", "-D", branch)   # -D：未合并的分支也删（丢弃语义）
     return "" if code == 0 else f"worktree 清理失败：{out}"
 
 

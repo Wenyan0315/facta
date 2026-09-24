@@ -10,12 +10,8 @@ import logging
 import sys
 
 from agent.cli import EXIT_NEW, run_chat
-from agent.memory.consolidate import consolidate
-from agent.memory.plan import PlanBoard
-from agent.memory.store import archive_session, derive_title, save_session
-from agent.memory.title import summarize_title
-from agent.orchestrator.assemble import MEMORY_PATH, assemble, ensure_persona
-from agent.paths import LEARNED_DIR, SESSIONS_DIR, user_memory_path
+from agent.memory.store import Session
+from agent.orchestrator.assemble import assemble, settle_session
 
 VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
 
@@ -30,55 +26,41 @@ def main() -> None:
     #  python -m agent deepseek 可切回 chat 档，供应商表另有 siliconflow）
     provider = sys.argv[1] if len(sys.argv) > 1 else "deepseek-flash"
 
-    # 组装依赖（单一真值源 S2a）：账本/embedder/双链/知识库/会话/工具/MCP
+    # 组装依赖（单一真值源 S2a）：账本/embedder/双链/知识库/会话仓库/工具/MCP
     # 全在 assemble 里，本入口只解析 provider 再拿结果
     ctx = assemble(provider)
-    session = ctx.session
-    llm, agent, internal_llm = ctx.llm, ctx.agent, ctx.internal_llm
+
+    # S8a：CLI 也住 sessions/ —— 启动接上最近聊过的那段（一段都没有就新开）。
+    # 老口径的 active 固定位（MEMORY_PATH）已退役，assemble 里做一次性迁移。
+    sid = ctx.store.latest() or ctx.store.create(Session())
+    session = ctx.store.load(sid)
+    agent = ctx.build_agent(session)   # 工厂保证人设；换新会话时跟着重造
 
     # 多会话主循环（S1）：run_chat 归还 (会话, 退出原因)。
-    #    quit/interrupt → 收官；new → 先存后清再开一轮。
+    #    quit/interrupt → 收官；new → 收官后另起一段。
     #    拆链（评审第 2 条）：压缩器内部调用走 summary_llm=内部链
     #    MCP 客户端只在最终退出时关闭——多会话循环期间关了，下一轮工具全死
     try:
         while True:
-            loaded_len = len(session.messages)   # M6.4 复盘起点（每轮重取：/new 后新会话从 0 起）
-            session, reason = run_chat(llm, agent, session, summary_llm=internal_llm)
+            session, reason = run_chat(ctx.llm, agent, session, summary_llm=ctx.internal_llm)
 
-            # S2 验收修复轮：归档前提炼标题（写进 session.title）——save 落盘、
-            # archive 复制都带它，列表读取零 LLM 调用。提炼失败 fallback 首句派生，
-            # 不阻断归档。quit（不归档）不提炼，省一次 LLM 调用。
-            if reason == EXIT_NEW:
-                session.title = summarize_title(session, internal_llm) or derive_title(session)
-
-            # 退出落盘（M6）：完整会话状态（消息 + 压缩缓存 + 标题）存回 JSON
-            save_session(session, MEMORY_PATH)
-            print(f"对话历史已保存：{len(session.messages)} 条 → {MEMORY_PATH}")
-
-            # M6.4 记忆固化 + M6.5 用户级分流：退出复盘——since=本轮启动消息数，
-            # 无新对话（启动即退出）→ consolidate 内部直接跳过
-            print(consolidate(
-                session, internal_llm, LEARNED_DIR,
-                since=loaded_len, user_memory_path=user_memory_path(),
-            ))
+            # 收官三步（补标题 → 增量固化 → 落盘）与 Web worker 共用一份实现。
+            # flush=True：退出与换新都没有「下一轮」了，阈值降到 1，剩下的全冲掉。
+            print(settle_session(session, sid, ctx.store, ctx.internal_llm, flush=True))
+            print(f"对话历史已保存：{len(session.messages)} 条 → sessions/{sid}.json")
 
             if reason != EXIT_NEW:
                 break
 
-            # S1 先存后清：save（上一行）→ 归档成功 → 才清内存 → 写新 active。
-            # 归档失败会抛异常中止，旧对话仍在 session.json，什么都没丢
-            archived = archive_session(MEMORY_PATH, SESSIONS_DIR)
-            title = session.title or derive_title(session)   # 清空前先取标签（clear 后 session 已空）
-            # 原地清、绝不 rebind：search_history 工具的闭包抓的是 session.messages
-            # 这个列表对象本身（列表身份陷阱的反面教材），rebind 会让工具失明
-            session.messages.clear()
-            session.summary = None
-            session.summarized_upto = 1
-            session.title = None
-            session.plan = PlanBoard()   # 评审修复轮：与 Web 同修——旧计划不泄进新会话
-            ensure_persona(session, agent)   # clear 连 system 一起清——补种，新 active 落盘即带人设（与 Web 同款修复）
-            save_session(session, MEMORY_PATH)   # active 立即反映为新空会话
-            print(f"已归档「{title}」→ {archived.name}，新会话开始")
+            # /new 换新对象而非原地 clear —— agent 跟着重造，所以「绝不 rebind
+            # session.messages」那条纪律在这里自然消解：老口径原地清是为了迁就
+            # 常驻 agent 的闭包（search_history 抓的是列表对象本身，rebind 即失明），
+            # 现在闭包与会话同生共死。计划板重置与人设补种同样不再需要——
+            # 新 Session 天生空板，人设由工厂保证。
+            print(f"「{session.title or '未命名'}」已收进会话清单，新会话开始")
+            sid = ctx.store.create(Session())
+            session = ctx.store.load(sid)
+            agent = ctx.build_agent(session)
     finally:
         # MCP-b/r：无论正常退出还是异常崩掉，都关掉所有工具服务器——不留孤儿进程
         for client in ctx.mcp_clients:

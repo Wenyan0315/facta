@@ -16,6 +16,7 @@
 import hashlib
 import json
 import logging
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterator
@@ -81,6 +82,11 @@ class RobustLLM(LLM):
         self._cfg = config or GatewayConfig()
         # 进程级 LRU 精确缓存，不落盘——重启清零没损失，下次重新算就是了
         self._cache: OrderedDict[str, Message] = OrderedDict()
+        # S8a 多会话并发：网关是进程级单例，几个 worker 线程共用这一个
+        # OrderedDict。move_to_end 动的是内部链表，与另一线程的 popitem 交错
+        # 就 KeyError——而 _store 不在重试的 try 里，一次已经拿到回复的成功
+        # 调用会整体炸掉。读侧（get）不锁：dict 查找是 C 层原子，不会撕裂。
+        self._cache_lock = threading.Lock()
         # d 衣熔断状态：closed（计数中）→ open（冷却中）→ half_open（放行一次试探）
         self._consecutive_failures = 0
         self._opened_at: float | None = None
@@ -208,6 +214,11 @@ class RobustLLM(LLM):
         raise error
 
     # ---- d 衣：熔断三态 ----
+    #
+    # 三态刻意不加锁（S8a 多会话并发下的裁定）：竞态后果只有「多放行一次
+    # 试探 / 少记一次失败计数」，都是软指标不炸流程；而要保证三态原子就得
+    # 把网络调用圈进临界区——一个慢请求堵死所有会话，代价远大于收益。
+    # 熔断本就是启发式护栏，不要求精确。
 
     def _check_breaker(self) -> None:
         if self._opened_at is None and not self._half_open:
@@ -252,10 +263,11 @@ class RobustLLM(LLM):
 
     def _store(self, key: str, reply: Message) -> None:
         """写入缓存并维持 LRU 上限；写满时淘汰最老一条。"""
-        self._cache[key] = reply
-        self._cache.move_to_end(key)
-        while len(self._cache) > self._cfg.cache_size:
-            self._cache.popitem(last=False)
+        with self._cache_lock:
+            self._cache[key] = reply
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._cfg.cache_size:
+                self._cache.popitem(last=False)
 
     def _should_retry(self, exc: Exception) -> bool:
         """鸭子判型：不 import openai，看异常身上有没有 status_code。

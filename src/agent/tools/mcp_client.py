@@ -93,6 +93,10 @@ class McpClient:
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
         self._next_id = 1
+        # S8a 多会话并发：几个 worker 共用这一个客户端，而「发号 → 等自己的号」
+        # 必须原子。撞号会让两个调用互取响应；更糟的是「跳过他人响应」把消息
+        # 从共享队列取走后不归还，被跳过的那一方只能干等到超时。
+        self._call_lock = threading.Lock()
 
         # 握手：initialize（要响应）+ notifications/initialized（通知，无 id 无响应）
         self._request(
@@ -131,29 +135,33 @@ class McpClient:
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def _request(self, method: str, params: dict) -> dict:
-        """同步请求：发带 id 的消息，等到同 id 的响应（跳过通知与他人响应）。
+        """同步请求：发带 id 的消息，等到同 id 的响应（跳过服务器主动通知）。
 
         超时语义：每等一条消息最多 timeout 秒，不是整次调用总超时——
         服务器若持续吐无关消息，总等待可超 timeout。已知边界，当前够用。
+
+        全程持 _call_lock：并发调用在客户端这层排队（stdio 单通道本就是它的
+        原生语义）。代价是跨会话的 MCP 调用不并行，换来响应绝不错配。
         """
-        req_id = self._next_id
-        self._next_id += 1
-        self._send(
-            {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
-        )
-        while True:
-            try:
-                msg = self._queue.get(timeout=self._timeout)
-            except queue.Empty:
-                raise McpError(f"MCP 调用超时（{method}，>{self._timeout}s 无响应）") from None
-            if msg is None:
-                raise McpError(f"MCP 服务器已断开连接（{method} 在途）")
-            if msg.get("id") != req_id:
-                continue  # 通知或别人的响应：跳过，继续等自己的号
-            if "error" in msg:
-                err = msg["error"]
-                raise McpError(f"MCP 协议错误（{method}）：{err.get('message', err)}")
-            return msg.get("result", {})
+        with self._call_lock:
+            req_id = self._next_id
+            self._next_id += 1
+            self._send(
+                {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
+            )
+            while True:
+                try:
+                    msg = self._queue.get(timeout=self._timeout)
+                except queue.Empty:
+                    raise McpError(f"MCP 调用超时（{method}，>{self._timeout}s 无响应）") from None
+                if msg is None:
+                    raise McpError(f"MCP 服务器已断开连接（{method} 在途）")
+                if msg.get("id") != req_id:
+                    continue  # 服务器主动通知（无 id）：跳过，继续等自己的号
+                if "error" in msg:
+                    err = msg["error"]
+                    raise McpError(f"MCP 协议错误（{method}）：{err.get('message', err)}")
+                return msg.get("result", {})
 
     # ---- 对外能力 ----
 
