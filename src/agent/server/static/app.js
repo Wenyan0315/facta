@@ -6,9 +6,11 @@ const cancelEl = document.getElementById("cancel");
 const sessionListEl = document.getElementById("session-list");
 const newSessionBtn = document.getElementById("new-session");
 
-let currentRunId = null;      // 单 in-flight：同一时刻只允许一个 Run
+let currentSessionId = null;  // 「当前会话」是前端概念（S8a）：后端不再有 active 特例
+let currentRunId = null;      // 可见会话的 in-flight Run；切走即脱钩，Run 在后端照跑
 let currentSource = null;     // 当前 EventSource
-let sessionBusy = false;      // 会话切换/新开 in-flight：防双击造成后端交错
+let sessionBusy = false;      // 会话切换 in-flight：防双击造成回放交错
+let sessionMetas = [];        // 最近一次 /api/sessions 结果（running 标记要查它）
 let pendingText = "";         // 当前 assistant 回合累积的流式文本
 let currentTextEl = null;     // 当前正在累积文本的元素（工具卡片后会重置）
 let rafPending = false;
@@ -141,7 +143,9 @@ async function decideConfirm(runId, approve) {
   });
 }
 
-function onDone() {
+function detachStream() {
+  // 脱钩可见会话的事件流（收尾、切会话都走这里）。Run 在后端照跑——
+  // 切回来时按 session 查 in-flight Run 重挂，SSE 从 seq 0 全量重放本轮。
   if (currentSource) { currentSource.close(); currentSource = null; }
   currentRunId = null;
   hideConfirm();
@@ -150,10 +154,19 @@ function onDone() {
   cancelEl.classList.add("hidden");
 }
 
+function onDone() {
+  detachStream();
+  loadSessions();   // 标题是收尾时才补的（settle_session），Run 结束要刷清单
+}
+
 function setupEventSource(runId, turn) {
   const source = new EventSource(`/api/runs/${runId}/events`);
   currentSource = source;
   let pendingResultEl = null;
+  // 收尾提示（S8a）：补标题 + 增量固化都要调 LLM，终态前有几秒静默——
+  // 显式说出来，别让人以为是卡死。终态到达即撤掉。
+  let settlingEl = null;
+  const clearSettling = () => { if (settlingEl) { settlingEl.remove(); settlingEl = null; } };
 
   source.addEventListener("text.delta", (e) => {
     pendingText += JSON.parse(e.data).data.delta || "";
@@ -199,13 +212,23 @@ function setupEventSource(runId, turn) {
     scrollBottom();
   });
 
+  source.addEventListener("run.settling", () => {
+    settlingEl = document.createElement("div");
+    settlingEl.className = "tool-card";
+    settlingEl.textContent = "正在整理这段对话…";
+    turn.appendChild(settlingEl);
+    scrollBottom();
+  });
+
   source.addEventListener("run.completed", () => {
     // 终态渲染 markdown：流式中纯文本，收尾一次性成稿
     if (currentTextEl && pendingText) renderMarkdown(currentTextEl, pendingText);
+    clearSettling();
     onDone();
   });
-  source.addEventListener("run.failed", onDone);
+  source.addEventListener("run.failed", () => { clearSettling(); onDone(); });
   source.addEventListener("run.cancelled", () => {
+    clearSettling();
     const el = document.createElement("div");
     el.className = "tool-card";
     el.textContent = "已取消本轮";
@@ -213,11 +236,13 @@ function setupEventSource(runId, turn) {
     scrollBottom();
     onDone();
   });
-  source.onerror = onDone;   // EventSource 网络层错误（与业务 error 事件区分）
+  source.onerror = () => { clearSettling(); onDone(); };   // EventSource 网络层错误（与业务 error 事件区分）
 }
 
 async function send() {
   const text = inputEl.value.trim();
+  // currentRunId 只是「可见会话」的在跑标记 ⇒ 同会话串行（后端准入同口径），
+  // 别的会话在后台跑不挡这里——那正是 S8a 要的「长任务期间另开一段聊」
   if (!text || currentRunId) return;
   inputEl.value = "";
   inputEl.style.height = "";   // 高度复位到默认两行（auto-grow 的内联样式清掉）
@@ -226,12 +251,14 @@ async function send() {
   const turn = addAssistantTurn();
   cancelEl.classList.remove("hidden");
 
+  // 省略 session_id = 后端新开一段对话，真实 id 从响应里认
+  const payload = currentSessionId ? { text, session_id: currentSessionId } : { text };
   let resp;
   try {
     resp = await fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(payload),
     });
   } catch (_) {
     onDone();
@@ -246,51 +273,56 @@ async function send() {
     return;
   }
 
-  const runId = (await resp.json()).run_id;
-  currentRunId = runId;
-  setupEventSource(runId, turn);
+  const data = await resp.json();
+  currentRunId = data.run_id;
+  currentSessionId = data.session_id;
+  setupEventSource(data.run_id, turn);
+  loadSessions();   // 新会话入清单 / 清单标题跟上
 }
 
 // ---- 会话列表 / 切回 / 新会话 / 历史加载 ----
 
 async function loadSessions() {
   try {
-    const sessions = await (await fetch("/api/sessions")).json();
+    sessionMetas = await (await fetch("/api/sessions")).json();
     sessionListEl.innerHTML = "";
-    if (sessions.length === 0) {
+    if (sessionMetas.length === 0) {
       sessionListEl.innerHTML = '<li class="muted">暂无历史会话</li>';
-      return;
+      return [];
     }
-    for (const s of sessions) {
+    for (const s of sessionMetas) {
       const li = document.createElement("li");
-      if (s.current) {
-        li.classList.add("current");   // 当前会话：高亮常驻，不触发切回（它就在前台）
+      const isCurrent = s.id === currentSessionId;
+      if (isCurrent) {
+        li.classList.add("current");   // 当前会话高亮（纯前端概念，后端不存 active）
         li.title = "当前会话";
       } else {
-        li.title = "点击切回此会话";
-        li.addEventListener("click", () => switchTo(s.name));
+        li.title = "点击切到此会话";
+        li.addEventListener("click", () => selectSession(s.id));
       }
       const titleEl = document.createElement("div");
       titleEl.className = "session-title";
-      titleEl.textContent = s.current ? "● " + s.title : s.title;
+      // ▶ = 该会话有 Run 在跑（多会话并发：切走的那段可能还在后台跑）
+      titleEl.textContent = (isCurrent ? "● " : "") + (s.running ? "▶ " : "") + s.title;
       li.appendChild(titleEl);
-      if (s.time) {   // 归档时间（文件名解析）：小字第二行
+      if (s.time) {   // 时间标签由 id（时间戳）解析：小字第二行
         const timeEl = document.createElement("div");
         timeEl.className = "session-time";
         timeEl.textContent = s.time;
         li.appendChild(timeEl);
       }
-      // 行内操作（2026-09-17 体验轮）：重命名（active/归档都可）、删除（仅归档——
-      // 活会话先归档再删）。按钮 stopPropagation，不触发 li 的切回
-      const actions = document.createElement("div");
-      actions.className = "session-actions";
-      const renameBtn = document.createElement("button");
-      renameBtn.type = "button";
-      renameBtn.textContent = "✎";
-      renameBtn.title = "重命名";
-      renameBtn.addEventListener("click", (e) => { e.stopPropagation(); startSessionRename(li, s); });
-      actions.appendChild(renameBtn);
-      if (!s.current) {
+      // 行内操作（2026-09-17 体验轮）：重命名、删除。S8a 起没有「active 不能删」
+      // 的特例，但在跑的会话后端会 409（worker 独占这段对话）⇒ 按钮直接不给。
+      // 按钮 stopPropagation，不触发 li 的切换
+      if (!s.running) {
+        const actions = document.createElement("div");
+        actions.className = "session-actions";
+        const renameBtn = document.createElement("button");
+        renameBtn.type = "button";
+        renameBtn.textContent = "✎";
+        renameBtn.title = "重命名";
+        renameBtn.addEventListener("click", (e) => { e.stopPropagation(); startSessionRename(li, s); });
+        actions.appendChild(renameBtn);
         const delBtn = document.createElement("button");
         delBtn.type = "button";
         delBtn.textContent = "×";
@@ -298,16 +330,23 @@ async function loadSessions() {
         delBtn.addEventListener("click", async (e) => {
           e.stopPropagation();
           if (!confirm(`删除会话「${s.title}」？不可恢复。`)) return;
-          await fetch(`/api/sessions/${encodeURIComponent(s.name)}`, { method: "DELETE" });
+          await fetch(`/api/sessions/${encodeURIComponent(s.id)}`, { method: "DELETE" });
+          if (s.id === currentSessionId) {   // 删的是眼前这段：视图回空态
+            detachStream();
+            currentSessionId = null;
+            emptyHint("开始新的对话吧");
+          }
           loadSessions();
         });
         actions.appendChild(delBtn);
+        li.appendChild(actions);
       }
-      li.appendChild(actions);
       sessionListEl.appendChild(li);
     }
+    return sessionMetas;
   } catch (_) {
     sessionListEl.innerHTML = '<li class="muted">加载会话失败</li>';
+    return [];
   }
 }
 
@@ -328,7 +367,7 @@ function startSessionRename(li, s) {
     done = true;
     const value = editor.value.trim();
     if (save && value && value !== s.title) {
-      await fetch(`/api/sessions/${encodeURIComponent(s.name)}`, {
+      await fetch(`/api/sessions/${encodeURIComponent(s.id)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: value }),
@@ -351,10 +390,10 @@ function emptyHint(text) {
   messagesEl.appendChild(el);
 }
 
-async function loadMessages() {
-  // 历史回放：active 会话的 user/assistant 轮（system/tool 轮后端已过滤）
+async function loadMessages(sid) {
+  // 历史回放：指定会话的 user/assistant 轮（system/tool 轮后端已过滤）
   try {
-    const msgs = await (await fetch("/api/messages")).json();
+    const msgs = await (await fetch(`/api/sessions/${encodeURIComponent(sid)}/messages`)).json();
     messagesEl.innerHTML = "";
     for (const m of msgs) {
       if (m.role === "user") addUser(m.content);
@@ -370,29 +409,52 @@ async function loadMessages() {
   }
 }
 
-async function switchTo(name) {
-  if (currentRunId) return;   // 有任务时不能切回（后端也会 409）
-  if (sessionBusy) return;    // 防双击：切换是慢操作（提标题+固化），连点会交错
+// 切换会话（S8a）：纯前端换视图，后端没有 switch 端点了——「当前会话」不再
+// 是服务端状态，切走的那段若在跑就让它后台跑完（这就是多会话并发的意义）。
+async function selectSession(sid) {
+  if (sid === currentSessionId) return;
+  if (sessionBusy) return;    // 防双击：回放是慢操作，连点会交错
   sessionBusy = true;
   try {
-    const resp = await fetch(`/api/sessions/${encodeURIComponent(name)}/switch`, { method: "POST" });
-    if (!resp.ok) { alert(await resp.text()); return; }
-    await loadMessages();       // 切回后回放完整历史，而不是只显示一句提示
-    loadSessions();             // 目标会话已移回 active，刷新列表
+    detachStream();             // 旧流脱钩（Run 不受影响），新会话从零开始渲染
+    currentSessionId = sid;
+    await loadMessages(sid);
+    await loadSessions();       // 高亮跟上，running 标记也刷新一次
+    await attachIfRunning(sid);
   } finally {
     sessionBusy = false;
   }
 }
 
+// 切到一个仍在跑的会话：查它的 in-flight Run 并重挂事件流。新建的 EventSource
+// 不带 Last-Event-ID ⇒ 后端从 seq 0 全量重放，本轮内容一件不落。
+const IN_FLIGHT = ["pending", "running", "waiting_approval"];
+
+async function attachIfRunning(sid) {
+  const meta = sessionMetas.find((s) => s.id === sid);
+  if (!meta || !meta.running) return;
+  try {
+    const runs = await (await fetch(`/api/runs?session_id=${encodeURIComponent(sid)}`)).json();
+    const live = runs.find((r) => IN_FLIGHT.includes(r.status));
+    if (!live) return;
+    currentRunId = live.run_id;
+    cancelEl.classList.remove("hidden");
+    setupEventSource(live.run_id, addAssistantTurn());
+  } catch (_) { /* 重挂失败：历史已在屏，不打断用户 */ }
+}
+
 async function newSession() {
-  if (currentRunId) return;
   if (sessionBusy) return;
   sessionBusy = true;
   try {
-    const resp = await fetch("/api/sessions/new", { method: "POST" });
+    // 不再需要「有任务在跑就不许新开」的守卫：旧会话的 Run 后台照跑
+    const resp = await fetch("/api/sessions", { method: "POST" });
     if (!resp.ok) { alert(await resp.text()); return; }
+    const id = (await resp.json()).id;
+    detachStream();
+    currentSessionId = id;
     emptyHint("开始新的对话吧");
-    loadSessions();             // 当前会话已归档，刷新列表
+    await loadSessions();       // 空会话也进清单（刚点的新建不该凭空消失）
   } finally {
     sessionBusy = false;
   }
@@ -528,6 +590,12 @@ cancelEl.addEventListener("click", async () => {
 });
 
 newSessionBtn.addEventListener("click", newSession);
-loadSessions();
-loadMessages();
-loadTodos();
+
+// 启动：默认落在最近改动的会话（清单已按最后修改时刻降序）——后端不再有
+// active 概念，「打开看到哪一段」纯粹是前端的选择。
+(async function init() {
+  const sessions = await loadSessions();
+  if (sessions.length) await selectSession(sessions[0].id);
+  else emptyHint("开始新的对话吧");
+  loadTodos();
+})();
