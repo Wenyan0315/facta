@@ -332,6 +332,8 @@ body {
   font-size: 14px; color: var(--muted); border-bottom: 1px solid var(--border);
   padding-bottom: 6px; margin-bottom: 4px;
 }
+/* 041：用户级栏的不可逆提示（压掉 <p> 默认外边距，贴着组标题走） */
+.memory-hint { font-size: 12px; margin: 2px 0 6px; }
 .memory-entry {
   display: flex; gap: 10px; align-items: flex-start;
   padding: 8px 4px; border-bottom: 1px solid var(--border);

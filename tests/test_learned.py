@@ -144,3 +144,55 @@ def test_api_guards(monkeypatch, tmp_path):
     assert client.put("/api/learned/other/9", json={"content": "x"}).status_code == 404
     assert client.put("/api/learned/other/0", json={"content": "  "}).status_code == 400
     assert client.delete("/api/learned/decisions/0").status_code == 404   # 类别文件不存在
+
+
+# ---------- 041：用户级分栏 ----------
+
+def test_learned_path_user_follows_env(monkeypatch, tmp_path):
+    """user 的路径走 paths.user_memory_path()——与 agent 注入侧同源（CORTEX_USER_MEMORY）。"""
+    from agent.server.app import PANEL_CATEGORIES, _learned_path
+
+    monkeypatch.setattr("agent.server.app.LEARNED_DIR", tmp_path)
+    monkeypatch.setenv("CORTEX_USER_MEMORY", str(tmp_path / "user.md"))
+    assert _learned_path("user") == tmp_path / "user.md"
+    assert _learned_path("constraints") == tmp_path / "constraints.md"
+    assert PANEL_CATEGORIES == ("decisions", "constraints", "other", "user")
+
+
+def test_api_user_scope_roundtrip(monkeypatch, tmp_path):
+    user_md = tmp_path / "user.md"
+    user_md.write_text(
+        "- [2026-09-20] 行程提早一周提醒\n- [2026-09-21] 回答用中文\n", encoding="utf-8"
+    )
+    project = tmp_path / "constraints.md"
+    project.write_text("- [2026-09-13] 项目甲\n", encoding="utf-8")
+    before = project.read_bytes()
+    monkeypatch.setenv("CORTEX_USER_MEMORY", str(user_md))
+    client = _client(monkeypatch, tmp_path)
+
+    listed = client.get("/api/learned").json()
+    assert [(e["category"], e["line"], e["date"]) for e in listed if e["category"] == "user"] == [
+        ("user", 0, "2026-09-20"),
+        ("user", 1, "2026-09-21"),
+    ]
+
+    # 编辑保留日期前缀、删除按行号——与项目桶同一套协议（同一个 learned.py）
+    assert client.put("/api/learned/user/0", json={"content": "行程提早两周提醒"}).status_code == 200
+    assert client.delete("/api/learned/user/1").status_code == 200
+    assert user_md.read_text(encoding="utf-8") == "- [2026-09-20] 行程提早两周提醒\n"
+    # 用户级操作不动项目桶（字节级）
+    assert project.read_bytes() == before
+
+
+def test_api_user_scope_missing_file_and_guards(monkeypatch, tmp_path):
+    monkeypatch.setenv("CORTEX_USER_MEMORY", str(tmp_path / "never-created.md"))
+    client = _client(monkeypatch, tmp_path)
+
+    # 新用户：固化管线还没写出 user.md → 空栏，不是错误
+    assert client.get("/api/learned").json() == []
+    assert client.put("/api/learned/user/0", json={"content": "x"}).status_code == 404
+    assert client.delete("/api/learned/user/0").status_code == 404
+    # 白名单外的类别仍 400（含看起来像目录名的），穿越防线没被 user 撑开
+    assert client.put("/api/learned/preferences/0", json={"content": "x"}).status_code == 400
+    assert client.delete("/api/learned/notes/0").status_code == 400
+

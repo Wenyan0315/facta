@@ -13,8 +13,14 @@ const CATEGORY_ZH = {
   decisions: "决定与理由",
   constraints: "约束与教训",
   other: "其他事实",
+  user: "用户级记忆",
 };
-const CATEGORY_ORDER = ["decisions", "constraints", "other"];
+const CATEGORY_ORDER = ["decisions", "constraints", "other", "user"];
+// 041：user.md 住在仓库外（~/.personal-agent/），git 兜不住 → 误删没有
+// `git checkout` 那条后路。不可逆性写在 UI 上，而不是假装能撤销。
+const CATEGORY_HINT = {
+  user: "跨项目生效 · 不进 git，删除不可撤销",
+};
 
 function Entry({ entry, onChanged }) {
   // 条目级三态：查看（默认）/ 编辑 / 删除确认——互斥，null = 查看
@@ -104,6 +110,9 @@ export default function App() {
         return (
           <section class="memory-group">
             <h3 class="memory-group-title">{CATEGORY_ZH[category]}</h3>
+            {CATEGORY_HINT[category] && (
+              <p class="muted memory-hint">{CATEGORY_HINT[category]}</p>
+            )}
             {items.length === 0 ? (
               <p class="muted">暂无条目</p>
             ) : (

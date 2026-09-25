@@ -34,7 +34,7 @@ from agent.memory.store import Session
 from agent.orchestrator.assemble import AppContext, settle_session
 from agent.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
 from agent.orchestrator.loop import RunResult, run_turn
-from agent.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR
+from agent.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, user_memory_path
 from agent.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -66,6 +66,25 @@ def _time_label(sid: str) -> str:
     """
     m = _TIME_RE.match(sid)
     return f"{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}" if m else ""
+
+
+# 记忆面板可编辑的类别白名单（041）：项目级三桶 + 用户级伪 category "user"。
+# 白名单同时是路径穿越防线——category 直接参与拼路径，只认枚举值。
+PANEL_CATEGORIES = CATEGORIES + ("user",)
+
+
+def _learned_path(category: str) -> Path:
+    """category → 记忆文件（调用方保证 category 已在 PANEL_CATEGORIES 内）。
+
+    user 走 paths.user_memory_path()：它是函数不是常量（CORTEX_USER_MEMORY
+    覆写点），面板必须与 agent 注入侧（assemble.py）同源——存常量的事故形态
+    很具体：测试覆写了环境变量，面板却仍盯着真 home 里的 user.md，等于拿
+    测试操作生产隐私文件。user.md 与项目桶是同款落盘物（同行格式、同一把
+    LEARNED_LOCK），差别只在住在仓库外 → git 兜不住，删了就是删了。
+    """
+    if category == "user":
+        return user_memory_path()
+    return LEARNED_DIR / f"{category}.md"
 
 
 class CreateRunRequest(BaseModel):
@@ -396,13 +415,14 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             raise HTTPException(404, f"待办 #{todo_id} 不存在")
         return {"id": todo.id, "text": todo.text, "done": todo.done}
 
-    # 记忆面板（021「护城河可视化」）：learned 三桶的读/改/删——固化管线的
-    # 产出不再是黑箱。行号定位协议见 memory/learned.py 模块注释。
+    # 记忆面板（021「护城河可视化」+ 041 用户级分栏）：learned 三桶 +
+    # 用户级 user.md 的读/改/删——固化管线的产出不再是黑箱。行号定位协议
+    # 见 memory/learned.py 模块注释，类别→路径的解析见 _learned_path。
     @app.get("/api/learned")
     def learned_list():
         out = []
-        for category in CATEGORIES:
-            for entry in read_learned(LEARNED_DIR / f"{category}.md"):
+        for category in PANEL_CATEGORIES:
+            for entry in read_learned(_learned_path(category)):
                 out.append({
                     "category": category,
                     "line": entry.line,
@@ -413,11 +433,11 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
 
     @app.put("/api/learned/{category}/{line}")
     def learned_update(category: str, line: int, body: LearnedUpdateRequest):
-        if category not in CATEGORIES:
+        if category not in PANEL_CATEGORIES:
             raise HTTPException(400, "未知记忆类别")
         if not body.content.strip():
             raise HTTPException(400, "内容不能为空")
-        path = LEARNED_DIR / f"{category}.md"
+        path = _learned_path(category)
         if not path.is_file():
             raise HTTPException(404, "该类别暂无记忆")
         try:
@@ -428,9 +448,9 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
 
     @app.delete("/api/learned/{category}/{line}")
     def learned_delete(category: str, line: int):
-        if category not in CATEGORIES:
+        if category not in PANEL_CATEGORIES:
             raise HTTPException(400, "未知记忆类别")
-        path = LEARNED_DIR / f"{category}.md"
+        path = _learned_path(category)
         if not path.is_file():
             raise HTTPException(404, "该类别暂无记忆")
         try:
