@@ -403,3 +403,63 @@ body {
 }
 .graph-svg:active { cursor: grabbing; }
 .graph-node-label { font-size: 11px; fill: var(--text); pointer-events: none; user-select: none; }
+
+/* 选中节点的出处（042 第 0 档）：一行概念名 + 跳知识语料面板核对原文 */
+.graph-detail {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 12px;
+  padding: 6px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+}
+.graph-detail-src { display: inline-flex; gap: 8px; flex-wrap: wrap; color: var(--muted); }
+.graph-detail-src a { color: var(--accent); text-decoration: none; }
+.graph-detail-src a:hover { text-decoration: underline; }
+
+/* ===== 知识语料面板（042）：左列表右编辑器 ===== */
+.notes-main { max-width: none; }   /* 两栏要全宽，覆盖 #chat 的 820px 列表宽度 */
+.notes-panel { display: flex; flex-direction: column; height: 100%; gap: 10px; }
+.notes-toolbar { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.notes-toolbar button {
+  padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: var(--text); cursor: pointer; font-size: 13px;
+}
+.notes-toolbar button:disabled { opacity: 0.5; cursor: default; }
+.notes-toolbar-gap { flex: 1; }
+.notes-sync-msg { font-size: 12px; }
+.notes-body { flex: 1; display: flex; gap: 12px; min-height: 480px; }
+.notes-list {
+  width: 260px; flex: none; margin: 0; padding: 0; list-style: none; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+}
+.notes-item {
+  display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; font-size: 13px;
+  cursor: pointer; border-bottom: 1px solid var(--border);
+}
+.notes-item:last-child { border-bottom: none; }
+.notes-item:hover { background: var(--user); }
+.notes-item.selected { background: var(--user); box-shadow: inset 3px 0 0 var(--accent); }
+.notes-name { flex: 1; word-break: break-all; }
+.notes-size { flex: none; font-size: 11px; }
+.notes-editor { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.notes-textarea {
+  flex: 1; width: 100%; resize: none; padding: 12px; font-size: 13px; line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+}
+.notes-actions { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.notes-actions button {
+  padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: var(--text); cursor: pointer; font-size: 13px;
+}
+.notes-actions button:first-child { background: var(--accent); border-color: var(--accent); color: #fff; }
+.notes-actions button:disabled { opacity: 0.5; cursor: default; }
+.notes-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 12px; padding: 8px 10px; border-radius: 6px;
+}
+.notes-banner button {
+  padding: 3px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: var(--text); cursor: pointer; font-size: 12px;
+}
+/* 红横幅给 409（磁盘版本已变，别覆盖）；黄横幅给陈旧投影（存盘成功但下游没跟上） */
+.notes-banner-err { background: #fef2f2; border: 1px solid #fecaca; color: var(--danger); }
+.notes-banner-warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+.notes-banner-warn a { color: var(--accent); }

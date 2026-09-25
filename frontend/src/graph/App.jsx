@@ -252,6 +252,21 @@ export default function App() {
     setSearch("");
   };
 
+  // 选中节点的出处笔记（042 第 0 档）：edges 一直带着 source_note，只是从没渲染过。
+  // 做成链接指向知识语料面板——「图上看见一条可疑关系 → 去核对原文」这一圈闭合，
+  // 正是 035 已知边界①（.md 文件名被当实体抽出来）的处置：先让人眼能追到源头。
+  const sources =
+    selected == null
+      ? []
+      : [
+          ...new Set(
+            edges
+              .filter((e) => e.source === selected || e.target === selected)
+              .map((e) => e.source_note)
+              .filter(Boolean),
+          ),
+        ].sort();
+
   return (
     <div class="graph-panel">
       <div class="graph-toolbar">
@@ -311,6 +326,22 @@ export default function App() {
       )}
 
       {msg && <div class="graph-msg">{msg}</div>}
+
+      {selected && (
+        <div class="graph-detail">
+          <strong>{selected}</strong>
+          {sources.length === 0 ? (
+            <span class="muted">无出处记录（这条概念没关联到具体笔记）</span>
+          ) : (
+            <span class="graph-detail-src">
+              出自：
+              {sources.map((s) => (
+                <a key={s} href={`/notes?n=${encodeURIComponent(s)}`}>{s}</a>
+              ))}
+            </span>
+          )}
+        </div>
+      )}
 
       <svg
         ref={svgRef}

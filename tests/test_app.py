@@ -173,6 +173,13 @@ def test_graph_page_serves_html():
     assert "知识图谱" in resp.text
 
 
+def test_notes_page_serves_html():
+    # 知识语料面板（042）：第四入口真页面，含「知识语料」标题
+    resp = _make_client().get("/notes")
+    assert resp.status_code == 200
+    assert "知识语料" in resp.text
+
+
 # ---------- 会话收官（settle_session：补标题 → 增量固化 → 落盘） ----------
 
 

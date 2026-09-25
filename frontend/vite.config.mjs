@@ -18,6 +18,7 @@ export default defineConfig({
         tasks: resolve(import.meta.dirname, "tasks.html"),
         memory: resolve(import.meta.dirname, "memory.html"),
         graph: resolve(import.meta.dirname, "graph.html"),
+        notes: resolve(import.meta.dirname, "notes.html"),
       },
       output: {
         entryFileNames: "assets/[name].js",

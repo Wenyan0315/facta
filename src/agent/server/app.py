@@ -28,6 +28,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 from agent.knowledge.extract import sync_graph
 from agent.knowledge.graph import GRAPH_LOCK
+from agent.knowledge.sync import file_hash, sync_notes
 from agent.memory.consolidate import CATEGORIES
 from agent.memory.learned import delete_line, read_learned, update_line
 from agent.memory.store import Session
@@ -44,6 +45,7 @@ from agent.server.run_store import (
     RunStore,
 )
 from agent.server.sse import encode_heartbeat, encode_sse
+from agent.tools.notes import resolve_note_path
 
 # run_turn 的 on_event 类型 → Run 事件类型（统一用点分层命名，前端按 type 路由）
 _EVENT_MAP = {
@@ -87,6 +89,25 @@ def _learned_path(category: str) -> Path:
     return LEARNED_DIR / f"{category}.md"
 
 
+# 知识语料面板（042）单篇读取上限：超限给明确错误，不把浏览器拖死。
+# notes 是 agent 写的 markdown，正常几百字到几万字；1MB 已经是事故级。
+NOTE_MAX_BYTES = 1_000_000
+
+
+def _note_path(name: str) -> Path:
+    """笔记名（URL 路径段）→ 绝对路径；围栏不过即 400。
+
+    与 learned 的白名单枚举不同，这里的 name 是自由字符串——直接拿它拼路径
+    等于开了任意文件写（`../../.env`、`../../../.ssh/id_rsa`）。围栏本体住在
+    tools/notes.resolve_note_path，与 agent 的 read_notes/write_note 同一份
+    （042 裁定 2：复用而非各写一遍，防的就是 029 那种「防御不对称」漂移）。
+    """
+    try:
+        return resolve_note_path(NOTES_DIR, name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
 class CreateRunRequest(BaseModel):
     """创建 Run 的请求体。系统边界处用 JSON Schema 校验（与工具同一纪律）。
 
@@ -126,6 +147,19 @@ class LearnedUpdateRequest(BaseModel):
     """记忆条目编辑的请求体（记忆面板 v1）：只改正文，日期归程序管。"""
 
     content: str
+
+
+class NoteSaveRequest(BaseModel):
+    """笔记保存的请求体（042）。
+
+    base_hash 是乐观锁：客户端把 GET 拿到的 hash 原样带回，服务端与磁盘现值
+    比对，不一致 → 409。要挡的事故很具体——用户在 IDE 里改着同一批 md，面板
+    一保存就是整文件盲覆盖（与 041 的「行号错位」不是一个量级，那次不值得加
+    锁，这次值得）。不引入版本号字段、不落盘元数据：hash 就是版本。
+    """
+
+    content: str
+    base_hash: str
 
 
 def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
@@ -459,6 +493,78 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             raise HTTPException(404, "条目不存在") from None
         return {"ok": True}
 
+    # 知识语料面板（042）：notes 的列表/读取/保存 + 向量库同步。
+    # 裁定见 docs/decisions/042-notes-panel.md——只改已有（新建仍归对话里的
+    # write_note：查重闸门只在工具层，Web 新建等于绕过它）；保存后不自动重抽
+    # 图谱（sync_graph 走 LLM，花钱的事人点），改为如实回报「哪里陈旧了」。
+    @app.get("/api/notes")
+    def notes_list():
+        # 目录不存在时 glob 给空列表——第一次跑还没建 data/notes/ 是正常状态
+        return [
+            {"name": p.name, "size": p.stat().st_size}
+            for p in sorted(NOTES_DIR.glob("*.md"))
+        ]
+
+    @app.get("/api/notes/{name}")
+    def notes_read(name: str):
+        path = _note_path(name)
+        if not path.is_file():
+            raise HTTPException(404, f"知识库里没有 {name}")
+        if path.stat().st_size > NOTE_MAX_BYTES:
+            raise HTTPException(413, "笔记过大，面板不加载（请用 IDE 打开）")
+        content = path.read_text(encoding="utf-8")
+        return {"name": name, "content": content, "hash": file_hash(content)}
+
+    @app.put("/api/notes/{name}")
+    def notes_save(name: str, body: NoteSaveRequest):
+        path = _note_path(name)
+        if not path.is_file():
+            # 404 而不是「顺手创建」：新建会绕过 write_note 的查重闸门（042 裁定 1）
+            raise HTTPException(404, f"知识库里没有 {name}（面板只改已有笔记，新建请在对话里说）")
+        if body.base_hash != file_hash(path.read_text(encoding="utf-8")):
+            raise HTTPException(409, "磁盘上的版本已变（可能在 IDE 里改过），请重新载入再改")
+        # 原子写（P0-3 手法）：sync_notes/sync_graph 按内容指纹判变化，读到半截
+        # 会把半截当新事实抽进图谱。.tmp 后缀不匹配 *.md glob，不进任何清单。
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(body.content, encoding="utf-8")
+        os.replace(tmp, path)
+
+        new_hash = file_hash(body.content)
+        return {
+            "ok": True,
+            "hash": new_hash,
+            # 陈旧标记（042 裁定 4）：原文一改，向量库与图谱都还是旧投影。
+            # 按指纹现算不猜——图谱只在该篇曾进过图时才算陈旧（从没抽过的笔记，
+            # 图里没有它的旧信息可陈旧）；kb 未启用（无 embedder）时无从陈旧。
+            "stale": {
+                "kb": ctx.kb is not None and new_hash not in {
+                    meta["hash"] for meta in ctx.kb.store.get_all().values()
+                },
+                "graph": ctx.graph.note_hashes.get(name) not in (None, new_hash),
+            },
+        }
+
+    @app.post("/api/notes/sync")
+    def notes_sync():
+        """把向量库与磁盘对齐（042 裁定 4 的第一个动作）。
+
+        只花 embeddings 的钱，所以是人点的按钮，不进保存路径（保存里偷偷同步
+        会把「花时间」和「同步失败」两种语义混进「存盘成功」）。不加服务端锁：
+        运行时只有这一个同步入口（assemble 那次在启动时跑完了），连点由前端
+        disable 挡。
+        """
+        if ctx.kb is None:
+            raise HTTPException(503, "向量库未启用（未配置 embedder）")
+        try:
+            report = sync_notes(ctx.kb, NOTES_DIR)
+        except (FileNotFoundError, RuntimeError) as exc:   # 目录异常 / 删除安全阀
+            raise HTTPException(503, str(exc)) from None
+        return {
+            "added": report.added,
+            "removed": report.removed,
+            "unchanged": report.unchanged,
+        }
+
     # 知识图谱面板（S7b）：图数据 + 重建图谱。图是 notes 的结构化投影
     # （知识资产），面板一次拉全量——图小，搜索定位/路径高亮/类型过滤
     # 全在前端内存算，无需额外交互端点。「重建图谱」= force 全量重抽
@@ -509,6 +615,11 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     @app.get("/graph")
     def graph_page():
         return FileResponse(static_dir / "fw" / "graph.html")
+
+    # 知识语料面板页面（FW 新栈第四入口，042）：与 /tasks /memory /graph 同款伺服
+    @app.get("/notes")
+    def notes_page():
+        return FileResponse(static_dir / "fw" / "notes.html")
 
     # 前端静态文件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）。
     # no-cache（每次 revalidate，未变时 304 也快）：浏览器对无 Cache-Control 的

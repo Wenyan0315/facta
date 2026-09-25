@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from agent.core.types import Message
 from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
@@ -43,6 +45,29 @@ _SEARCH_AND_SUMMARIZE_PARAMS = {
 }
 
 
+def resolve_note_path(notes_dir: Path, filename: str) -> Path:
+    """笔记名 → 绝对路径，围栏前三道（042：工具层与 Web 面板共用同一份）。
+
+    为什么抽成模块级函数：042 给面板开了 `PUT /api/notes/{name}`，name 来自
+    URL 路径——比工具参数更敌意（`../../.env`、`../../../.ssh/id_rsa` 都是
+    任意文件写）。围栏各写一份必然漂移，而漂移的形状这个库已经踩过：029 修的
+    「防御不对称」就是写有三重防线、读裸奔。ValueError 在工具侧经 registry 变
+    错误串回给模型自纠，在 HTTP 侧转 400（与 files._resolve_in_workspace 同风格）。
+
+    第四道（存在性）不在这里：write_note 要「必须不存在」，面板 PUT 要「必须
+    已存在」，方向相反，各判各的。
+    """
+    path = (notes_dir / filename).resolve()
+    if not path.is_relative_to(notes_dir.resolve()):
+        # resolve 会消掉 ../，所以必须先 resolve 再判断
+        raise ValueError(f"拒绝：文件名越界（只允许知识库内的笔记名）：{filename}")
+    if not filename.endswith(".md"):
+        raise ValueError("拒绝：只允许 .md 笔记")
+    if "/" in filename:
+        raise ValueError("拒绝：暂不支持子目录")
+    return path
+
+
 def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     """笔记五件注册。闭包抓 ctx（kb/llm/notes_dir）——List identity trap 同款纪律。"""
 
@@ -59,12 +84,12 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         越界读修复（评审修复轮）：与 write_note 同款防线——resolve 后必须
         落在 notes_dir 内。此前裸拼接，`../../.env` 可越界读密钥——
         写有三重防线、读裸奔的「防御不对称」被外部评审坐实。
+        042 起这道防线住进 resolve_note_path，与面板的写入口共用同一份。
         """
-        path = (ctx.notes_dir / filename).resolve()
-        if not path.is_relative_to(ctx.notes_dir.resolve()):
-            return f"拒绝：文件名越界（只允许知识库内的笔记名）：{filename}"
-        if path.suffix != ".md":
-            return "拒绝：只允许读取 .md 笔记"
+        try:
+            path = resolve_note_path(ctx.notes_dir, filename)
+        except ValueError as e:
+            return str(e)
         try:
             with open(path, encoding="utf-8") as f:
                 return f.read()
@@ -74,13 +99,11 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     def write_note(filename: str, content: str) -> str:
         """把一篇笔记写入知识库目录，带安全检查 + 查重闸门。"""
         # 安全清单：agent 第一次能改文件系统，每一道都不能省
-        path = (ctx.notes_dir / filename).resolve()
-        if not path.is_relative_to(ctx.notes_dir.resolve()):
-            return "拒绝：文件名越界"    # resolve 会消掉 ../，所以必须先 resolve 再判断
-        if not filename.endswith(".md"):
-            return "拒绝：只允许写入 .md 文件"
-        if "/" in filename:
-            return "拒绝：暂不支持子目录"
+        # （042 起前三道住在 resolve_note_path，与面板写入口共用——不各写一份）
+        try:
+            path = resolve_note_path(ctx.notes_dir, filename)
+        except ValueError as e:
+            return str(e)
         # 查重闸门：内容与已有笔记高度相似则拒绝（治理第 1 层）。
         # S4 评审 #R5 起 search 自带 source——重复时能报出「撞了哪篇」。
         if ctx.kb is not None:
