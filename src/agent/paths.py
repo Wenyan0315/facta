@@ -19,6 +19,12 @@ from pathlib import Path
 NOTES_DIR = Path("data/notes")   # 知识库笔记目录（语料资产，进 git）
 LEARNED_DIR = Path("data/learned")   # M6.4 记忆固化目录（项目级记忆资产，进 git；用户级记忆另行住仓库外）
 SESSIONS_DIR = Path("data/memory/sessions")   # S8a 会话仓库：所有会话同住这里，身份=文件名（`%Y%m%d-%H%M%S.json`）；S1~S7 时期它是「归档仓库」，老归档文件名本就是合法 id，原地即完成迁移
+# P0-3（038）Run checkpoint 账本目录：每会话一个 append-only JSONL（`{sid}.jsonl`），
+# 记「点了什么菜（intent）/ 回了什么结果（result）」。与 session.json 的分工——
+# 底片真值源是 session.json，账本只存底片表达不了的东西：执行前意图（区分
+# 「没跑过」vs「跑了但结果丢了」）与结果全文（healing 时原样回注，不截断）。
+# 运行时数据，不进 git（同 audit/）。
+CHECKPOINT_DIR = Path("data/checkpoints")
 
 # M6.5 用户级记忆默认位置：仓库外单文件（~ 锚定绝对路径，与仓库内相对路径族
 # 不同列）。跨项目共享、不进任何 git——M6.4 红线「位置没建好前不开桶」的

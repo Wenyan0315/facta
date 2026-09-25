@@ -32,6 +32,7 @@ from agent.memory.consolidate import CATEGORIES
 from agent.memory.learned import delete_line, read_learned, update_line
 from agent.memory.store import Session
 from agent.orchestrator.assemble import AppContext, settle_session
+from agent.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
 from agent.orchestrator.loop import RunResult, run_turn
 from agent.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR
 from agent.server.run_store import (
@@ -108,7 +109,7 @@ class LearnedUpdateRequest(BaseModel):
     content: str
 
 
-def _run_worker(ctx: AppContext, run: Run, user_text: str) -> None:
+def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
     """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。
 
     S8a 起 worker 自带会话生命周期：进场 load、出场 save，中间独占。
@@ -117,6 +118,11 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str) -> None:
     agent 也是每轮现造（ctx.build_agent）：人设由工厂保证，且 learned/ 与
     用户记忆的快照因此每轮都是新的——常驻 agent 会让本轮刚固化的记忆
     要等重启才进 prompt。
+
+    P0-3（038）崩溃恢复：user_text=None 即「续跑」——不追加新提问，先把
+    上次被杀留下的悬挂工具轮次 heal 成合法底片，再让 run_turn 从现场往前走。
+    执行期间 CheckpointWriter 挂在 on_event 缝上：工具边界落盘底片、
+    账本记 intent/result（细节见 orchestrator/checkpoint.py）。
 
     收尾（settle_session：补标题 → 增量固化 → 落盘）放在 finally，且必须先于
     run.finish：Web 壳是常驻进程，没有 CLI 的退出保存钩子，不收尾就在服务被杀
@@ -127,16 +133,31 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str) -> None:
     run.emit("run.started", {})
     status = STATUS_FAILED
     session: Session | None = None
+    writer: CheckpointWriter | None = None
     try:
         session = ctx.store.load(run.session_id)
+        agent = ctx.build_agent(session)
+        ledger = ledger_path(run.session_id)
+        # 绑定 save：writer 因此不懂 SessionStore，测试可注入
+        writer = CheckpointWriter(ledger, lambda: ctx.store.save(run.session_id, session))
+        # heal 必须在 begin 之前——begin 会截断账本，先截就丢了「上次跑没跑过」的证据
+        healed = heal(session, read_ledger(ledger), agent.registry)
+        if healed:
+            run.emit("run.healed", {"count": healed})
+        writer.begin(run.run_id)
+
+        def _forward(type_: str, data: dict) -> None:
+            writer.on_event(type_, data)        # 先落盘再外发：客户端看见的事实必然已在盘上
+            run.emit(_EVENT_MAP.get(type_, type_), data)
+
         result, reply = run_turn(
             session,
             user_text,
-            agent=ctx.build_agent(session),
+            agent=agent,
             llm=ctx.llm,
             summarizer=ctx.internal_llm,
             on_text=lambda text: run.emit("text.delta", {"delta": text}),
-            on_event=lambda type_, data: run.emit(_EVENT_MAP.get(type_, type_), data),
+            on_event=_forward,
             should_cancel=lambda: run.cancel_requested,
             on_confirm=run.request_confirm,
         )
@@ -149,6 +170,8 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str) -> None:
     except Exception as exc:   # 防御性兜底：run_turn 已捕获 LLMUnavailableError，这里是意外
         run.emit("error", {"message": str(exc)})
     finally:
+        if writer is not None:
+            writer.end(run.run_id, status)   # 人工排查时能看出这轮是正常结束还是中断
         if session is not None:
             try:
                 run.emit("run.settling", {})   # 收尾可能几秒（标题/固化都要调 LLM），别让用户以为是卡死

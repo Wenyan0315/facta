@@ -67,6 +67,7 @@ def register_todo_tools(registry: ToolRegistry, store: TodoStore) -> None:
             if (t := store.complete(int(todo_id))) is not None
             else f"#{todo_id} 不存在，请先用 list_todos 查看现有编号"
         ),
+        idempotent=True,   # P0-3：设值型，重复勾销不产生双重副作用
     ))
     registry.register(Tool(
         name="update_todo",
@@ -84,6 +85,7 @@ def register_todo_tools(registry: ToolRegistry, store: TodoStore) -> None:
             if store.update_text(int(todo_id), text) is not None
             else f"#{todo_id} 不存在，请先用 list_todos 查看现有编号"
         ),
+        idempotent=True,   # P0-3：全量替换文本，重复执行结果一致
     ))
     registry.register(Tool(
         name="delete_todo",
@@ -100,4 +102,5 @@ def register_todo_tools(registry: ToolRegistry, store: TodoStore) -> None:
             if (t := store.delete(int(todo_id))) is not None
             else f"#{todo_id} 不存在，请先用 list_todos 查看现有编号"
         ),
+        idempotent=True,   # P0-3：删除型，重复删除同一条无累积副作用
     ))

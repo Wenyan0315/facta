@@ -306,9 +306,13 @@ def _execute_tool_calls(
             trim_incomplete_round(session.messages)
             return False
         # tool_started：并行批先全发（表示都开始了），串行批逐发
+        # id（P0-3）：tool_call id 随事件外发——checkpoint 账本靠它把
+        # 「点了什么菜」与「回了什么结果」配对，恢复时才能按 id 回注
         for tc in batch:
             if on_event:
-                on_event("tool_started", {"name": tc["name"], "arguments": tc["arguments"]})
+                on_event("tool_started", {
+                    "id": tc["id"], "name": tc["name"], "arguments": tc["arguments"],
+                })
         # 执行：连续 spawn 段用线程池并行，其余串行
         if parallel_ok and len(batch) > 1:
             results = _run_parallel(batch, agent, on_confirm)
@@ -316,22 +320,26 @@ def _execute_tool_calls(
             results = [agent.execute(tc["name"], tc["arguments"], confirm=on_confirm) for tc in batch]
         # 按序回填（点菜顺序，确定性——模型靠位置对应 tool_call_id）
         for tc, result in zip(batch, results, strict=True):
+            # 结果以 role="tool" 回填，tool_call_id 对应是哪次调用
+            tool_msg = Message(role="tool", tool_call_id=tc["id"], content=result)
+            session.messages.append(tool_msg)
+            payload.append(tool_msg)
+            # 入史必须早于事件外发（P0-3 不变量：事件一旦外发，底片里已经
+            # 有这件事）。checkpoint writer 挂在 on_event 缝上落盘 session，
+            # 顺序反了就会存出「缺最后一条 tool 消息」的底片，白丢一次结果。
+            #
             # S5b 针②：工具执行后立刻 drain 计划事件——在 tool_result 之前
             # 转发（plan.* 是这次执行的一部分，因果序在前）。事件走既有
             # on_event 缝，零新缝；server 侧点分命名默认透传，前端免费收到
             _forward_plan_events(session.plan, on_event)
             if on_event:
-                on_event("tool_result", {"name": tc["name"], "result": result})
-            # 结果以 role="tool" 回填，tool_call_id 对应是哪次调用
-            tool_msg = Message(role="tool", tool_call_id=tc["id"], content=result)
-            session.messages.append(tool_msg)
-            payload.append(tool_msg)
+                on_event("tool_result", {"id": tc["id"], "name": tc["name"], "result": result})
     return True
 
 
 def run_turn(
     session: Session,
-    user_text: str,
+    user_text: str | None,
     *,
     agent: Agent,
     llm: LLM,
@@ -345,7 +353,10 @@ def run_turn(
 
     参数：
         session     会话状态（原地变异，不 rebind——见列表身份陷阱）
-        user_text   用户本轮输入（原样进底片）
+        user_text   用户本轮输入（原样进底片）。
+                    None = 续跑（P0-3 崩溃恢复）：不追加新用户消息，直接从
+                    底片现状接着跑——调用方须先 heal 补齐悬挂的工具轮次，
+                    否则底片里的孤儿 tool_calls 会被 API 拒收。
         agent       执行本轮的 agent（S5a：菜单/执行/预算全从 Agent 来——
                     registry 参数退场，行为定义收口进对象；空菜单折叠回
                     None 不传，与旧 registry=None 的 API 语义逐字节对齐）
@@ -353,8 +364,9 @@ def run_turn(
         summarizer  内部链（拆链：摘要压缩的内部调用不走语义档）
         on_text     流式文本块回调
         on_event    语义事件回调，type ∈：
-                        tool_started  {"name": str, "arguments": str}
-                        tool_result   {"name": str, "result": str}
+                        tool_started  {"id": str, "name": str, "arguments": str}
+                        tool_result   {"id": str, "name": str, "result": str}
+                        （id = tool_call id，P0-3 checkpoint 账本靠它配对意图与结果）
                         max_rounds    {}       保险丝熔断，强制收尾
                         stuck         {"tools": [str]}  P0-6 原地踏步熔断，升人审
                         error         {"message": str}  模型全挂，本轮无产出
@@ -385,10 +397,17 @@ def run_turn(
     full_tools = schemas or None
     # M10 轮首一针：路由决策收口在 _route_first_menu（语义见其 docstring）；
     # 只影响本轮第一次模型调用，工具结果回灌后循环尾归还全量菜单（半路由）
-    tools = _route_first_menu(agent, user_text, schemas)
+    # P0-3 续跑（user_text=None）：路由照做，任务原文从底片里最后一条 user
+    # 消息取——那就是本次崩溃前正在做的事
+    route_text = user_text if user_text is not None else next(
+        (m.content for m in reversed(session.messages) if m.role == "user"), ""
+    )
+    tools = _route_first_menu(agent, route_text, schemas)
 
     # 1) 用户这句话存进历史（底片照常全量生长，append-only 不变）
-    session.messages.append(Message(role="user", content=user_text))
+    #    续跑时不追加：底片里那句 user 消息已经在，再塞一条就是重复提问
+    if user_text is not None:
+        session.messages.append(Message(role="user", content=user_text))
 
     # 2) 发送前投影：触发式摘要（内部调用）→ 切 payload
     #    压缩缓存记在 Session 上——随底片一起落盘，重启不从头再压

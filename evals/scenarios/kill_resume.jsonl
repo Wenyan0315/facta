@@ -1,0 +1,2 @@
+{"id": "append_three_lines", "task": "请用 shell 命令在当前目录的 log.txt 里依次追加三行，内容分别是 one、two、three。要求：必须分三次独立调用 run_command，每次只追加一行，不要用 && 或分号把多条命令串成一条。", "verify": "test \"$(wc -l < log.txt | tr -d ' ')\" = \"3\" && grep -qx one log.txt && grep -qx two log.txt && grep -qx three log.txt", "kill_after": 2}
+{"id": "counter_no_double_increment", "setup": "echo 0 > counter.txt", "task": "当前目录 counter.txt 里有一个数字（初始是 0）。请分三步完成，每步单独调用一次 run_command：第一步把文件里的数字加 1 再写回文件，第二步同样加 1 写回，第三步同样加 1 写回。最终文件里应该只有数字 3（单独一行）。不要用 && 或分号把多步串成一条命令。", "verify": "grep -qx 3 counter.txt", "kill_after": 2}

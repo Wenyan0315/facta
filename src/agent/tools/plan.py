@@ -126,6 +126,7 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "required": ["step_id", "status"],
         },
         func=_update_plan_step,
+        idempotent=True,   # P0-3：设值型状态回写，重复执行同一终态无累积副作用
     ))
     registry.register(Tool(
         name="finish_plan",

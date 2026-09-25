@@ -204,4 +204,5 @@ def register_graph_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         },
         func=_sync,
         is_readonly=False,   # L1：改图谱（幂等重建，不碰用户笔记原文）
+        idempotent=True,     # P0-3：全量重建，重复执行结果一致
     ))

@@ -77,6 +77,15 @@ class Tool:
     也可传 callable(args)->bool 按参数动态判定（run_command 的白名单：
     只读命令免确认，其余弹窗）。裁决走 execute 的 confirm 缝；
     无 confirm 通道时按拒绝处理（保守默认：没有眼睛就不动手）。
+
+    idempotent（P0-3 / 038 P2 崩溃恢复）：True=同样参数重复执行，效果与执行
+    一次相同、无累积副作用。恢复时用它决定悬挂调用的处置文案——幂等的可以
+    放心重做，非幂等的必须先核验现场（写没写进去、跑没跑过）。
+    只读工具天然幂等，不必重复声明：判定处（orchestrator/checkpoint.py）按
+    `is_readonly or idempotent` 合并。本字段专给「写类但可安全重做」的那批
+    （write_file 覆写同内容、sync_graph 全量重建）。默认 False 是保守方向：
+    没声明的一律按「重做可能出双重副作用」处理（add_todo 就是这种——重复
+    调用会加两条）。
     """
 
     name: str                       # 工具名，模型用它"点菜"
@@ -84,6 +93,7 @@ class Tool:
     parameters: dict                # JSON Schema：参数结构
     func: Callable[..., str]        # 真正执行的 Python 函数
     is_readonly: bool = False       # S3 权限分级：只读 L0 / 写 L1（保守默认写类）
+    idempotent: bool = False        # P0-3 崩溃恢复：写类工具能否安全重做（只读免声明）
     needs_confirmation: bool | Callable[[dict], bool] = False   # S4b L2 确认标记
     receives_confirm: bool = False  # S5c 编排工具标记：func 额外接收 confirm 参数
                                     # （spawn_subagent 把主循环的确认缝透传给子执行流——

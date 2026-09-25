@@ -38,6 +38,7 @@ agent 同理每轮现造（assemble.build_agent 工厂），顺带让 learned/ �
 """
 
 import json
+import os
 import re
 import shutil
 from dataclasses import asdict, dataclass, field
@@ -74,7 +75,13 @@ class Session:
 
 
 def save_session(session: Session, path: Path) -> None:
-    """把会话状态（底片 + 缓存 + 标题 + 游标）存成 JSON。"""
+    """把会话状态（底片 + 缓存 + 标题 + 游标）存成 JSON。
+
+    原子写（P0-3）：先写同目录临时文件再 os.replace 换名。直接 open(path,"w")
+    截断后，进程在写盘中途被杀会留下半截 JSON——会话本体直接毁掉
+    （list_metas 只是「跳过坏文件」，救不回内容）。os.replace 在同文件系统内
+    是原子的：崩溃只可能看到旧版或新版，没有中间态。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)   # 父目录不存在就建（第一次跑 data/memory/ 还不存在）
     data = {
         "version": SESSION_VERSION,
@@ -90,8 +97,14 @@ def save_session(session: Session, path: Path) -> None:
         # 传输队列 _pending 不落盘：它是本轮 Run 的传输状态，不属于会话）
         "plan": session.plan.to_dict(),
     }
-    with open(path, "w", encoding="utf-8") as f:
+    # 临时文件与目标同目录（同文件系统）才能用 os.replace 原子换名。
+    # 后缀 .tmp 不匹配 list_metas 的 `*.json` glob，半截临时文件不会混进会话清单。
+    # 不做 fsync：038 的威胁模型是「进程被杀」，内核 page cache 仍在；
+    # 掉电持久化是另一档需求，等真踩到再加。
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)   # ensure_ascii=False：中文原样存，不变 \u 天书
+    os.replace(tmp, path)
 
 
 def load_session(path: Path) -> Session:

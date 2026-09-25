@@ -12,6 +12,7 @@ import sys
 from agent.cli import EXIT_NEW, run_chat
 from agent.memory.store import Session
 from agent.orchestrator.assemble import assemble, settle_session
+from agent.orchestrator.checkpoint import heal, ledger_path, read_ledger
 
 VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
 
@@ -35,6 +36,15 @@ def main() -> None:
     sid = ctx.store.latest() or ctx.store.create(Session())
     session = ctx.store.load(sid)
     agent = ctx.build_agent(session)   # 工厂保证人设；换新会话时跟着重造
+
+    # P0-3（038）崩溃恢复：上次进程被杀可能在底片尾部留下「已点菜、结果没回填」的
+    # 悬挂轮次——原样发给 API 直接 400。heal 按账本把每条补成合法 tool 消息
+    # （有结果的原样回注，没结果的按幂等性告知模型能不能重做）。
+    # 只在启动这一次做：/new 换的是全新空会话，没有残局可言。
+    healed = heal(session, read_ledger(ledger_path(sid)), agent.registry)
+    if healed:
+        ctx.store.save(sid, session)
+        print(f"[崩溃恢复] 上次中断遗留的 {healed} 条工具调用已补齐，可接着这段对话继续")
 
     # 多会话主循环（S1）：run_chat 归还 (会话, 退出原因)。
     #    quit/interrupt → 收官；new → 收官后另起一段。

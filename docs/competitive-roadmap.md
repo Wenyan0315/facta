@@ -1,7 +1,7 @@
 # my_project1 竞品对标 Roadmap + ADR 草案
 
 > 版本：v0.1（草案） · 日期：2026-09-24
-> 性质：外部分析产物（Kimi 工作区），**2026-09-25 已同步回本仓库 docs/**。037（P0-2）/038（P0-3）已正式立项；**后续立项编号从 040 起**——039 已被 S8a 会话模型占用，本文件第 4 节 ADR 草案拟编号 038–042 随之作废，草案内容照用。
+> 性质：外部分析产物（Kimi 工作区），**2026-09-25 已同步回本仓库 docs/**。037（P0-2）/038（P0-3）已正式立项，040 已被 P0-3 落地篇占用；**后续立项编号从 041 起**——039 已被 S8a 会话模型占用，本文件第 4 节 ADR 草案拟编号 038–042 随之作废，草案内容照用。
 > 对标对象：Pi（earendil-works/pi，pi.dev）+ Claude Code、OpenCode、Aider、SWE-agent/mini-swe-agent、LangGraph、OpenHands、Codex CLI、Gemini CLI、Letta/MemGPT、Pi 系记忆生态（pi-mem / pond / pi-persistent-intelligence / pi-reasonix）。
 
 ---
@@ -21,6 +21,8 @@ my_project1 = **个人执行助手**：执行主轴 + 记忆护城河 + 通用�
 | 记忆固化原则（JSONL canonical、分层加载、异步 reflect） | 方向已定，实现中 | 032、034 |
 | 知识图谱 + 图谱面板 | S7a/S7b 完成 | 035、036 |
 | evalkit 评测基座 | 已实现 | 024 |
+| ACI 工具反馈规范 + bash-only mini 回归基线 | 已实现（P0-2） | 037 |
+| Run checkpoint 崩溃恢复（kill→heal→续跑，副作用不重复） | 已实现（P0-3） | 038、040 |
 
 **核心判断**：my_project1 比 Pi 默认核心更产品化（Pi 刻意不做 plan mode / subagents）。改进原则因此是——**每个竞品只偷它最强的一块，全部落到执行主轴和记忆护城河上，不做功能平推。**
 
@@ -64,6 +66,7 @@ my_project1 = **个人执行助手**：执行主轴 + 记忆护城河 + 通用�
 - **触发信号**：单次任务工具输出 token 占比、无效/空工具调用率可度量后，任何机制改动都必须回答「比 bash-only 基线好在哪」。
 - **验收标准**：同一 evalkit 场景集上，总 token 下降且解决率不降；基线配置可一键跑。
 - **首批改动点**：`src/agent/tools/` 文件查看与搜索工具、evalkit 场景与基线配置。
+- **状态**：✅ 代码已落地（`c57ef76`，2026-09-25）——四拍板全实现（`read_file` 100 行窗口 + 上下方行数指示、空输出显式标记、`search_code` 默认只回文件清单 + 命中计数、`evals/baseline_agent.py` bash-only 基线一键出分）。验收剩余项：同场景集 A/B 报告（需真模型前后对比）与实机 3 任务人工对比可读性，并入下一轮实机验收。
 
 #### P0-3 Run checkpoint 与崩溃恢复
 - **来源**：LangGraph checkpointer/interrupt 语义（只借语义，**不**重写为图）。
@@ -71,6 +74,7 @@ my_project1 = **个人执行助手**：执行主轴 + 记忆护城河 + 通用�
 - **触发信号**：长任务（> 5 分钟或 > 20 工具调用）进程崩溃后只能从头重跑。
 - **验收标准**：`kill` 进程后可从上个 checkpoint 恢复并完成任务的 evalkit 场景通过；checkpoint 文件可人工阅读（JSONL）。
 - **首批改动点**：`src/agent/orchestrator/loop.py`（checkpoint 写入点）、`memory/store.py` 或新增 Run Store 模块。
+- **状态**：✅ 已落地（2026-09-25），实现记录与落地裁定见 [040](decisions/040-run-checkpoint-impl.md)。**与本篇原文的一处实质差异**：resume 不是「重放 + 按标注去重」，而是 **heal 补洞 + 向前走，压根不重放**——副作用不重复由「不重放」保证，幂等标注（新字段 `Tool.idempotent`，只读免声明）降级为 heal 文案依据（可重做 / 先核验现场）。checkpoint 形态 = 底片原子落盘 + `data/checkpoints/{sid}.jsonl` 账本（只记 intent/result）。验收：kill-resume 场景集实机 2/2、13 个离线测试、三道门全绿、**Web 入口实机 SIGKILL 服务→换进程重启续跑通过**（038 验收四条全绿）。
 
 #### P0-4 Skills `allowed-tools` 一次性授权
 - **来源**：Claude Code skills frontmatter。
@@ -90,12 +94,14 @@ my_project1 = **个人执行助手**：执行主轴 + 记忆护城河 + 通用�
 - **改动**：工具/步骤级重试计数上限 + 无进展检测（连续 N 步状态无变化即停，升人审）；上限可配置。
 - **验收标准**：evalkit「卡死场景」在上限内停止并给出升级提示；零无限循环。
 - **首批改动点**：`src/agent/orchestrator/loop.py` 重试路径。
+- **状态**：✅ 已落地（`c57ef76`）——`loop.py` `_stuck_check`：签名 = 本批全部点菜的（工具名, 参数）序列，与上一批完全相同才算踏步；连续 `CORTEX_STUCK_LIMIT`（默认 3，下限 2）即熔断工具循环 + 发 `stuck` 事件升人审，熔断轮的点菜不入底片；状态是轮级局部（跨轮重复归人管）。熔断轮不再补发 `max_rounds` 噪声。
 
 #### P0-7 固化管线「验证过的经验优先」
 - **来源**：LongHorizon（Self-Reflection 给廉价教训，Independent Verification 给可信事实）；032 幻觉污染红线。
 - **改动**：固化管线萃取规则修改——有客观背书的经验（测试通过、git 状态、工具验证结果）优先入库；agent 自我总结的教训降级为候选，需二次确认。改规则不改架构。
 - **验收标准**：evalkit 固化场景集通过率不降；入库条目「有背书」占比可度量。
 - **首批改动点**：`src/agent/memory/consolidate.py` 萃取规则。
+- **状态**：✅ 已落地（`c57ef76`）——条目加 `verified` 字段（缺省 false=保守）；审查环节硬校验「verified=true 的背书必须能在材料里找到，找不到就改 false 保留条目」（背书造假比条目失真更危险）；分流规则：project 桶 constraints（教训类）无背书 → 降级为候选不落盘、报告列出待二次确认（decisions/other 与用户级条目不适用——用户拍板与硬事实本身就是背书）；入库行带 `[已验证]` 前缀，「有背书占比」靠 grep 计数事后可度量。
 
 #### P0-8 注入对抗场景集（断言副作用）
 - **来源**：SoK Agentic Jailbreak（中间层妥协：最终输出安全但副作用已发生）；刺 #6 升 P0。
@@ -304,7 +310,7 @@ my_project1 = **个人执行助手**：执行主轴 + 记忆护城河 + 通用�
 
 1. 项目所有者审阅本草案 → 决定哪些条立项为正式 ADR；
 2. 按第 6 节终版优先级执行：「烂尾也值」最小集（P0-2 + P0-3）打包为下一个 milestone（S8？），每条都带 evalkit 验收场景与估时；
-3. 已同步原项目（2026-09-24）：`docs/decisions/037-aci-tool-feedback.md`（P0-2）、`038-run-checkpoint.md`（P0-3）；本文件 2026-09-25 入库 `docs/`；后续立项从 040 起（039 已被 S8a 会话模型占用）。
+3. 已同步原项目（2026-09-24）：`docs/decisions/037-aci-tool-feedback.md`（P0-2）、`038-run-checkpoint.md`（P0-3）；本文件 2026-09-25 入库 `docs/`；后续立项从 041 起（039 已被 S8a 会话模型占用、040 已被 P0-3 落地篇占用）。
 
 ---
 

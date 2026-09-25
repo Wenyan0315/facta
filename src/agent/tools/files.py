@@ -285,4 +285,5 @@ def register_file_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "required": ["path", "content"],
         },
         func=lambda path, content: _write_file(path, content, root=root),
+        idempotent=True,   # P0-3：全量覆写同内容=同结果，崩溃后可安全重做
     ))
