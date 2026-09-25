@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent.core.types import Message
+from agent.knowledge.knowledge_base import chunk_text, tokenize
 from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
 
@@ -66,6 +67,32 @@ def resolve_note_path(notes_dir: Path, filename: str) -> Path:
     if "/" in filename:
         raise ValueError("拒绝：暂不支持子目录")
     return path
+
+
+def _nav_blocks(notes_dir: Path, query: str, note_names: list[str]) -> list[tuple[str, str]]:
+    """图谱导航补充块：每篇候选笔记取词袋覆盖最高的一块（零 LLM，去重保序）。
+
+    词袋覆盖 = query 分词与块分词的重叠数——实验 best_chunk 同款零阶近似，
+    精简掉了 evals 侧的停用词表（停用词表住在 evals 不能反向依赖；中文逐字
+    tokenize 下停用词影响小）。note_names 来自图边 source_note（抽取时程序填的
+    合法笔记名），最多已由 related_notes 的 limit 控在 2 篇。
+    """
+    qterms = tokenize(query)
+    blocks: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name in note_names:
+        try:
+            text = (notes_dir / name).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        chunks = chunk_text(text)
+        if not chunks:
+            continue
+        best = max(chunks, key=lambda c: sum(1 for t in qterms if t in tokenize(c))) if qterms else chunks[0]
+        if best not in seen:
+            seen.add(best)
+            blocks.append((name, best))
+    return blocks
 
 
 def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
@@ -131,15 +158,34 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         """在个人知识库中语义检索，返回最相关的笔记片段。"""
         assert ctx.kb is not None   # 注册守卫（见下方 if ctx.kb is not None）保证非 None
         results = ctx.kb.search(query, top_k=3)   # 不传 min_score → 用 embedder 自带阈值
-        if not results:
-            return "知识库中没有检索到相关内容。"
         # 命中 → 给模型看的编号文本。
         # 分数+来源都展示给模型：分数让它判断检索质量（偏低=可换关键词再查），
         # 来源让它引用资料时能说清出处（RAG 溯源，S4 评审 #R5）。
-        return "\n".join(
+        lines = [
             f"{i+1}. {hit.chunk}（出处：{hit.source}，相关度 {hit.score:.2f}）"
             for i, hit in enumerate(results)
-        )
+        ]
+
+        # 图谱导航补充（043 检索分诊）：query 里的实体锚定图节点 → BFS 2 跳
+        # 拿邻笔记 → 词袋选块追加。零 LLM 调用、纯图遍历；孤岛锚点导航空集
+        # 零追加（L1 零成本），跨笔记/多跳题拿到增量（L2/L3）。graph 未装配
+        # （教学组合）静默跳过。
+        nav: list[tuple[str, str]] = []
+        if ctx.graph is not None:
+            nav = _nav_blocks(ctx.notes_dir, query, ctx.graph.related_notes(query))
+
+        if not lines and not nav:
+            return "知识库中没有检索到相关内容。"
+        out = "\n".join(lines)
+        if nav:
+            # 注入界碑（S3 惯例）：图谱是 LLM 抽取产物，包裹声明随块走——
+            # 让模型知道这批块的来源与语义检索不同（结构化关系，非字面相似）
+            nav_text = "\n".join(f"- {chunk}（出处：{source}）" for source, chunk in nav)
+            out += (
+                "\n\n【图谱导航】知识图谱按结构化关系找到的相关笔记"
+                "（可能不与检索词字面重合，是实体关系导航而来）：\n" + nav_text
+            )
+        return out
 
     def search_and_summarize(query: str) -> str:
         """检索 + 二次摘要：工具内部再调一次 LLM（Sub-agent 模式的原型）。"""

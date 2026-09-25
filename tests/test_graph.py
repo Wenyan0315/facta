@@ -136,6 +136,37 @@ def test_overview_reports_stats_and_islands():
     assert stats["relations"]["依赖"] == 3
 
 
+# ---------- related_notes（043 检索分诊的图导航原语） ----------
+
+
+def test_related_notes_anchors_and_expands():
+    # query 锚定 RAG → BFS 2 跳沿途 source_note 层序去重限量
+    g = _demo_graph()
+    assert g.related_notes("RAG", hops=2, limit=2) == ["Agent.md", "RAG.md"]
+
+
+def test_related_notes_via_alias():
+    # 别名锚定：query 用「检索增强生成」也能落到 RAG
+    g = _demo_graph()
+    assert "RAG.md" in g.related_notes("检索增强生成是什么")
+
+
+def test_related_notes_no_anchor_returns_empty():
+    g = _demo_graph()
+    assert g.related_notes("量子力学") == []
+
+
+def test_related_notes_island_anchor_returns_empty():
+    # 孤岛锚点（PHP 无边）→ 导航空集：L1 零成本的来源
+    g = _demo_graph()
+    assert g.related_notes("PHP") == []
+
+
+def test_related_notes_limit():
+    g = _demo_graph()
+    assert len(g.related_notes("RAG", hops=2, limit=1)) == 1
+
+
 # ---------- merge_note 原子替换（增量同步核心语义） ----------
 
 

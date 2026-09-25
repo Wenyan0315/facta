@@ -78,43 +78,6 @@ CASES: list[tuple[str, list[str], str]] = [
 ]
 
 
-def anchor_entities(store: GraphStore, query: str) -> list[str]:
-    """实体锚定：图节点名/别名是 query 子串（大小写不敏感），返回排序后的节点 id。
-
-    子串匹配是最简实体链接——个人图谱 35 个节点，名字即 id，够用了。
-    排序保证确定性（同图同 query 永远同序，下游块序列可复现）。
-    """
-    q = query.lower()
-    hits = set()
-    for nid, node in store.nodes.items():
-        names = (nid, *node.aliases)
-        if any(len(name) >= 2 and name.lower() in q for name in names):
-            hits.add(nid)
-    return sorted(hits)
-
-
-def graph_related_notes(store: GraphStore, query: str) -> list[str]:
-    """图谱导航：锚点实体 BFS 2 跳，沿途边的 source_note 按层序收集（去重限量）。
-
-    层序 = 与锚点的距离序（近的笔记更相关）；同层内边按 key 排序
-    （neighbors 的实现保证），整体序列确定。
-    """
-    anchors = anchor_entities(store, query)
-    seen, frontier = set(anchors), anchors
-    notes: list[str] = []
-    for _ in range(GRAPH_HOPS):
-        nxt: list[str] = []
-        for nid in frontier:
-            for edge in store.neighbors(nid):
-                notes.append(edge.source_note)
-                other = edge.target if edge.source == nid else edge.source
-                if other not in seen:
-                    seen.add(other)
-                    nxt.append(other)
-        frontier = sorted(nxt)
-    return list(dict.fromkeys(notes))[:MAX_AUGMENT_NOTES]
-
-
 def best_chunk(chunks: list[str], query: str) -> str | None:
     """一篇笔记内与 query 词袋覆盖最高的块（grep 路同款零阶近似，去停用词）。"""
     terms = [t for t in tokenize(query) if t not in STOPWORDS]
@@ -145,7 +108,7 @@ def evaluate(
         base_hits = kb.search(question, top_k=TOP_K)
         base_chunks = [h.chunk for h in base_hits]
 
-        notes = graph_related_notes(store, question)
+        notes = store.related_notes(question, hops=GRAPH_HOPS, limit=MAX_AUGMENT_NOTES)
         aug = [
             c for n in notes
             if (c := best_chunk(note_chunks.get(n, []), question)) is not None

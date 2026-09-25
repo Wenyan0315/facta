@@ -130,6 +130,9 @@ def register_graph_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "（可选 relation 过滤：依赖/包含/对比/引用）；path=两个概念之间"
             "的关系链路（多跳）；overview=全部已学概念的全貌统计。"
             "问「A 和 B 什么关系」「A 依赖哪些概念」「我学过哪些东西」时用它。"
+            "注：search_notes 已会自动带出实体关系导航到的相关笔记块，但"
+            "『关系链路的逐步解释』（path）和『全貌统计/孤岛清单』（overview）"
+            "只有本工具给得出。"
         ),
         parameters={
             "type": "object",

@@ -258,6 +258,39 @@ class GraphStore:
             "hubs": [{"name": n, "degree": d} for n, d in hubs if d > 0],
         }
 
+    def related_notes(self, query: str, hops: int = 2, limit: int = 2) -> list[str]:
+        """图谱导航（043 检索分诊）：query 里锚定到的实体 BFS hops 跳，
+        沿途边的 source_note 按层序收集（去重限量）——「query 提到的这些
+        概念，还有哪几篇笔记沾边」。
+
+        锚定 = 图节点名/别名是 query 子串（大小写不敏感，零 LLM 调用）：
+        个人图谱 35 个节点、名字即 id，子串匹配是最简实体链接。1 跳邻居边
+        往往只回到锚点笔记自己（边 source_note 是抽取来源），2 跳才拿到邻
+        笔记——graph_ablation 实验已证。query 锚不到任何实体 → 空列表。
+        """
+        q = query.lower()
+        anchors: set[str] = set()
+        for nid, node in self.nodes.items():
+            names = (nid, *node.aliases)
+            if any(len(name) >= 2 and name.lower() in q for name in names):
+                anchors.add(nid)
+        if not anchors:
+            return []
+        seen: set[str] = set(anchors)
+        frontier = sorted(anchors)
+        notes: list[str] = []
+        for _ in range(hops):
+            nxt: list[str] = []
+            for nid in frontier:
+                for edge in self.neighbors(nid):
+                    notes.append(edge.source_note)
+                    other = edge.target if edge.source == nid else edge.source
+                    if other not in seen:
+                        seen.add(other)
+                        nxt.append(other)
+            frontier = sorted(nxt)
+        return list(dict.fromkeys(notes))[:limit]
+
     # ---- 序列化（graph.json 落盘） ----
 
     def to_dict(self) -> dict:

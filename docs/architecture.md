@@ -1,6 +1,6 @@
 # Personal Agent 架构图
 
-> 版本：v0.72（2026-09-25）｜随着里程碑推进持续迭代此文档
+> 版本：v0.73（2026-09-25）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [product.md](product.md) v2）：个人执行助手——执行主轴 + 记忆护城河 + 通用外延（[021](decisions/021-direction-decisions.md)）
 
@@ -223,6 +223,7 @@
 | [040-run-checkpoint-impl](decisions/040-run-checkpoint-impl.md) | 竞品对标 P0-3 落地：崩溃恢复实现方案 | 038 定语义、本篇记落地新裁定；七裁定（底片是唯一真值源，账本只记 intent/result 两件底片表达不了的事——否决另存状态快照/resume=heal 补洞+向前走**不重放**，副作用不重复由「压根不重放」保证而非去重表/`Tool.idempotent` 新字段只读免声明默认 False 保守档/落盘顺序是不变量 append 早于 emit/账本每轮 `begin` 截断（历史 run 无消费者）/同步写否决异步（崩溃时队列里没 flush 的正是最需要的）/不加 HTTP resume 端点（无消费者））；CLI 不挂 writer（轮末才落盘=压根没有残局，只启动 heal）；反方三条（result 全文写两份、heal 只管尾部悬挂、不重放=进行中调用结果永久未知走保守档）；验收 2/2 实机 SIGKILL 场景 + 13 个离线测试钉语义 |
 | [041-memory-panel-user-scope](decisions/041-memory-panel-user-scope.md) | 记忆面板用户级分栏 | `user` 当第四个伪 category（零新端点、复用 `LEARNED_LOCK` 与坏行宽容）；路径必须走 `paths.user_memory_path()` 与注入侧同源；不做手工新增条目；不加 `.bak`（改为 UI 写明「不进 git，删除不可撤销」）；裁定 025 的触发信号为准、034 裁定 6 的信号作废 |
 | [042-notes-panel](decisions/042-notes-panel.md) | 知识语料面板（第四面板）+ 图谱出处渲染 | 立项三事实（notes 只增不改／`source_note` 已在 payload 却一个字节没渲染／能重抽却不能核对）；五裁定（编辑已有✅新建❌——面板是修正入口不是无中生有入口、围栏必须与工具层同源且是安全红线（`name` 来自 URL，比 learned 白名单危险一个数量级）、写盘走原子手法、陈旧显式不自动花钱、乐观锁这次要做——整文件盲覆盖 + IDE 双写长期在线）；第 0 档图谱侧栏「出自：X.md」+ 深链回面板；实机验收全通（含 409 与陈旧横幅），期间踩到「误把 harness 双重编码串写进真笔记」——备份还原，教训入档 |
+| [043-retrieval-triage](decisions/043-retrieval-triage.md) | 检索分诊（search_notes 图谱导航补强） | 消融实验判定「图谱有增量」后立项；B+C 拍板（无条件导航追加 + query_graph 描述补位）、A（路由级分诊）挂触发信号；「分数门控」被 BGE baseline top1 分布证伪（L2 miss 题 top1 反而高于 L1 命中题——语义向量下「相关但非答案」同样高分）；导航原语抽成 GraphStore.related_notes 单一真值源（evals 与工具层共用）；L1 零成本由图自然空集承担（孤岛锚点导航空集，非门控） |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
