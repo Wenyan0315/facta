@@ -63,10 +63,12 @@ from agent.tools.web import get_web_search, register_web_tools
 from agent.tools.worktree import cleanup_stale_worktrees
 
 # 组装层唯一真值源：CLI / Web 都从这里拿路径，不在各自入口重定义
-MEMORY_PATH = Path("data/memory/session.json")   # S8a 退役为「一次性迁移源」：老 active 固定位，启动时 move 进 SESSIONS_DIR
-VECTOR_DB_DIR = Path("data/vector_db")           # M7：向量库落盘位置（运行时数据，.gitignore 已排除）
-TODOS_PATH = Path("data/todos.json")             # 个人待办（2026-09-17）：跨会话资产，独立于 session
-AUDIT_DIR = Path("data/audit")                   # S3 审计日志（2026-09-17）：工具调用 append-only jsonl 按天滚动
+# 四个都锚 WORKSPACE_ROOT（S8a 边界①收口同款）：换 cwd 启动时相对路径会静默
+# 指错——迁移源找不到（老会话「消失」）、审计/待办/向量库写到别处
+MEMORY_PATH = WORKSPACE_ROOT / "data/memory/session.json"   # S8a 退役为「一次性迁移源」：老 active 固定位，启动时 move 进 SESSIONS_DIR
+VECTOR_DB_DIR = WORKSPACE_ROOT / "data/vector_db"           # M7：向量库落盘位置（运行时数据，.gitignore 已排除）
+TODOS_PATH = WORKSPACE_ROOT / "data/todos.json"             # 个人待办（2026-09-17）：跨会话资产，独立于 session
+AUDIT_DIR = WORKSPACE_ROOT / "data/audit"                   # S3 审计日志（2026-09-17）：工具调用 append-only jsonl 按天滚动
 
 # 增量固化阈值（S8a）：距上次固化攒够这么多条消息才跑一次复盘。
 # 老口径是「归档/退出时全量固化一次」——S8a 没有归档动作了，触发点必须换成
@@ -295,8 +297,13 @@ def assemble(provider: str) -> AppContext:
     #      命令型穿 stdio、URL 型穿 streamable HTTP；单台失败只警告不阻断；
     #      MCP_SERVERS 环境变量可指向个人配置（带 API key 的那种，不进仓库）
     #      装进母 registry —— 子进程全进程一套，per-session registry 搬运同一批 Tool 对象
+    #      默认值锚 WORKSPACE_ROOT（S8a 边界①同款）：相对 cwd 时换目录启动会让
+    #      FileNotFoundError 走 load_server_specs 的「空清单」分支——MCP 工具静默
+    #      全消失，不崩不报错，最难查
     try:
-        specs = load_server_specs(Path(os.environ.get("MCP_SERVERS", "mcp_servers.json")))
+        specs = load_server_specs(
+            Path(os.environ.get("MCP_SERVERS", str(WORKSPACE_ROOT / "mcp_servers.json")))
+        )
     except ValueError as e:
         logger.warning("MCP 配置读取失败，本轮无外部工具：%s", e)
         specs = []

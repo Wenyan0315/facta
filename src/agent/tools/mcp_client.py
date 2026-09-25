@@ -67,11 +67,15 @@ class McpClient:
         command: list[str],
         timeout: float = 30.0,
         env: dict[str, str] | None = None,
+        cwd: str | None = None,
     ) -> None:
         self._timeout = timeout
         # stderr 直接丢弃：不读它会让子进程的日志写满管道缓冲区把双方卡死。
         # 调试期可改为重定向到文件（open(path, "w")）——防死锁同时留证据
         # env：在继承的基础上叠加（沙箱目录注入、将来真实服务器的 API key 都走这条缝）
+        # cwd：默认 None=继承父进程，协议层不掺工作目录意见；由装配层显式传
+        # （S8a 边界①同款——清单里 "servers/xxx.py" 这类相对路径必须相对仓库根，
+        # 否则换目录启动时子进程拉不起来，只留一条 warning，工具静默消失）
         self._proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -80,6 +84,7 @@ class McpClient:
             text=True,
             encoding="utf-8",
             env={**os.environ, **(env or {})},
+            cwd=cwd,
         )
         # 启动探活：服务器起不来（脚本路径错/依赖缺）就立刻报，别等 initialize
         # 空等超时（三方评审第 5 条）。100ms 沉降期：Popen 刚返回时子进程可能

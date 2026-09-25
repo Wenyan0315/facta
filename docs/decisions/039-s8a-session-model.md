@@ -65,6 +65,8 @@
 
 - **实踩与已知边界**：
   1. **`paths.py` 全是相对路径**（`data/notes`、`data/learned`、`data/memory/sessions`、`data/graph.json`），依赖启动 cwd；只有 `WORKSPACE_ROOT`/`WORKTREES_DIR` 用 `__file__` 锚定。冒烟时换 cwd 启动直接崩（`scan_notes` 对缺目录抛 FileNotFoundError）。这是既有「必须从仓库根启动」边界的另一面——**要不要让它成为启动即报的友好错误，挂待讨论区**。
+
+     **→ 已修（2026-09-25）**：`__file__` 锚定兑现，**env 覆盖有意不做**（零消费者=死旋钮；触发信号=数据目录需与代码目录分离时补 `CORTEX_DATA_DIR` 并同步 `files.py` 围栏口径）。「启动即报的友好错误」议题随之作废——常量不再依赖 cwd，没有「找不到目录」这条错误路径了。同源漏网另修三处（`mcp_servers.json` 默认路径 / stdio 子进程 `cwd` / `assemble.py` 四个本地常量），详见 architecture.md 已知问题节 S8a 边界① 结案段。
   2. `Run.emit` 返回 `None` 而非 `RunEvent`：emit 的一个主要用途是直接当 `run_turn` 的 `on_text`/`on_event` 回调，而那两处要 `Callable[..., None]`——返回事件会让 lambda 形式过不了类型检查。要读事件走 `run.events`。
   3. `ScriptedLLM` 剧本耗尽**不抛异常**而是返回兜底文本：多会话测试里剧本条数容易算错，抛异常会让失败信息指向「剧本不够」而非真正的行为断言。
   4. `load_session` 里 `consolidated_upto` 的缺省取 `len(messages)` 而非 0——老文件是在「退出时全量固化」的旧语义下写的，历史已萃取过；给 0 会让第一次增量固化把整段历史**重烧一遍 LLM**（learned/ 长出重复条目）。

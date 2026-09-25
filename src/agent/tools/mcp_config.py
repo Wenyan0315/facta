@@ -10,6 +10,8 @@
 - command 列表第一个元素可以是占位符 "{python}"：装配时替换成当前 agent
   自己的解释器（sys.executable）。清单里写死 "python" 会撞上「venv 未激活时
   PATH 里没有 python」的坑——配置要可移植，解释器由运行时自己填
+- command 里的相对路径（脚本、服务器自己读的数据）一律相对**仓库根**解析：
+  装配时给子进程传 cwd=WORKSPACE_ROOT，换目录启动也不漂（S8a 边界①同款）
 - prefix 缺省 = f"{name}__"：服务器名唯一 → 前缀唯一 → 服务器之间不互踩
 - enabled=false 只挂名不拉（远程服务器默认都不拉——启动背网络依赖不值）
 - headers 给远程服务器带 API key 用——**含密钥的配置不得进仓库**：
@@ -26,6 +28,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent.paths import WORKSPACE_ROOT
 from agent.tools.mcp_client import McpClient, McpError, register_mcp_tools
 from agent.tools.mcp_http import HttpMcpClient
 from agent.tools.registry import ToolRegistry
@@ -94,7 +97,11 @@ def assemble_servers(registry: ToolRegistry, specs: list[ServerSpec]) -> list:
                     # 占位符：用 agent 自己的解释器（venv 未激活也不怕找不到 python）
                     command = [sys.executable] + command[1:]
                 client: McpClient | HttpMcpClient = McpClient(
-                    command, timeout=spec.timeout
+                    # cwd 锚仓库根：清单里的相对脚本路径（"servers/notes_server.py"）
+                    # 与 mcp_servers.json 自己的默认位置同源，不随启动目录漂
+                    command,
+                    timeout=spec.timeout,
+                    cwd=str(WORKSPACE_ROOT),
                 )
             else:
                 if not spec.url:   # 畸形配置（command/url 双缺）：跳过而非喂 None 给 httpx

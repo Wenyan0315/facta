@@ -10,6 +10,11 @@
       "url": "https://mcp.context7.com/mcp",
       "prefix": "ctx7__",
       "enabled": true
+    },
+    {
+      "name": "memory",
+      "command": ["{python}", "servers/memory_server.py"],
+      "enabled": false
     }
   ]
 }
