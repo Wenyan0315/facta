@@ -207,3 +207,59 @@ def test_dsml_halfwidth_lookalike_not_treated_as_leak():
     assert result is RunResult.COMPLETED
     assert len(llm.calls) == 1            # 一次调用即收尾：没当泄漏
     assert reply is not None and "普通字样" in reply.content
+
+
+# ---------- P0-6 无进展检测（LongHorizon 基线 agent 原地重试 400+ 步的形态） ----------
+
+
+def _ordering(batch_id: str) -> Message:
+    """一批点菜：同名同参数（stuck 签名只看名字+参数，id 不算数）。"""
+    return Message(role="assistant", content="", tool_calls=[
+        {"id": batch_id, "name": "get_current_time", "arguments": "{}"}
+    ])
+
+
+def test_stuck_detection_breaks_identical_tool_batches():
+    # 连续 3 批完全相同的点菜 → 第 3 批触发熔断（默认上限 3，streak>=2）
+    llm = ScriptedLLM([_ordering("call_1"), _ordering("call_2"), _ordering("call_3")])
+    # 剧本耗尽后 ScriptedLLM 兜底纯文本——正好当强制收尾的最终回答
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+    events: list[tuple[str, dict]] = []
+
+    result, reply = run_turn(
+        session, "现在几点", llm=llm, agent=_bare_agent(),
+        on_event=lambda t, d: events.append((t, d)),
+    )
+
+    assert result is RunResult.COMPLETED
+    assert reply is not None and reply.content          # 兜底文本收尾
+    assert ("stuck", {"tools": ["get_current_time"]}) in events
+    assert all(t != "max_rounds" for t, _ in events)    # 熔断已自带事件，不再发噪声
+    # 熔断判定在入史之前：第 3 批点菜不进底片（无孤儿 tool_calls），
+    # 前 2 批各配一条 tool 结果，最后是强制收尾的 assistant 回答
+    assert [m.role for m in session.messages] == [
+        "system", "user", "assistant", "tool", "assistant", "tool", "assistant",
+    ]
+    assert len(llm.calls) == 4                          # 3 批点菜 + 1 次强制收尾
+
+
+def test_single_repeat_does_not_trip_stuck():
+    # 误报空间：只重复 1 次（streak=1 < 上限-1）不熔断，模型第 3 轮正常收尾
+    llm = ScriptedLLM([
+        _ordering("call_1"),
+        _ordering("call_2"),
+        Message(role="assistant", content="好了不查了"),
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+    events: list[tuple[str, dict]] = []
+
+    result, reply = run_turn(
+        session, "现在几点", llm=llm, agent=_bare_agent(),
+        on_event=lambda t, d: events.append((t, d)),
+    )
+
+    assert result is RunResult.COMPLETED
+    assert reply is not None and reply.content == "好了不查了"
+    assert all(t not in ("stuck", "max_rounds") for t, _ in events)

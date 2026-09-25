@@ -19,7 +19,8 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-# 行格式：- [YYYY-MM-DD] 内容（consolidate._append 的落盘契约）
+# 行格式：- [YYYY-MM-DD] 内容（consolidate._append 的落盘契约；P0-7 起
+# verified 条目内容带 [已验证] 前缀——正则不挑食，前缀随内容组一起读出）
 _LINE_RE = re.compile(r"^- \[(\d{4}-\d{2}-\d{2})\] (.*)$")
 
 # 记忆文件的进程级互斥（S8a）：写入侧（consolidate 的 append）与编辑侧

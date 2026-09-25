@@ -67,6 +67,9 @@ EXTRACT_TEMPLATE = """你是个人 agent 的「记忆档案员」。下面是本
 4. 三问过滤：跨会话还成立吗？以后大概率用得上吗？「已知记忆」里没记过吗？
    任一答案为否 → 丢弃
 5. 最多 {max_entries} 条，宁缺毋滥
+6. 每条标注 verified（P0-7）：条目所依据的事实有客观背书——对话中出现
+   测试通过、git 状态、工具验证结果等可复核证据 → true；纯口头结论、
+   agent 自我总结的教训 → false
 
 已知记忆（已有条目，不要再重复记；两段分别是项目桶与用户记忆）：
 {known}
@@ -75,8 +78,8 @@ EXTRACT_TEMPLATE = """你是个人 agent 的「记忆档案员」。下面是本
 {transcript}
 
 只输出 JSON 数组，格式：
-[{{"category": "constraints", "content": "...", "scope": "project"}}]
-（scope 缺省视为 project；用户级条目 category 填 other 即可）"""
+[{{"category": "constraints", "content": "...", "scope": "project", "verified": false}}]
+（scope 缺省视为 project；用户级条目 category 填 other 即可；verified 缺省视为 false）"""
 
 REVIEW_TEMPLATE = """你是记忆档案的「审查员」。下面是候选记忆条目和对应的对话复盘材料。
 逐条对照：条目内容是否都能在复盘材料里找到明确依据？
@@ -85,6 +88,9 @@ REVIEW_TEMPLATE = """你是记忆档案的「审查员」。下面是候选记�
   所有会话，污染代价远高于漏记）
 - 可以修正措辞使条目更忠实于原文，但禁止添加原文没有的信息
 - 重复的条目只留一条
+- verified=true 的条目，其背书（测试通过/git 状态/工具验证结果）也必须
+  能在材料中找到；找不到就把 verified 改成 false 保留条目——背书造假
+  比条目失真更危险（P0-7）
 
 候选条目：
 {entries_json}
@@ -100,6 +106,7 @@ class Entry:
     category: str
     content: str
     scope: str = "project"   # M6.5：user=仓库外个人记忆库；缺省 project（旧输出兼容）
+    verified: bool = False   # P0-7：有客观背书（测试通过/git 状态/工具验证）；缺省 false（保守）
 
 
 def _transcript(session: Session, window: int) -> str:
@@ -155,15 +162,23 @@ def _is_sensitive(content: str) -> bool:
     return any(p.search(content) for p in _SENSITIVE_PATTERNS)
 
 
-def _harden(items: list[dict]) -> list[Entry]:
+def _harden(items: list[dict]) -> tuple[list[Entry], list[Entry]]:
     """程序侧硬校验：形状归代码管，语义才归提示词管。
 
     - 敏感凭证：弃（任何作用域——这是落盘前的最后一道闸）
     - scope 非法：归 project（写错位置的保守方向：用户级错进项目桶是
       分类噪音，反向是隐私泄漏）
     - category 白名单垃圾桶、批内去重：M6.4 原样
+    - P0-7 分流：project 桶 constraints（教训类）缺客观背书（verified
+      非 true）→ 降级为候选不落盘，报告列出待二次确认；decisions/other
+      与用户级条目不适用——用户拍板、硬事实、用户本人说的话本身就是
+      权威来源。verified 判定严格（恒等 True）：模型输出 "true" 字符串
+      也算无背书，保守方向=降级候选
+
+    返回 (入库条目, 降级候选)。
     """
     entries: list[Entry] = []
+    candidates: list[Entry] = []
     seen: set[str] = set()
     for item in items[:MAX_ENTRIES_PER_RUN]:
         category = str(item.get("category", "other"))
@@ -180,13 +195,20 @@ def _harden(items: list[dict]) -> list[Entry]:
         if content in seen:
             continue   # 批内去重（批间去重靠「已知记忆」提示词）
         seen.add(content)
-        entries.append(Entry(category=category, content=content, scope=scope))
-    return entries
+        entry = Entry(category=category, content=content, scope=scope,
+                      verified=item.get("verified") is True)
+        if scope == "project" and category == "constraints" and not entry.verified:
+            candidates.append(entry)
+        else:
+            entries.append(entry)
+    return entries, candidates
 
 
 def _append(entries: list[Entry], learned_dir: Path, user_memory_path: Path | None) -> list[str]:
     """按作用域落盘；时间戳由程序加——出处链条里程序是唯一可信作者。
 
+    P0-7：verified 条目行内带 [已验证] 前缀——「入库条目有背书占比」
+    事后可度量（grep 计数 / 总行数），不靠运行时记忆。
     返回写入位置清单（如 ["decisions", "user"]）供文案汇报。
     user_memory_path=None 时的 user 条目已被上游过滤，这里不会再遇到。
     """
@@ -198,17 +220,18 @@ def _append(entries: list[Entry], learned_dir: Path, user_memory_path: Path | No
     # 拿锁写完，不逐条抢——锁内只有本地文件 append（微秒级），饿不死编辑请求。
     with LEARNED_LOCK:
         for entry in entries:
+            mark = "[已验证] " if entry.verified else ""
             if entry.scope == "user":
                 assert user_memory_path is not None   # 上游过滤的契约（防御性）
                 user_memory_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(user_memory_path, "a", encoding="utf-8") as f:
-                    f.write(f"- [{today}] {entry.content}\n")
+                    f.write(f"- [{today}] {mark}{entry.content}\n")
                 if "user" not in written:
                     written.append("user")
             else:
                 path = learned_dir / f"{entry.category}.md"
                 with open(path, "a", encoding="utf-8") as f:
-                    f.write(f"- [{today}] {entry.content}\n")
+                    f.write(f"- [{today}] {mark}{entry.content}\n")
                 if entry.category not in written:
                     written.append(entry.category)
     return written
@@ -256,7 +279,15 @@ def consolidate(
     )
     if not review_ok:
         return "记忆固化：审查输出无法解析（坏 JSON），未写入"
-    entries = _harden(kept)
+    entries, candidates = _harden(kept)
+
+    # P0-7 候选简报：缺背书的教训不落盘，列出来待人二次确认
+    brief = ""
+    if candidates:
+        shown = "；".join(e.content for e in candidates[:3])
+        if len(candidates) > 3:
+            shown += f" 等 {len(candidates)} 条"
+        brief = f"；{len(candidates)} 条教训缺客观背书降为候选（待确认）：{shown}"
 
     # 未配置用户级位置：user 条目丢弃（v1 行为），文案如实说——不算驳回
     dropped_unplaced = 0
@@ -266,18 +297,21 @@ def consolidate(
 
     if not entries:
         base = f"记忆固化：{len(raw)} 条候选全部被审查驳回（或未过硬校验），未写入"
+        base += brief
         if dropped_unplaced:
             base += f"；另有 {dropped_unplaced} 条用户级候选因未配置位置丢弃"
         return base
 
     written = _append(entries, learned_dir, user_memory_path)
     n_user = sum(1 for e in entries if e.scope == "user")
+    n_verified = sum(1 for e in entries if e.verified)
     report = (
-        f"记忆固化：新增 {len(entries)} 条（驳回 {len(raw) - len(entries)} 条）"
-        f" → {', '.join(written)}"
+        f"记忆固化：新增 {len(entries)} 条（已验证 {n_verified} 条，"
+        f"驳回 {len(raw) - len(entries) - len(candidates)} 条）→ {', '.join(written)}"
     )
     if n_user:
         report += f"（其中用户级 {n_user} 条 → {user_memory_path}）"
+    report += brief
     if dropped_unplaced:
         report += f"；{dropped_unplaced} 条用户级候选因未配置位置丢弃"
     return report

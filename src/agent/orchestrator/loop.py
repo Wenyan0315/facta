@@ -16,6 +16,7 @@ S2a 把它迁到编排层 orchestrator/，core/ 收缩为纯地基。
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -56,6 +57,26 @@ _DSML_LEAK_HINT = (
     "意图已丢失。请重试：如需调用工具，通过标准 tool_calls 字段发起；"
     "如需作答，直接输出自然语言。正文中不要出现 <｜｜DSML｜｜ 等任何调用格式。"
 )
+
+# P0-6 无进展检测上限（LongHorizon 基线 agent 对无响应弹窗原地重试 400+
+# 步的形态）：连续完全相同的点菜批次达上限即熔断工具循环、事件升人审。
+# rounds 保险丝管「点太多」，这里管「原地踏步」——每次执行都「成功」、
+# 状态零变化、token 白烧。下限 2（=重复 1 次即熔断无意义，留给误报空间）
+_STUCK_LIMIT = max(2, int(os.environ.get("CORTEX_STUCK_LIMIT", "3")))
+
+
+def _stuck_check(
+    reply: Message, prev_sig: tuple[tuple[str, str], ...] | None, streak: int
+) -> tuple[tuple[tuple[str, str], ...], int, bool]:
+    """P0-6 原地踏步判定：本批点菜签名 →（新签名, 新计数, 是否熔断）。
+
+    签名 = 本批全部点菜的（工具名, 参数）序列；与上一批完全相同才算踏步
+    （id 不算数）。判定在 reply 入史之前调用——熔断轮的点菜不进底片
+    （进了就是孤儿 tool_calls，污染后续投影）。
+    """
+    sig = tuple((tc["name"], tc["arguments"]) for tc in reply.tool_calls or [])
+    streak = streak + 1 if sig == prev_sig else 0
+    return sig, streak, streak >= _STUCK_LIMIT - 1
 
 
 class RunResult(Enum):
@@ -335,6 +356,7 @@ def run_turn(
                         tool_started  {"name": str, "arguments": str}
                         tool_result   {"name": str, "result": str}
                         max_rounds    {}       保险丝熔断，强制收尾
+                        stuck         {"tools": [str]}  P0-6 原地踏步熔断，升人审
                         error         {"message": str}  模型全挂，本轮无产出
         should_cancel 协作式取消检查点回调：返回 True 时在下一个检查点掐半截轮、
                       返回 (CANCELLED, None)（不发事件——cancelled 是 Run 级终态，归调用方）。
@@ -389,6 +411,11 @@ def run_turn(
         if plan_msg is not None:
             payload.insert(2, plan_msg)
 
+        # P0-6 无进展检测的状态：上一批点菜签名 + 连续重复计数（轮级局部，
+        # 一轮对话结束即弃——检出的是「这一轮内原地踏步」，跨轮重复归人管）
+        prev_batch_sig: tuple[tuple[str, str], ...] | None = None
+        stuck_streak = 0
+        stuck = False
         for _round in range(agent.max_tool_rounds):
             # 协作式取消检查点①：每次模型调用前。取消则掐半截轮、本轮无产出
             if should_cancel and should_cancel():
@@ -403,6 +430,16 @@ def run_turn(
             if not reply.tool_calls:   # 模型不点菜了 → 最终回答，退出循环
                 session.messages.append(reply)
                 return RunResult.COMPLETED, reply
+
+            # P0-6 熔断判定在 reply 入史之前（语义见 _stuck_check）
+            prev_batch_sig, stuck_streak, should_break = _stuck_check(
+                reply, prev_batch_sig, stuck_streak
+            )
+            if should_break:
+                stuck = True
+                if on_event:
+                    on_event("stuck", {"tools": [tc["name"] for tc in reply.tool_calls]})
+                break
 
             # 模型点菜了。原「assert registry is not None」已删（S5a）：
             # 菜单为 None 时模型仍幻觉点菜是真实可能——agent.execute 走
@@ -426,7 +463,8 @@ def run_turn(
             # 循环内决策归模型/harness）。direct 场景模型直答即 return，到不了这里
             tools = full_tools
         # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
-        if on_event:
+        # （P0-6 原地踏步熔断已自带 stuck 事件，不再发 max_rounds 噪声）
+        if not stuck and on_event:
             on_event("max_rounds", {})
         # 最后一问不递菜单，逼它说话（同流式消费，同样罩检查点③）；
         # 泄漏守卫同款——保险丝已熔断再泄漏也无菜单可点，超限即降级

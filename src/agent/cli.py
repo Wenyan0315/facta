@@ -47,6 +47,8 @@ def _cli_on_event(event_type: str, data: dict) -> None:
         print(f"  [工具结果] {data['result']}")
     elif event_type == "max_rounds":
         print("  [已达到工具调用轮数上限，强制结束本轮]")
+    elif event_type == "stuck":
+        print(f"  [检测到原地重复调用（{'、'.join(data['tools'])}），已停止本轮——可换个说法或缩小任务重试]")
     elif event_type == "error":
         print(f"[模型不可用] {data['message']}\n本轮到此为止，网络/额度恢复后重新提问即可。")
     elif event_type == "plan.created":

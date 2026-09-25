@@ -193,6 +193,14 @@ function setupEventSource(runId, turn) {
     scrollBottom();
   });
 
+  source.addEventListener("stuck", () => {
+    const el = document.createElement("div");
+    el.className = "tool-card";
+    el.textContent = "检测到原地重复调用，已停止本轮——可换个说法或缩小任务重试";
+    turn.appendChild(el);
+    scrollBottom();
+  });
+
   // L2 确认（S4b）：request 弹窗 → resolved 收窗。事件按 seq 序到达，
   // 断线重放时 request 无 resolved 配对则弹窗自然重现（确认不丢）。
   source.addEventListener("confirm.request", (e) => {

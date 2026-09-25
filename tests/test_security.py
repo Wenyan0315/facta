@@ -86,6 +86,15 @@ def test_no_audit_injected_still_works():
     assert registry.execute("x", "{}") == "正常"
 
 
+def test_empty_result_becomes_explicit_marker():
+    # 037 P2：工具返回空串/纯空白 → 唯一收口点替成显式「（无输出）」标记
+    registry = ToolRegistry()
+    registry.register(_tool("empty", result=""))
+    registry.register(_tool("blank", result="  \n  "))
+    assert registry.execute("empty", "{}") == "（无输出）"
+    assert registry.execute("blank", "{}") == "（无输出）"
+
+
 # ---------- 权限分级 ----------
 
 def test_is_readonly_defaults_to_write():

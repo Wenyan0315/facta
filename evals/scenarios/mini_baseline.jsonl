@@ -1,0 +1,3 @@
+{"id": "create_file", "task": "在当前目录创建文件 hello.txt，内容就一行：hello world", "verify": "grep -qx 'hello world' hello.txt"}
+{"id": "fix_script", "setup": "printf 'def add(a, b):\n    return a - b\n' > calc.py", "task": "当前目录的 calc.py 里 add 函数实现错了（减法写成了加法该做的），修好它，并用 python3 验证 add(2, 3) == 5", "verify": "python3 -c \"from calc import add; assert add(2, 3) == 5\""}
+{"id": "count_lines", "setup": "printf 'a\nb\nc\n' > data.txt", "task": "统计当前目录 data.txt 的行数，把那个数字（只有数字、单独一行）写入 lines.txt", "verify": "grep -qx '3' lines.txt"}

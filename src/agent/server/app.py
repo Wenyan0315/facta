@@ -49,6 +49,7 @@ _EVENT_MAP = {
     "tool_started": "tool.started",
     "tool_result": "tool.result",
     "max_rounds": "max_rounds",
+    "stuck": "stuck",
     "error": "error",
 }
 

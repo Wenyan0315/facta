@@ -195,6 +195,11 @@ class ToolRegistry:
             result = f"错误：工具执行失败（{type(e).__name__}: {e}）"
         else:
             result = str(result)
+            # 037 P2（SWE-agent ACI）：空输出显式化——任何工具（含 MCP）
+            # 返回空串都在这唯一收口点替成显式标记，模型不再把「什么都没
+            # 返回」误读成「执行成功只是没内容」或「调用丢了」。
+            if not result.strip():
+                result = "（无输出）"
 
         # S3 审计收口：所有工具调用（含失败）在这里落盘——单一必经点，
         # 新工具零成本继承。失败也记（result 是错误串，事后可查）。

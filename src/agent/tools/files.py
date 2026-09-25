@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 from agent.paths import WORKSPACE_ROOT
@@ -24,7 +25,7 @@ from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
 
 MAX_FILE_BYTES = 1024 * 1024      # 1MB：超限拒读拒写（防灌爆上下文/内存）
-MAX_READ_CHARS = 8000             # read_file 默认窗口（与 fetch_web 同量级纪律）
+DEFAULT_READ_LIMIT = 100          # read_file 默认窗口（037 P1：~100 行，配上下方余量指示）
 MAX_SEARCH_HITS = 30              # search_code 命中上限（防海啸）
 MAX_DIFF_LINES = 40               # write_file 返回的 diff 行数上限
 
@@ -59,8 +60,12 @@ def _resolve_in_workspace(path_str: str, *, root: Path = WORKSPACE_ROOT) -> Path
     return candidate
 
 
-def _read_file(path: str, offset: int = 1, limit: int = 200, *, root: Path = WORKSPACE_ROOT) -> str:
-    """读项目文件：行窗口分页（offset 从 1 起，limit 行），二进制/超 1MB 拒。"""
+def _read_file(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, *, root: Path = WORKSPACE_ROOT) -> str:
+    """读项目文件：行窗口分页（offset 从 1 起，limit 行），二进制/超 1MB 拒。
+
+    037 P1（SWE-agent ACI）：窗口上下方余量显式指示——模型知道前后还有
+    多少行、怎么续读，不再靠「共 N 行」心算；空文件显式标记（P2）。
+    """
     target = _resolve_in_workspace(path, root=root)
     if not target.is_file():
         return f"文件不存在：{path}（可用 list_dir 浏览目录）"
@@ -73,18 +78,60 @@ def _read_file(path: str, offset: int = 1, limit: int = 200, *, root: Path = WOR
         return f"不是文本文件（或非 UTF-8），拒绝读取：{path}"
 
     lines = text.splitlines()
-    if len(lines) > limit:
-        shown = lines[offset - 1 : offset - 1 + limit]
-        return (
-            f"{path}（共 {len(lines)} 行，显示第 {offset}~{offset + len(shown) - 1} 行）：\n"
-            + "\n".join(shown)
-            + f"\n〔未完，继续读 offset={offset + limit}〕"
-        )
-    return f"{path}（共 {len(lines)} 行）：\n" + text
+    if not lines:
+        return f"{path}（空文件）"
+    offset = max(1, offset)
+    limit = max(1, limit)
+    shown = lines[offset - 1 : offset - 1 + limit]
+    if not shown:
+        return f"{path}（共 {len(lines)} 行；offset={offset} 超出文件范围）"
+
+    above = offset - 1
+    below = len(lines) - (offset - 1 + len(shown))
+    header = f"{path}（共 {len(lines)} 行"
+    if above or below:
+        header += f"，显示第 {offset}~{offset + len(shown) - 1} 行"
+    header += "）：\n"
+    hints = []
+    if above:
+        hints.append(f"上方还有 {above} 行（从 offset=1 起）")
+    if below:
+        hints.append(f"下方还有 {below} 行（续读 offset={offset + len(shown)}）")
+    footer = ("\n〔" + "；".join(hints) + "〕") if hints else ""
+    return header + "\n".join(shown) + footer
 
 
-def _search_code(pattern: str, *, root: Path = WORKSPACE_ROOT) -> str:
-    """grep 式代码定位：正则跨 workspace 搜文本文件，返回 文件:行号:内容。"""
+def _iter_searchable_text(root: Path) -> Iterator[tuple[str, str]]:
+    """产出 (相对路径, 文本)——黑名单目录/敏感文件/超限/非文本整树跳过。
+
+    黑名单目录整树跳过（含 .venv 几万文件——不跳会搜到天荒地老）；
+    .env 等文件级黑名单此前只挡 read_file 的路径解析，search_code 直接
+    rglob 绕过了它——密钥内容会随命中行吐给模型（评审修复轮）。与
+    _resolve_in_workspace 的 _BLACKLIST_PARTS 同一清单（不 import 那个
+    函数：解析语义不同）。
+    """
+    for file in sorted(root.rglob("*")):
+        if not file.is_file():
+            continue
+        try:
+            rel = file.relative_to(root).as_posix()
+            if any(rel == b or rel.startswith(b + "/") for b in _BLACKLIST_DIRS) or ".git" in file.parts:
+                continue
+            if any(part in _BLACKLIST_PARTS for part in Path(rel).parts) or rel.startswith(".env"):
+                continue
+            if file.stat().st_size > MAX_FILE_BYTES:
+                continue
+            yield rel, file.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+
+
+def _search_code(pattern: str, show_lines: bool = False, *, root: Path = WORKSPACE_ROOT) -> str:
+    """grep 式代码定位：正则跨 workspace 搜文本文件。
+
+    037 P3：默认只回「文件清单+命中计数」——一次宽搜不再把几十行内容
+    喷进上下文；需要行级明细时 show_lines=true 二次展开（文件:行号:内容）。
+    """
     if not pattern.strip():
         return "搜索模式为空"
     try:
@@ -92,34 +139,33 @@ def _search_code(pattern: str, *, root: Path = WORKSPACE_ROOT) -> str:
     except re.error as e:
         return f"正则不合法：{e}（如搜字面量请转义，如 search_code 用 'def run_turn' 不用引号）"
 
-    hits: list[str] = []
-    for file in sorted(root.rglob("*")):
-        if not file.is_file() or len(hits) >= MAX_SEARCH_HITS:
-            continue
-        try:
-            rel = file.relative_to(root).as_posix()
-            # 黑名单目录整树跳过（含 .venv 几万文件——不跳会搜到天荒地老）
-            if any(rel == b or rel.startswith(b + "/") for b in _BLACKLIST_DIRS) or ".git" in file.parts:
-                continue
-            # 敏感文件跳过（评审修复轮）：.env 等文件级黑名单此前只挡
-            # read_file 的路径解析，search_code 直接 rglob 绕过了它——
-            # 密钥文件的内容会随命中行吐给模型。与 _resolve_in_workspace
-            # 的 _BLACKLIST_PARTS 同一清单（不 import 那个函数：解析语义不同）
-            if any(part in _BLACKLIST_PARTS for part in Path(rel).parts) or rel.startswith(".env"):
-                continue
-            if file.stat().st_size > MAX_FILE_BYTES:
-                continue
-            text = file.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue
+    file_counts: list[tuple[str, int]] = []   # 计数模式：每文件命中数
+    line_hits: list[str] = []                  # 行级模式：文件:行号:内容
+    for rel, text in _iter_searchable_text(root):
+        if show_lines and len(line_hits) >= MAX_SEARCH_HITS:
+            break
+        count = 0
         for lineno, line in enumerate(text.splitlines(), 1):
             if regex.search(line):
-                hits.append(f"{rel}:{lineno}: {line.strip()[:120]}")
-                if len(hits) >= MAX_SEARCH_HITS:
-                    break
-    if not hits:
+                count += 1
+                if show_lines and len(line_hits) < MAX_SEARCH_HITS:
+                    line_hits.append(f"{rel}:{lineno}: {line.strip()[:120]}")
+        if count:
+            file_counts.append((rel, count))
+
+    if not file_counts:
         return "没有命中（可换关键词，或确认文件在项目内）"
-    return f"命中 {len(hits)} 处：\n" + "\n".join(hits)
+    if show_lines:
+        out = f"命中 {len(line_hits)} 处：\n" + "\n".join(line_hits)
+        if sum(c for _, c in file_counts) > len(line_hits):
+            out += f"\n〔命中超 {MAX_SEARCH_HITS} 处已截断，请用更具体的模式缩小范围〕"
+        return out
+    total = sum(c for _, c in file_counts)
+    listing = [f"{rel}（{count} 处）" for rel, count in file_counts[:MAX_SEARCH_HITS]]
+    out = f"{len(file_counts)} 个文件命中，共 {total} 处：\n" + "\n".join(listing)
+    if len(file_counts) > MAX_SEARCH_HITS:
+        out += f"\n〔仅列前 {MAX_SEARCH_HITS} 个文件〕"
+    return out + "\n〔需要行级内容时重搜并加 show_lines=true〕"
 
 
 def _list_dir(path: str = ".", *, root: Path = WORKSPACE_ROOT) -> str:
@@ -187,30 +233,31 @@ def register_file_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     root = ctx.workspace_root   # 闭包捕获（非循环变量，无 B023 风险）
     registry.register(Tool(
         name="read_file",
-        description="读取项目工作区里的文件（代码/文档/配置），按行窗口分页。先 search_code 定位或 list_dir 浏览，再读目标文件。",
+        description="读取项目工作区里的文件（代码/文档/配置），按行窗口分页（默认 100 行，返回带上下方余量与续读指示）。先 search_code 定位或 list_dir 浏览，再读目标文件。",
         parameters={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "项目内相对路径，如 src/agent/loop.py 或 docs/architecture.md"},
                 "offset": {"type": "integer", "description": "起始行号（从 1 起），默认 1"},
-                "limit": {"type": "integer", "description": "读取行数，默认 200"},
+                "limit": {"type": "integer", "description": "读取行数，默认 100"},
             },
             "required": ["path"],
         },
-        func=lambda path, offset=1, limit=200: _read_file(path, int(offset), int(limit), root=root),
+        func=lambda path, offset=1, limit=DEFAULT_READ_LIMIT: _read_file(path, int(offset), int(limit), root=root),
         is_readonly=True,
     ))
     registry.register(Tool(
         name="search_code",
-        description="在项目全部代码/文档里按正则搜索，返回 文件:行号:行内容。找「某函数定义在哪」「谁调用了 X」时用它定位，再用 read_file 读上下文。",
+        description="在项目全部代码/文档里按正则搜索。默认只回命中的文件清单+每文件命中计数（防宽搜喷爆上下文）；需要行级内容时把 show_lines 设为 true，回 文件:行号:行内容。找「某函数定义在哪」「谁调用了 X」时用它定位，再用 read_file 读上下文。",
         parameters={
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "正则表达式（搜字面量直接写，特殊字符需转义），如 'def run_turn'、'memory|session'"},
+                "show_lines": {"type": "boolean", "description": "true=回行级明细（文件:行号:内容），默认 false 只回文件清单+命中计数"},
             },
             "required": ["pattern"],
         },
-        func=lambda pattern: _search_code(pattern, root=root),
+        func=lambda pattern, show_lines=False: _search_code(pattern, bool(show_lines), root=root),
         is_readonly=True,
     ))
     registry.register(Tool(

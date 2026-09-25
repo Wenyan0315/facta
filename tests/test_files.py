@@ -61,6 +61,26 @@ def test_read_file_paging(tmp_path):
     assert "offset=11" in out               # 教模型怎么续读
 
 
+def test_read_file_window_indicators(tmp_path):
+    # 037 P1：窗口上下方余量显式指示（SWE-agent ACI 式）
+    (tmp_path / "big.py").write_text("\n".join(f"line{i}" for i in range(1, 51)), encoding="utf-8")
+
+    out = _read_file("big.py", offset=21, limit=10, root=tmp_path)
+    assert "显示第 21~30 行" in out
+    assert "上方还有 20 行" in out and "下方还有 20 行" in out
+    assert "line20" not in out and "line31" not in out
+
+    full = _read_file("big.py", limit=100, root=tmp_path)
+    assert "上方" not in full and "下方" not in full   # 全文件无窗口指示
+
+    # 037 P2：空文件显式标记
+    (tmp_path / "empty.py").write_text("", encoding="utf-8")
+    assert "空文件" in _read_file("empty.py", root=tmp_path)
+
+    # offset 越界显式报错而非静默回全量
+    assert "超出文件范围" in _read_file("big.py", offset=99, root=tmp_path)
+
+
 def test_read_file_missing_and_binary(tmp_path):
     assert "不存在" in _read_file("nope.py", root=tmp_path)
     (tmp_path / "blob.bin").write_bytes(b"\x00\xff\xfe")
@@ -71,9 +91,16 @@ def test_search_code_finds_and_formats(tmp_path):
     (tmp_path / "a.py").write_text("def run_turn():\n    pass\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("x = 1\n", encoding="utf-8")
 
+    # 037 P3：默认只回文件清单+命中计数，不回行内容
     out = _search_code("run_turn", root=tmp_path)
-    assert "a.py:1: def run_turn():" in out
+    assert "a.py（1 处）" in out
+    assert "def run_turn" not in out
     assert "b.py" not in out                # 未命中文件不出现
+
+    # 行级明细需显式二次展开
+    lines_out = _search_code("run_turn", show_lines=True, root=tmp_path)
+    assert "a.py:1: def run_turn():" in lines_out
+
     assert "没有命中" in _search_code("不存在的符号xyz", root=tmp_path)
 
 

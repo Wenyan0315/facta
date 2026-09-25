@@ -71,7 +71,8 @@ def test_reviewer_drops_fabricated_entries(tmp_path):
         ),
         Message(
             role="assistant",
-            content='[{"category": "constraints", "content": "项目路径统一放 paths.py 管理"}]',
+            content='[{"category": "constraints", "content": "项目路径统一放 paths.py 管理",'
+            ' "verified": true}]',
         ),
     ]
     llm = ScriptedLLM(script)
@@ -183,7 +184,7 @@ def test_no_new_dialogue_skips_without_llm_call(tmp_path):
 
 def test_entries_are_capped_and_deduped(tmp_path):
     """条数上限 + 批内去重：程序管形状（模型吐 8 条也只落 5 条）。"""
-    items = [{"category": "constraints", "content": f"约束条目 {i}"} for i in range(8)]
+    items = [{"category": "constraints", "content": f"约束条目 {i}", "verified": True} for i in range(8)]
     items.append({"category": "constraints", "content": "约束条目 0"})   # 批内重复
     script = [
         Message(role="assistant", content=json.dumps(items, ensure_ascii=False)),
@@ -205,7 +206,7 @@ def _both_scope_script() -> list[Message]:
     """萃取与审查都放行两条：一条项目级、一条用户级（阳澄湖同款）。"""
     entries = json.dumps(
         [
-            {"category": "constraints", "content": "搜索结果需按目的地核对", "scope": "project"},
+            {"category": "constraints", "content": "搜索结果需按目的地核对", "scope": "project", "verified": True},
             {"category": "other", "content": "用户偏好行程室内外交错排", "scope": "user"},
         ],
         ensure_ascii=False,
@@ -255,7 +256,7 @@ def test_sensitive_entries_never_land(tmp_path):
             {"category": "other", "content": "用户的 key 是 sk-abc123def456ghi789jkl012"},
             {"category": "other", "content": "用户身份证号 110101199003077777"},
             {"category": "other", "content": "用户手机号 13800138000"},
-            {"category": "constraints", "content": "合法的项目约束条目"},
+            {"category": "constraints", "content": "合法的项目约束条目", "verified": True},
         ],
         ensure_ascii=False,
     )
@@ -314,3 +315,59 @@ def test_user_memory_known_fed_to_extract_prompt(tmp_path):
     extract_input = llm.calls[0][-1].content
     assert "用户偏好全景到细节的讲解" in extract_input
     assert "user.md（用户记忆）" in extract_input
+
+
+# ---------- P0-7 验证过的经验优先（LongHorizon：自我反思给廉价教训） ----------
+
+
+def test_unverified_lessons_become_candidates(tmp_path):
+    """缺客观背书的教训（project/constraints）降级为候选不落盘，报告待人确认；
+    decisions/other 不适用降级（用户拍板与硬事实本身即权威来源）。"""
+    entries = json.dumps(
+        [
+            {"category": "constraints", "content": "agent 自我总结的教训"},          # → 候选
+            {"category": "constraints", "content": "测试全过的经验", "verified": True},  # → 入库
+            {"category": "decisions", "content": "用户拍板用 SQLite"},                # → 入库（不受限）
+        ],
+        ensure_ascii=False,
+    )
+    script = [
+        Message(role="assistant", content=entries),
+        Message(role="assistant", content=entries),   # 审查全放行（测的是硬校验分流）
+    ]
+    llm = ScriptedLLM(script)
+    session = _session(_dialogue())
+
+    report = consolidate(session, llm, tmp_path / "learned")
+
+    assert "新增 2 条" in report
+    assert "已验证 1 条" in report
+    assert "1 条教训缺客观背书降为候选（待确认）" in report
+    assert "agent 自我总结的教训" in report            # 候选内容列出供二次确认
+    constraints = (tmp_path / "learned" / "constraints.md").read_text(encoding="utf-8")
+    assert "测试全过的经验" in constraints
+    assert "自我总结" not in constraints               # 缺背书的教训不落盘
+    # 背书占比事后可度量：verified 条目行内带 [已验证] 前缀
+    assert "[已验证] 测试全过的经验" in constraints
+    decisions = (tmp_path / "learned" / "decisions.md").read_text(encoding="utf-8")
+    assert "用户拍板用 SQLite" in decisions
+
+
+def test_all_candidates_reported_when_nothing_written(tmp_path):
+    """候选全数降级、零入库时：文案如实说无入库 + 候选清单，不算「审查驳回」。"""
+    entries = json.dumps(
+        [{"category": "constraints", "content": "没背书也别瞎记"}],
+        ensure_ascii=False,
+    )
+    script = [
+        Message(role="assistant", content=entries),
+        Message(role="assistant", content=entries),
+    ]
+    llm = ScriptedLLM(script)
+    session = _session(_dialogue())
+
+    report = consolidate(session, llm, tmp_path / "learned")
+
+    assert "未写入" in report
+    assert "降为候选（待确认）" in report
+    assert not (tmp_path / "learned").exists()
