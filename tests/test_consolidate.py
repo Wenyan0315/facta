@@ -371,3 +371,88 @@ def test_all_candidates_reported_when_nothing_written(tmp_path):
     assert "未写入" in report
     assert "降为候选（待确认）" in report
     assert not (tmp_path / "learned").exists()
+
+
+# ---------- ADR 045 易腐事实不进 learned（第二道代码闸门） ----------
+
+
+def test_perishable_facts_blocked_but_reported(tmp_path):
+    """含行号/计数/跟踪状态的条目不落盘，但原文进报告——稳定部分（文件路径）
+    值得保留，人要看到原文才能剥掉易腐尾巴手工入库；静默弃 = 信息全丢。"""
+    entries = json.dumps(
+        [
+            {"category": "other", "content": "run_turn 在 loop.py 第 113 行"},
+            {"category": "other", "content": "笔记库当前共 14 篇"},
+            {"category": "other", "content": "loop.py 尚未被 git 跟踪"},
+            {"category": "other", "content": "run_turn 的循环体在 loop.py"},   # 稳定 → 入库
+        ],
+        ensure_ascii=False,
+    )
+    script = [Message(role="assistant", content=entries)] * 2
+    llm = ScriptedLLM(script)
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
+    assert "循环体在 loop.py" in other          # 稳定条目照常入库
+    assert "第 113 行" not in other
+    assert "共 14 篇" not in other
+    assert "尚未被 git 跟踪" not in other
+    assert "新增 1 条" in report                # 易腐条目不算入库也不算「审查驳回」
+    assert "3 条含易腐事实" in report
+    assert "run_turn 在 loop.py 第 113 行" in report   # 原文报出供人工剥离
+
+
+def test_perishable_gate_does_not_overreach(tmp_path):
+    """闸门保守：只拦明确形态，不拦裸数字——「三层」「7–10 天」「最多 5 条」
+    都是稳定事实，误杀等于把正常记忆挡在门外。"""
+    entries = json.dumps(
+        [
+            {"category": "other", "content": "架构分三层：core / memory / orchestrator"},
+            {"category": "other", "content": "气象预报的有效窗口约 7–10 天"},
+            {"category": "other", "content": "每次固化最多产出 5 条"},
+            {"category": "other", "content": "不跟踪用户的地理位置"},
+        ],
+        ensure_ascii=False,
+    )
+    script = [Message(role="assistant", content=entries)] * 2
+    llm = ScriptedLLM(script)
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    assert "新增 4 条" in report
+    assert "易腐" not in report
+    other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
+    for text in ("架构分三层", "7–10 天", "最多产出 5 条", "不跟踪用户的地理位置"):
+        assert text in other
+
+
+# ---------- ADR 045 冗余的对照物：基础 prompt 进「已知记忆」 ----------
+
+
+def test_base_prompt_enters_known_material(tmp_path):
+    """此前「与 system prompt 重复」这类冗余在原理上查不出来——不是模型不守
+    纪律，是它手上没那份材料。装配层传 DEFAULT_SYSTEM_PROMPT 补上对照物。"""
+    learned = tmp_path / "learned"
+    learned.mkdir(parents=True)
+    llm = ScriptedLLM([Message(role="assistant", content="[]")] * 2)
+
+    consolidate(_session(_dialogue()), llm, learned,
+                base_prompt="唯一标识串-XYZ：search_notes 搜知识库内容")
+
+    extract_input = llm.calls[0][-1].content
+    assert "基础人设与工具清单（每轮已注入，不要再记）" in extract_input
+    assert "唯一标识串-XYZ" in extract_input
+
+
+def test_no_base_prompt_keeps_prior_behaviour(tmp_path):
+    """默认空 = 改动前行为逐字相同（16 处测试调用点与旧装配路径不受影响）。"""
+    learned = tmp_path / "learned"
+    learned.mkdir(parents=True)
+    llm = ScriptedLLM([Message(role="assistant", content="[]")] * 2)
+
+    consolidate(_session(_dialogue()), llm, learned)
+
+    extract_input = llm.calls[0][-1].content
+    assert "基础人设与工具清单" not in extract_input
+    assert "（暂无）" in extract_input          # 无 learned 条目、无 user.md、无 base_prompt

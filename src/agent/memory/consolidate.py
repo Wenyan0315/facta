@@ -12,7 +12,8 @@ M6.5 之前用户级信息「一律不记」是红线（仓库外位置没建，
   ② 审查   二次调用对照原文踢掉编造（critic 第一次值班：挂在不可逆写入前）；
            用户级条目从宽：证据不够直接即弃（跨项目影响所有会话，污染代价高）
   ③ 硬校验 程序管形状：作用域/类别白名单 / 条数上限 / 单条长度 / 敏感凭证
-           禁令 / JSON 容错——信模型的部分是语义，不信的部分全都交给代码
+           禁令 / 易腐事实禁令（ADR 045）/ JSON 容错——信模型的部分是语义，
+           不信的部分全都交给代码
   ④ 落盘   项目级 append 到 data/learned/{类别}.md；用户级 append 到
            user.md（同款行格式，读侧零翻译）；时间戳由程序加（不信模型）
 
@@ -49,6 +50,20 @@ _SENSITIVE_PATTERNS = (
     re.compile(r"\b(?:\d{3}-\d{4}-\d{4}|\d{11})\b"),  # 手机号（带分隔/裸 11 位）
 )
 
+# 易腐事实禁令（ADR 045，与敏感凭证同族的第二道代码闸门）：几天内就会失效、
+# 且系统无机制发现（固化只追加、无校验、无过期）的形态。实证：other.md 记的
+# 「run_turn 第 113 行、共 227 行」9 天后现实是第 340 行、共 501 行。
+# 匹配保守（只拦明确形态，不拦裸数字）：「架构分三层」「窗口约 7–10 天」
+# 「最多 5 条」都不含下列模式，不误杀。第一道闸门是提示词负面清单（带理由，
+# 能泛化到未列举的形态），这里只兜住最常见的写法。
+_PERISHABLE_PATTERNS = (
+    re.compile(r"第\s*\d+\s*行"),                      # 行号
+    re.compile(r"共\s*\d+\s*(?:行|篇|条|个|字|文件)"),   # 会随演进的计数
+    # git 跟踪状态（真实写法是「尚未被 git 跟踪」，故容一个 git 词）。不含
+    # 「不跟踪」：那会误杀「不跟踪用户位置」这类偏好条目
+    re.compile(r"(?:未|已)(?:被)?(?:\s*git\s*)?跟踪"),
+)
+
 EXTRACT_TEMPLATE = """你是个人 agent 的「记忆档案员」。下面是本会话的复盘材料。
 你的任务：把对话中值得跨会话记住的信息提炼成记忆条目，并标注作用域。
 
@@ -64,14 +79,20 @@ EXTRACT_TEMPLATE = """你是个人 agent 的「记忆档案员」。下面是本
 1. 只提炼对话中明确出现过的内容，禁止补全、推断、联想、美化
 2. 密码、API key、身份证号、手机号等敏感凭证一律不记（任何作用域都不记）
 3. 每条只记一个事实，一句话说清，不超过 80 字
-4. 三问过滤：跨会话还成立吗？以后大概率用得上吗？「已知记忆」里没记过吗？
+4. 三问过滤：跨会话还成立吗？以后大概率用得上吗？「已知记忆」（含基础人设与
+   工具清单——那部分每轮都已注入，再记就是双份噪音）里没记过吗？
    任一答案为否 → 丢弃
-5. 最多 {max_entries} 条，宁缺毋滥
-6. 每条标注 verified（P0-7）：条目所依据的事实有客观背书——对话中出现
+5. 易腐事实不记：行号、文件行数、git 跟踪状态、「当前共 N 篇」这类会随演进的
+   计数一律不记——它们几天就失效，而记忆只追加、不校验、不过期，入库后没有
+   任何机制能发现，模型还会当真引用错答案。要记就只记稳定部分：文件路径、
+   文件名、决定本身。同理「某时刻的待办/缺口/查询结果」也不记（价值随该时刻
+   过去而归零，如「等 9/20 后再查」「某文件待补」）
+6. 最多 {max_entries} 条，宁缺毋滥
+7. 每条标注 verified（P0-7）：条目所依据的事实有客观背书——对话中出现
    测试通过、git 状态、工具验证结果等可复核证据 → true；纯口头结论、
    agent 自我总结的教训 → false
 
-已知记忆（已有条目，不要再重复记；两段分别是项目桶与用户记忆）：
+已知记忆（下面这些已经生效或已经记过，不要再重复记）：
 {known}
 
 对话复盘材料：
@@ -120,11 +141,18 @@ def _transcript(session: Session, window: int) -> str:
     return "\n".join(parts)
 
 
-def _load_known(learned_dir: Path, user_memory_path: Path | None) -> str:
+def _load_known(learned_dir: Path, user_memory_path: Path | None,
+                base_prompt: str = "") -> str:
     """把已固化的全部条目读出来当「已知记忆」——写前比对的 v1 是提示词级。
 
     M6.5：两段拼装——项目桶 + 用户记忆（去重范围跨作用域：同一事实
     两边都记是双份噪音）。user_memory_path=None（未配置/测试）只读项目桶。
+
+    base_prompt（ADR 045）：基础人设与工具清单也进对照材料。此前缺这段导致
+    一类冗余在原理上查不出来——「与 system prompt 重复的条目」（如实证过的
+    语义/逐字检索区分、历史压缩用 search_history）。由上层传入而非这里 import：
+    agent.py 已 import 本模块（CATEGORIES），反向引用会循环 import 且违反分层
+    （memory 是下层）。默认空 = 改动前行为。
     """
     parts = []
     if learned_dir.is_dir():
@@ -132,6 +160,8 @@ def _load_known(learned_dir: Path, user_memory_path: Path | None) -> str:
             parts.append(f"== {path.name} ==\n{path.read_text(encoding='utf-8')}")
     if user_memory_path is not None and user_memory_path.is_file():
         parts.append(f"== user.md（用户记忆）==\n{user_memory_path.read_text(encoding='utf-8')}")
+    if base_prompt.strip():
+        parts.append("== 基础人设与工具清单（每轮已注入，不要再记）==\n" + base_prompt.strip())
     return "\n".join(parts) if parts else "（暂无）"
 
 
@@ -162,10 +192,21 @@ def _is_sensitive(content: str) -> bool:
     return any(p.search(content) for p in _SENSITIVE_PATTERNS)
 
 
-def _harden(items: list[dict]) -> tuple[list[Entry], list[Entry]]:
+def _is_perishable(content: str) -> bool:
+    """易腐事实检测（ADR 045）。与敏感检测同款保守方向，但代价不同：
+    敏感是隐私泄漏，易腐是**污染用户资产且不可逆**（固化只追加、无过期），
+    且模型会当真引用错答案——消融首轮就有一题因腐化条目答错方向。"""
+    return any(p.search(content) for p in _PERISHABLE_PATTERNS)
+
+
+def _harden(items: list[dict]) -> tuple[list[Entry], list[Entry], list[Entry]]:
     """程序侧硬校验：形状归代码管，语义才归提示词管。
 
     - 敏感凭证：弃（任何作用域——这是落盘前的最后一道闸）
+    - 易腐事实（ADR 045）：弃但**报出原文**——条目的稳定部分（如「run_turn 在
+      loop.py」）可能值得保留，人看到原文才能剥掉易腐尾巴手工入库；静默弃
+      等于信息全丢。不复用 candidates 通道：那条的文案语义是「教训缺客观
+      背书」（P0-7），两个原因混报会让人误判
     - scope 非法：归 project（写错位置的保守方向：用户级错进项目桶是
       分类噪音，反向是隐私泄漏）
     - category 白名单垃圾桶、批内去重：M6.4 原样
@@ -175,10 +216,11 @@ def _harden(items: list[dict]) -> tuple[list[Entry], list[Entry]]:
       权威来源。verified 判定严格（恒等 True）：模型输出 "true" 字符串
       也算无背书，保守方向=降级候选
 
-    返回 (入库条目, 降级候选)。
+    返回 (入库条目, 缺背书候选, 易腐拦截)。
     """
     entries: list[Entry] = []
     candidates: list[Entry] = []
+    perishable: list[Entry] = []
     seen: set[str] = set()
     for item in items[:MAX_ENTRIES_PER_RUN]:
         category = str(item.get("category", "other"))
@@ -197,11 +239,13 @@ def _harden(items: list[dict]) -> tuple[list[Entry], list[Entry]]:
         seen.add(content)
         entry = Entry(category=category, content=content, scope=scope,
                       verified=item.get("verified") is True)
-        if scope == "project" and category == "constraints" and not entry.verified:
+        if _is_perishable(content):
+            perishable.append(entry)
+        elif scope == "project" and category == "constraints" and not entry.verified:
             candidates.append(entry)
         else:
             entries.append(entry)
-    return entries, candidates
+    return entries, candidates, perishable
 
 
 def _append(entries: list[Entry], learned_dir: Path, user_memory_path: Path | None) -> list[str]:
@@ -237,6 +281,17 @@ def _append(entries: list[Entry], learned_dir: Path, user_memory_path: Path | No
     return written
 
 
+def _brief(items: list[Entry], reason: str) -> str:
+    """拦截简报片段：报出原文（最多 3 条）——静默弃等于信息全丢，人要看到原文
+    才能判断哪部分值得手工入库。空列表返回空串，调用点直接相加。"""
+    if not items:
+        return ""
+    shown = "；".join(e.content for e in items[:3])
+    if len(items) > 3:
+        shown += f" 等 {len(items)} 条"
+    return f"；{len(items)} 条{reason}：{shown}"
+
+
 def consolidate(
     session: Session,
     llm: LLM,
@@ -244,11 +299,15 @@ def consolidate(
     since: int = 0,
     window: int = WINDOW,
     user_memory_path: Path | None = None,
+    base_prompt: str = "",
 ) -> str:
     """退出复盘主入口。since = 本次启动时的消息数——无新对话则不白烧 LLM。
 
     user_memory_path（M6.5）：None=未配置用户级位置，user 条目照 v1 行为
     丢弃（防御默认；CLI/Web 装配层恒传 paths.user_memory_path()）。
+
+    base_prompt（ADR 045）：基础人设与工具清单，进「已知记忆」当冗余对照物；
+    装配层传 DEFAULT_SYSTEM_PROMPT（见 _load_known 的依赖方向说明）。
     """
     if not any(m.role == "user" for m in session.messages[since:]):
         return "记忆固化：本轮无新对话，跳过复盘"
@@ -259,7 +318,7 @@ def consolidate(
 
     extract_prompt = EXTRACT_TEMPLATE.format(
         max_entries=MAX_ENTRIES_PER_RUN,
-        known=_load_known(learned_dir, user_memory_path),
+        known=_load_known(learned_dir, user_memory_path, base_prompt),
         transcript=transcript,
     )
     raw, extract_ok = _parse_json_array(
@@ -279,15 +338,13 @@ def consolidate(
     )
     if not review_ok:
         return "记忆固化：审查输出无法解析（坏 JSON），未写入"
-    entries, candidates = _harden(kept)
+    entries, candidates, perishable = _harden(kept)
 
-    # P0-7 候选简报：缺背书的教训不落盘，列出来待人二次确认
-    brief = ""
-    if candidates:
-        shown = "；".join(e.content for e in candidates[:3])
-        if len(candidates) > 3:
-            shown += f" 等 {len(candidates)} 条"
-        brief = f"；{len(candidates)} 条教训缺客观背书降为候选（待确认）：{shown}"
+    # 两类拦截都报出原文（P0-7 缺背书候选 / ADR 045 易腐），原因分开说不混报
+    brief = (
+        _brief(candidates, "教训缺客观背书降为候选（待确认）")
+        + _brief(perishable, "含易腐事实（行号/计数/跟踪状态）已拦，要保留请剥掉易腐部分手工入库")
+    )
 
     # 未配置用户级位置：user 条目丢弃（v1 行为），文案如实说——不算驳回
     dropped_unplaced = 0
@@ -307,7 +364,8 @@ def consolidate(
     n_verified = sum(1 for e in entries if e.verified)
     report = (
         f"记忆固化：新增 {len(entries)} 条（已验证 {n_verified} 条，"
-        f"驳回 {len(raw) - len(entries) - len(candidates)} 条）→ {', '.join(written)}"
+        f"驳回 {len(raw) - len(entries) - len(candidates) - len(perishable)} 条）"
+        f"→ {', '.join(written)}"
     )
     if n_user:
         report += f"（其中用户级 {n_user} 条 → {user_memory_path}）"

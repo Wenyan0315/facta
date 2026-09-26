@@ -36,7 +36,7 @@ from agent.memory.consolidate import consolidate
 from agent.memory.store import Session, SessionStore, derive_title
 from agent.memory.title import summarize_title
 from agent.memory.todos import TodoStore
-from agent.orchestrator.agent import Agent, build_default_agent
+from agent.orchestrator.agent import DEFAULT_SYSTEM_PROMPT, Agent, build_default_agent
 from agent.paths import (
     GRAPH_PATH,
     LEARNED_DIR,
@@ -174,6 +174,9 @@ def settle_session(
             LEARNED_DIR,
             since=since,
             user_memory_path=user_memory_path(),
+            # ADR 045：基础 prompt 当冗余对照物（memory 层不能反向 import
+            # orchestrator——agent.py 已 import consolidate，会循环）
+            base_prompt=DEFAULT_SYSTEM_PROMPT,
         )
         # 游标只在固化没抛异常时推进：失败就下轮重来，宁可重复萃取也不丢记忆
         session.consolidated_upto = len(session.messages)
