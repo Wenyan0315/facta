@@ -24,6 +24,12 @@ data/checkpoints/
 data/worktrees/
 servers/sandbox/
 
+# 实机跑出来的笔记产物（不属人工策展的语料库；逐篇点名，等有命名约定再收口）
+data/notes/阿里巴巴股价分析报告-2026年9月24日.md
+
+# IDE / agent 工作区规则
+.trae/
+
 # 系统文件
 .DS_Store
 
