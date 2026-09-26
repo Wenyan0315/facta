@@ -123,12 +123,15 @@ class GraphStore:
             merged = GraphNode(
                 id=name,
                 type=existing.type or type_,
-                aliases=tuple(set(existing.aliases) | set(aliases)),
+                # dict.fromkeys 保序去重（不用 set：set 无序会让 graph.json
+                # 每次重建都产生 aliases 换序的噪声 diff，且换序不可复现）。
+                # 已有别名在前 → 增量同步时老顺序不动，新别名追加末尾。
+                aliases=tuple(dict.fromkeys([*existing.aliases, *aliases])),
             )
             self.nodes[name] = merged
             self._index_names(merged)
             return merged
-        node = GraphNode(id=name, type=type_, aliases=tuple(set(aliases)))
+        node = GraphNode(id=name, type=type_, aliases=tuple(dict.fromkeys(aliases)))
         self.nodes[name] = node
         self._index_names(node)
         return node

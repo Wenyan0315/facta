@@ -69,7 +69,9 @@ def test_add_node_merges_aliases_idempotently():
     g.add_node("RAG", "概念", ("检索增强生成",))
     merged = g.add_node("RAG", "技术", ("RAG技术",))
     assert merged.type == "概念"          # 先到的类型不被覆盖
-    assert set(merged.aliases) == {"检索增强生成", "RAG技术"}
+    # 断言顺序而非 set 相等：graph.json 是跟踪文件，别名换序 = 每次重建
+    # 都出噪声 diff（曾用 set 合并，顺序随机）。老别名在前，新别名追加末尾。
+    assert merged.aliases == ("检索增强生成", "RAG技术")
 
 
 # ---------- 实体对齐（resolve） ----------
