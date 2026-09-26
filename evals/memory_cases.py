@@ -6,8 +6,8 @@ build_default_agent 的 _learned_block/_user_memory_block 注入进 prompt——
 够不着，learned 目录不在语料源里）。这正是 B 路消融的对照点：
   有记忆（learned_dir=真目录）→ 答得出；无记忆（learned_dir=None）→ 答不出。
 
-题目来源：data/learned 现有 24 条逐条人工盘点，**13 条可反推**（答案稳定的事实），
-**11 条剔除**，剔除分两类（清单在文件末尾对账，防「挑着出」）：
+题目来源：data/learned 现有 24 条逐条人工盘点，**12 条可反推**（答案稳定的事实），
+**12 条剔除**，剔除分三类（清单在文件末尾对账，防「挑着出」）：
   ① 过期临时状态（价值已随时间归零，考了反而奖励「记住该忘的」）
   ② **已腐化的易腐事实**——首轮跑测时实证：other.md「run_turn 在 loop.py 第 113 行，
      该文件共 227 行」（2026-09-17）对照现实是**第 340 行、共 501 行**，两个数字全错。
@@ -16,7 +16,14 @@ build_default_agent 的 _learned_block/_user_memory_block 注入进 prompt——
      只留文件路径（行号/行数不再入库）。
      同批 o-terminal 的「（未跟踪）」注记也已腐化（该测试文件现已入 git），
      但两个文件路径仍正确，作为记忆召回题依然成立，保留。
+  ③ **与基础 prompt 冗余**（ADR 045 清理，2026-09-26）：条目内容每轮都已随
+     DEFAULT_SYSTEM_PROMPT 注入，无记忆组也答得出 → 该题不能区分记忆有无，
+     是道废题，剔除（见文末清单）。
 user.md 为空，本轮只测项目级三桶。
+
+注：文件头「24 条」是 **2026-09-26 ADR 045 清理前**的盘点口径；同日清理删掉了
+other.md 的 10 条（2 冗余 + 8 过期临时状态），存量条目已变，roadmap 8.7 记的
+通过率也是清理前测得的。
 
 每行 = (id, 问题, 答案指纹列表, 来源桶)。
 判定：回答含任一指纹即「用上了记忆」。指纹取条目里的独特短语，足够冷僻，
@@ -36,15 +43,21 @@ CASES: list[tuple[str, str, list[str], str]] = [
     ("c-session-trap", "run_turn 的 session 参数有个什么坑？", ["列表身份", "原地变异"], "constraints"),
     ("c-summarizer", "摘要压缩走的是哪条链？经不经过用户链的语义档？", ["内部链"], "constraints"),
     ("c-spawn-tools", "spawn_step 接受 tools 参数吗？工具限制要怎么写？", ["任务书"], "constraints"),
-    # ---- other（3 条，o-run-turn 因条目腐化剔除，见上）----
+    # ---- other（2 条，o-run-turn 因条目腐化剔除、o-two-search 因与基础 prompt
+    #      冗余剔除，均见上）----
     ("o-terminal", "终端工具的源码在哪个文件？对应的测试文件呢？", ["terminal.py", "test_terminal.py"], "other"),
     ("o-three-layer", "我们的架构分哪三层？", ["模型层", "工具层", "数据层"], "other"),
-    ("o-two-search", "search_notes 和 search_history 分别搜什么？", ["语义", "逐字"], "other"),
 ]
 
-# 剔除清单（11 条，对账用）：
+# 剔除清单（12 条，对账用）：
 # ① 已腐化易腐事实 1 条：run_turn 行号/文件行数（other，见文件头实证）
 # ② 过期临时状态 10 条：气象预报窗口、PHP 函数封装下一步、Agent 规划需求未明确、
 #    RAG.md 缺内容、RAG.md 待补、笔记库 14 篇盘点、spawn 检索 RAG 的用户要求、
 #    OAuth 未找到（以上 other 8 条）+ run_command 白名单确认、（constraints 已在
 #    C1-9 真机验收实测过，不重复考）。decisions 无剔除。
+# ③ 与基础 prompt 冗余 1 条（o-two-search 的来源条目，ADR 045 清理时删除）：
+#    「语义检索 search_notes 搜知识库内容，逐字检索 search_history 搜对话原话」
+#    与 DEFAULT_SYSTEM_PROMPT 的工具清单段重复，该 prompt 每轮注入 → 无记忆组
+#    也能答对，题目区分不出记忆有无。同批删除的另一条冗余（历史压缩后查原话用
+#    search_history）本就无对应题目。
+
