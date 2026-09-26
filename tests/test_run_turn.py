@@ -9,7 +9,12 @@ from agent.core.llm import LLM, ScriptedLLM, StreamChunk
 from agent.core.types import Message
 from agent.memory.store import Session
 from agent.orchestrator.agent import Agent
-from agent.orchestrator.loop import RunResult, run_turn
+from agent.orchestrator.loop import (
+    RunResult,
+    _is_dsml_leak,
+    _salvage_dsml_leak,
+    run_turn,
+)
 from agent.tools.registry import Tool, ToolRegistry
 
 
@@ -174,8 +179,9 @@ def test_dsml_leak_retry_recovers_to_tool_calls():
 
 
 def test_dsml_leak_persists_degrades_honestly():
-    # 1 次 + 2 次重试全是泄漏 → 没有第 4 次调用：超限按普通回答
-    # 诚实降级——泄漏文本原样入史（不装没事），用户至少看到真实输出
+    # 1 次 + 2 次重试全是泄漏 → 没有第 4 次调用：超限降级（ADR 047 甲案，
+    # 推翻 033 的「原样吐出」）——markup 截掉、明确告知哪个工具没执行成，
+    # 诚实降级仍成立，但用户不必再从裸格式串里刨内容
     llm = ScriptedLLM([
         Message(role="assistant", content=_DSML_SAMPLE),
         Message(role="assistant", content=_DSML_SAMPLE),
@@ -184,13 +190,133 @@ def test_dsml_leak_persists_degrades_honestly():
     session = Session()
     session.messages.append(Message(role="system", content="sys"))
 
-    result, reply = run_turn(session, "再试", llm=llm, agent=_leak_agent())
+    texts: list[str] = []
+    result, reply = run_turn(
+        session, "再试", llm=llm, agent=_leak_agent(), on_text=texts.append,
+    )
 
     assert result is RunResult.COMPLETED
     assert len(llm.calls) == 3            # 上限即停：1 + 2 次重试
-    assert reply is not None and reply.content == _DSML_SAMPLE
+    assert reply is not None
+    assert not _is_dsml_leak(reply)       # 降级后的消息不再是泄漏形态
+    assert "DSML" not in reply.content    # 裸标记一个字都不留
+    assert "finish_plan" in reply.content  # 明说丢失的工具名
+    assert "输出格式故障" in reply.content
+    assert any("输出格式故障" in t for t in texts)   # 流式侧同样被告知
     # user 之后直接是降级回答——泄漏轮的坏消息一条都不入史
     assert [m.role for m in session.messages] == ["system", "user", "assistant"]
+
+
+# ---------- 降级改写本身（ADR 047，对着落盘的真实样本设计） ----------
+
+# 三条真实样本（截自 data/evals/frozen-2026*.json，正文按需截短、markup 结构
+# 逐字保留）。选它们是因为泄漏有两型，修法必须同时成立：
+# 纯 markup 型（7/8 条）与混合型（1/8 条，前半是完好的自然语言回答）。
+_LEAK_FINISH_PLAN = (
+    '<｜｜DSML｜｜ calls>\n'
+    '<｜｜DSML｜｜ invoke name="finish_plan">\n'
+    '<｜｜DSML｜｜ parameter name="summary" string="true">'
+    '三步全部完成：①当前时间 2026-09-26 15:11:54（周六）；'
+    '②已添加待办 #1「记录当前时间」；③笔记库中 RAG 相关文件名只有 RAG.md。'
+    '</｜｜DSML｜｜ parameter>\n'
+    '</｜｜DSML｜｜ invoke>\n'
+    '</｜｜DSML｜｜ calls>'
+)
+_LEAK_EMPTY_PARAMS = (
+    '<｜｜DSML｜｜ calls>\n'
+    '<｜｜DSML｜｜ invoke name="list_notes">\n\n'
+    '</｜｜DSML｜｜ invoke>\n'
+    '</｜｜DSML｜｜ calls>'
+)
+_MIXED_PROSE = (
+    "数据齐了，我算一下两地比价，然后写笔记。\n\n"
+    "| 日期 | 港股 09988 收盘(港元) | 涨跌 |\n|---|---|---|\n"
+    "| 9/25 周五 | 108.40 | −1.45% |\n\n"
+    "周变动：港股自 9/18 收盘口径全周约 **−1.35%**。\n\n"
+    "现在写入笔记：\n\n"
+)
+_LEAK_MIXED = _MIXED_PROSE + (
+    '<｜｜DSML｜｜ calls>\n'
+    '<｜｜DSML｜｜ invoke name="write_note">\n'
+    '<｜｜DSML｜｜ parameter name="path" string="true">阿里巴巴股价分析.md'
+    '</｜｜DSML｜｜ parameter>\n'
+    '<｜｜DSML｜｜ parameter name="content" string="true">'
+    '# 阿里巴巴股价分析\n\n【免责声明】本文不构成投资建议。'
+    '</｜｜DSML｜｜ parameter>\n'
+    '</｜｜DSML｜｜ invoke>\n'
+    '</｜｜DSML｜｜ calls>'
+)
+
+
+def test_salvage_pure_markup_leaves_only_notice():
+    # 纯 markup 型（真实样本 7/8 条）：正文全在未执行的调用参数里，
+    # 截断后只剩告知——丢的是「没做成的事的参数」，不是交付物
+    out = _salvage_dsml_leak(
+        Message(role="assistant", content=_LEAK_FINISH_PLAN), None
+    )
+
+    assert not _is_dsml_leak(out)
+    assert out.content.startswith("【输出格式故障】")
+    assert "finish_plan" in out.content
+    # 参数里的 summary 正文不得冒充交付物（那是没执行成的收官陈述）
+    assert "三步全部完成" not in out.content
+
+
+def test_salvage_mixed_type_preserves_prose_verbatim():
+    # 混合型（真实样本 frozen-20260926T061616Z r1）：前半完好的行情表必须
+    # 逐字保住——一刀切截断会把局部故障升级成整轮零交付
+    out = _salvage_dsml_leak(Message(role="assistant", content=_LEAK_MIXED), None)
+
+    assert out.content.startswith(_MIXED_PROSE.rstrip())
+    assert "108.40" in out.content and "−1.35%" in out.content
+    assert not _is_dsml_leak(out)
+    assert "write_note" in out.content
+    # 没写进库的笔记正文不能留在回答里冒充交付物（这就是乙案被否的理由）
+    assert "免责声明" not in out.content
+    assert "阿里巴巴股价分析.md" not in out.content
+
+
+def test_salvage_empty_params_still_names_tool():
+    # 空参调用（真实样本 list_notes）：提不到参数也要能报出工具名
+    out = _salvage_dsml_leak(
+        Message(role="assistant", content=_LEAK_EMPTY_PARAMS), None
+    )
+
+    assert "list_notes" in out.content
+    assert not _is_dsml_leak(out)
+
+
+def test_salvage_dedups_repeated_tool_names():
+    # 同一批泄漏里同名工具多次调用（真实样本：web_search ×2）只报一次
+    two = _LEAK_EMPTY_PARAMS.replace("list_notes", "web_search")
+    out = _salvage_dsml_leak(
+        Message(role="assistant", content=two + "\n" + two), None
+    )
+
+    assert out.content.count("web_search") == 1
+
+
+def test_salvage_keeps_usage_and_emits_notice_to_stream():
+    # replace 而非原地改：token 账目要跟着走；告知经 on_text 外发，
+    # 流式视图与落盘至少「都说明了故障」
+    texts: list[str] = []
+    reply = Message(
+        role="assistant", content=_LEAK_FINISH_PLAN, usage={"total_tokens": 42}
+    )
+
+    out = _salvage_dsml_leak(reply, texts.append)
+
+    assert out.usage == {"total_tokens": 42}
+    assert reply.content == _LEAK_FINISH_PLAN      # 原消息没被悄悄改写
+    assert texts and "输出格式故障" in texts[0]
+    assert all("DSML" not in t for t in texts)     # 告知不含标记字面量
+
+
+def test_salvage_notice_never_contains_leak_markers():
+    # 拍板 4：告知里写了标记字面量，落盘记录会被自动化扫描再判成泄漏
+    for sample in (_LEAK_FINISH_PLAN, _LEAK_MIXED, _LEAK_EMPTY_PARAMS):
+        out = _salvage_dsml_leak(Message(role="assistant", content=sample), None)
+        assert "｜｜DSML｜｜" not in out.content
 
 
 def test_dsml_halfwidth_lookalike_not_treated_as_leak():

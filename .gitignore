@@ -22,6 +22,7 @@ data/todos.json
 data/audit/
 data/checkpoints/
 data/worktrees/
+data/evals/
 servers/sandbox/
 
 # 实机跑出来的笔记产物（不属人工策展的语料库；逐篇点名，等有命名约定再收口）

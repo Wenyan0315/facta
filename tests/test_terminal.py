@@ -5,7 +5,8 @@
   （防 cat x; rm y / git status && evil / $(…) 注入绕过）
 - 拒绝 = 不执行 + 回灌「换方案」提示 + 落审（批准与否都留痕）
 - 无 confirm 通道按拒绝处理（保守默认：没有眼睛就不动手）
-- run_command：exit code 回传 / 超时终止 / 输出截断 / cwd 锚定项目根
+- run_command：exit code 回传 / 超时终止 / 输出截断 / cwd 锚定项目根 /
+  非 UTF-8 输出降级为替换字符而不是炸掉整轮
 """
 
 import json
@@ -84,6 +85,54 @@ def test_dangerous_or_complex_commands_need_confirm(command):
     assert needs_confirm(command) is True
 
 
+# ---------- needs_confirm：凭证路径（049，优先级高于白名单）----------
+
+@pytest.mark.parametrize("command", [
+    # .env 一族：cat 的免确认特权在这里失效（048 只围了写，读侧曾全放开）
+    "cat .env",
+    "cat .env.local",
+    "head -20 .env.example",
+    "cat config/.env",
+    "grep API_KEY .env",
+    "diff .env .env.bak",
+    # home 凭证：沙箱不 deny read（会打断沙箱内 git 的 SSH 认证），全靠这层
+    "cat ~/.ssh/id_rsa",
+    "cat /Users/x/.ssh/id_ed25519",
+    "cat ~/.ssh/config",
+    "cat server.pem",
+    "cat keys/app.key",
+    "cat keys/id_rsa",                    # 私钥落在别处也认
+    "cat ~/.aws/credentials",
+    "cat ~/.netrc",
+    "cat ~/.npmrc",
+    "cat ~/.git-credentials",
+    # 等号形式：取右值再判（否则 --file=.env 会漏）
+    "tar --file=.env",
+])
+def test_credential_paths_need_confirm(command):
+    assert needs_confirm(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    # 误报口径（049 ADR）：读代码/读文档/列目录名都不该触发——白名单要防的
+    # 正是确认疲劳，凭证规则不能把它毁掉
+    "grep -r env src/",
+    "grep -rn os.environ src/",           # .environ 不是 .env
+    "cat docs/env.md",
+    "cat docs/environment.md",
+    "cat src/agent/env.py",
+    "ls .ssh",                            # 列目录名不泄内容
+    "cat keyboard.md",                    # .key 只认后缀不认词中
+    "cat monkey.py",
+    "ls -la",
+    "cat README.md",
+    "find . -name *.py",
+    "python -m pytest tests/ -q",
+])
+def test_non_credential_paths_stay_whitelisted(command):
+    assert needs_confirm(command) is False
+
+
 # ---------- _run_command 六用例 ----------
 
 def test_run_command_echo_and_exit_code():
@@ -114,6 +163,16 @@ def test_run_command_cwd_is_workspace_root():
     # 不断言目录名（本地 my_project1 / CI checkout 到 cortex-from-scratch——
     # 目录名假设是 CI 15 连红的另一个根因）
     assert str(WORKSPACE_ROOT) in _run_command("pwd")
+
+
+def test_run_command_survives_non_utf8_output():
+    """命令吐非 UTF-8 字节不能炸整轮——grep 二进制向量库是日常操作。
+
+    text=True 默认严格解码，UnicodeDecodeError 会一路冒到 loop 的工具兜底，
+    模型只看见「错误：并行执行失败」，输出全丢（比截断糟得多）。
+    """
+    out = _run_command("printf 'ok\\xff\\xfe tail\\n'")
+    assert "exit code: 0" in out and "ok" in out and "tail" in out
 
 
 # ---------- registry confirm 流 ----------

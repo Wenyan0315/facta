@@ -31,6 +31,7 @@ def test_happy_path_runs_bash_and_passes(tmp_path):
 
     assert result.passed is True
     assert result.steps == 1
+    assert result.commands == ["echo hello world > hello.txt"]   # 冻结集喂裁判的地面真值
     assert (tmp_path / "hello.txt").read_text() == "hello world\n"
     # 线性历史：点菜与工具结果都回灌（基线无投影/压缩，模型看见全过程）
     assert [m.role for m in llm.calls[-1]] == ["system", "user", "assistant", "tool"]

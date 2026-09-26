@@ -10,16 +10,26 @@
      ——两条同时满足才放行；为开发循环减负（防确认疲劳/狼来了效应）
   ③ 其余一律 confirm 回调裁决（CLI input / Web 弹窗），裁决权永远在用户
   ④ 超时 60s kill、输出截断、cwd 锚定项目根
+  ⑤ 进程级沙箱（048）：macOS seatbelt 写围栏——批准语义从「全机权限」
+     变为「围栏内跑」（写限项目根+TMPDIR；.env*、.git/hooks、.git/config、
+     记忆/审计/venv 等黑名单不可写）。确认弹窗不再是唯一防线；无后端
+     环境诚实降级原样跑 + 审计打标 off（CORTEX_SANDBOX=off 可强制关）
+  ⑥ 凭证双层围栏（049）：沙箱 deny read 围死 .env 一族（进程级硬挡，
+     cat/open 都拿不到内容）；home 凭证（~/.ssh/id_rsa、.pem、.aws 等）
+     不进沙箱 deny（会打断沙箱内 git 的 SSH 认证），改由 needs_confirm
+     的凭证模式一律弹窗——白名单免确认对凭证失效
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
 from agent.paths import WORKSPACE_ROOT
 from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
+from agent.tools.sandbox import wrap_command
 
 TIMEOUT_SECONDS = 60
 MAX_OUTPUT_CHARS = 6000          # stdout+stderr 合并截断（与 read_file 同纪律）
@@ -42,15 +52,43 @@ _DANGEROUS_ARGS: dict[str, frozenset[str]] = {
     "sort": frozenset({"-o", "--output"}),  # -o/--output 可覆盖任意文件
 }
 
+# 凭证路径模式（049）：命中即要确认，优先级高于白名单——`cat` 免确认对
+# `.env` 失效。只收「读了就等于泄漏」的几类；沙箱那边 deny read 只围 .env
+# 一族（home 凭证 deny read 会打断沙箱内 git 的 SSH 认证），这层补上缺口。
+# 误报口径（tests/test_terminal.py 钉住）：grep -r env src/、cat docs/env.md、
+# ls .ssh（列目录名不泄内容）都不触发。
+_CREDENTIAL_RE = re.compile(
+    r"(?:^|/)\.env"                       # .env / .env.local / .env.example
+    r"|\.ssh/"                            # ~/.ssh/xxx（裸目录名 .ssh 不算）
+    r"|(?:^|/)id_(?:rsa|ed25519)$"        # 落在别处的私钥
+    r"|\.(?:pem|key)$"
+    r"|\.aws/credentials"
+    r"|(?:^|/)\.(?:netrc|npmrc|git-credentials)$"
+)
+
+
+def _has_credential_path(command: str) -> bool:
+    """命令任一 token 是否指向凭证路径（049）。
+
+    token 级检查 + 等号形式取右值（--file=.env → .env），避免整串匹配
+    把无关文本误判成路径。
+    """
+    return any(
+        _CREDENTIAL_RE.search(token.rsplit("=", 1)[-1]) for token in command.split()
+    )
+
 
 def needs_confirm(command: str) -> bool:
-    """保守判定：白名单命令 且 无 shell 元字符 且 无危险参数 → 免确认；其余一律确认。
+    """保守判定：白名单命令 且 无 shell 元字符 且 无危险参数 且 不含凭证路径
+    → 免确认；其余一律确认。
 
     纯函数，绕过用例的测试靶子。拿不准就确认——误弹窗的代价是一次点击，
     误放行的代价不可控（保守默认与 Tool.is_readonly 同一哲学）。
 
     参数级校验（S4 评审 #17）：find -exec / sort -o 等只读命令名+
     危险参数仍可执行任意代码或覆盖文件，必须拦截。
+
+    凭证路径校验（049）：.env / 私钥一类命中即确认，优先级高于白名单。
     """
     if any(ch in _SHELL_META for ch in command):
         return True
@@ -67,6 +105,10 @@ def needs_confirm(command: str) -> bool:
         arg.split("=", 1)[0] in dangerous for arg in tokens[1:]
     ):
         return True
+    # 凭证路径拦截（049）：优先级高于白名单——cat/head 等免确认命令读 .env
+    # 或私钥同样要人裁决（048 只围了写，读侧全放开，注入载荷一条 cat 就穿）
+    if _has_credential_path(command):
+        return True
     if head in _WHITELIST_SIMPLE:
         return False
     if head == "git" and len(tokens) > 1 and tokens[1] in _GIT_READONLY:
@@ -82,14 +124,20 @@ def _run_command(command: str, *, root: Path = WORKSPACE_ROOT) -> str:
     root（S6a 注入化）：cwd 锚点——主 agent = 主工作区；子 agent = worktree。
     shell=True 是裁定不是疏忽：管道/重定向是日常刚需，危险面由白名单 +
     确认机制兜住，不在工具内做命令解析（那不归它管，且解析不全）。
+
+    048 沙箱：有后端时改为 argv 形式（sandbox-exec -p profile /bin/sh -c
+    command，shell=False——shell 语义由围栏内的 sh 承担）；无后端降级
+    走原 shell=True 路径，行为与从前完全一致。
     """
+    argv, _backend = wrap_command(command, root=root)
     try:
         proc = subprocess.run(
-            command,
-            shell=True,
+            argv if argv is not None else command,
+            shell=argv is None,
             cwd=root,
             capture_output=True,
             text=True,
+            errors="replace",   # 命令吐非 UTF-8 字节（grep 二进制库等）不能让整轮炸
             timeout=TIMEOUT_SECONDS,
             check=False,   # 非零退出码是回传给模型的信息，不是异常
         )
@@ -116,6 +164,12 @@ def register_terminal_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                 "在项目根目录执行一条 shell 命令（测试/脚本/git 查询等）。"
                 "只读白名单命令直接执行；其余命令会先请求用户确认，被拒绝时"
                 "换方案，不要重试同一命令。超时 60 秒，输出过长会被截断。"
+                "命令在写围栏内运行：项目目录之外、.env、.git/hooks 等位置"
+                "不可写，报 Operation not permitted 即围栏拦截，换项目内路径；"
+                "git init/clone 需写 .git/config 也不在围栏内跑，请用户代为执行。"
+                ".env 同样不可读（Operation not permitted），私钥/证书一类凭证"
+                "路径会触发用户确认；需要密钥或配置值时不要自己去读，"
+                "直接请用户提供或代为执行。"
             ),
             parameters={
                 "type": "object",
@@ -129,5 +183,6 @@ def register_terminal_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             },
             func=lambda command: _run_command(command, root=root),
             needs_confirmation=lambda args: needs_confirm(args["command"]),
+            sandboxed=True,   # 048：审计条目带 sandbox=seatbelt/off 标记
         )
     )

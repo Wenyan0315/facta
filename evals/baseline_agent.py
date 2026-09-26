@@ -6,6 +6,9 @@
   - 线性历史（无摘要/投影/计划/路由/记忆——项目机制一概不挂）
 基线故意极简：它就是「机制虚荣」的对照组，不复用项目内任何编排件。
 
+另一用法：`frozen_eval --baseline` 把冻结集的真任务喂给本基线（同一 worktree
+副本、同一 setup、同一把判分尺子，只有执行体不同）——机制的价值 = full 臂减 bash 臂。
+
 一键出分（仓库根）：
     .venv/bin/python -m evals.baseline_agent [--provider deepseek-flash] [--max-steps 15]
 
@@ -21,7 +24,7 @@ import json
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -58,6 +61,8 @@ class ScenarioResult:
     passed: bool
     steps: int            # 实际执行的 bash 批数（点菜轮数）
     note: str = ""
+    answer: str = ""      # 收尾那一轮的正文：冻结集要给基线臂打质量分，不能只留通过与否
+    commands: list[str] = field(default_factory=list)   # 实际执行过的命令（冻结集喂裁判的地面真值）
 
 
 def _bash(command: str, cwd: Path, timeout: int = 60) -> str:
@@ -65,7 +70,7 @@ def _bash(command: str, cwd: Path, timeout: int = 60) -> str:
     try:
         proc = subprocess.run(
             command, shell=True, cwd=cwd, capture_output=True,
-            text=True, timeout=timeout, check=False,
+            text=True, errors="replace", timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
         return f"error: command timed out (>{timeout}s)"
@@ -85,7 +90,8 @@ def run_scenario(
     setup = scenario.get("setup")
     if setup:
         proc = subprocess.run(
-            setup, shell=True, cwd=workdir, capture_output=True, text=True, check=False
+            setup, shell=True, cwd=workdir, capture_output=True,
+            text=True, errors="replace", check=False,
         )
         if proc.returncode != 0:
             return ScenarioResult(sid, False, 0, f"setup 失败：{proc.stderr.strip()[:200]}")
@@ -95,26 +101,30 @@ def run_scenario(
         Message(role="user", content=str(scenario["task"])),
     ]
     steps = 0
+    answer = ""
+    commands: list[str] = []
     for step in range(1, max_steps + 1):
         reply = llm.generate(messages, tools=_BASH_TOOL)
         if not reply.tool_calls:      # 模型认为做完了 → 收尾
+            answer = reply.content or ""
             break
         steps = step
         messages.append(reply)
         for tc in reply.tool_calls:
             command = json.loads(tc["arguments"] or "{}").get("command", "")
+            commands.append(str(command))
             messages.append(Message(
                 role="tool", tool_call_id=tc["id"], content=_bash(command, workdir)
             ))
 
     proc = subprocess.run(
         str(scenario["verify"]), shell=True, cwd=workdir,
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, errors="replace", check=False,
     )
     note = "" if proc.returncode == 0 else f"verify exit {proc.returncode}"
     if steps >= max_steps:
         note = (note + "；步数熔断").strip("；")
-    return ScenarioResult(sid, proc.returncode == 0, steps, note)
+    return ScenarioResult(sid, proc.returncode == 0, steps, note, answer, commands)
 
 
 def main(argv: list[str] | None = None) -> int:

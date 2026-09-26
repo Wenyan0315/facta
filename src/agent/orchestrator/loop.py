@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime
 from enum import Enum
 
@@ -57,6 +59,10 @@ _DSML_LEAK_HINT = (
     "意图已丢失。请重试：如需调用工具，通过标准 tool_calls 字段发起；"
     "如需作答，直接输出自然语言。正文中不要出现 <｜｜DSML｜｜ 等任何调用格式。"
 )
+# 降级时只从 markup 里提工具名、不提参数（ADR 047 拍板 3）：参数里可能装着
+# 几百字未执行成功的正文（实机样本：write_note 的整篇笔记），复述进告知
+# 等于把「没做成的事」当交付物端给用户
+_DSML_INVOKE_RE = re.compile(r'<｜｜DSML｜｜\s+invoke\s+name="([^"]+)"')
 
 # P0-6 无进展检测上限（LongHorizon 基线 agent 对无响应弹窗原地重试 400+
 # 步的形态）：连续完全相同的点菜批次达上限即熔断工具循环、事件升人审。
@@ -126,6 +132,50 @@ def _is_dsml_leak(reply: Message) -> bool:
     return any(m in content for m in _DSML_LEAK_MARKERS)
 
 
+def _dsml_leak_notice(lost: list[str]) -> str:
+    """降级告知文案——不得含泄漏标记字面量（ADR 047 拍板 4）。
+
+    写了字面量，落盘记录里就会再出现标记，任何自动化扫描都会把这条
+    已降级的消息又判成泄漏；用「内部函数调用格式」指代即可。
+    """
+    text = "【输出格式故障】模型把内部函数调用格式当作正文吐出，该段已丢弃。"
+    if lost:
+        text += f"未能执行的工具调用：{'、'.join(lost)}，其意图已丢失。"
+    return text + f"自动重试 {_DSML_LEAK_RETRIES} 次未恢复，请重新下达指令。"
+
+
+def _salvage_dsml_leak(reply: Message, on_text: Callable[[str], None] | None) -> Message:
+    """超限降级：截断泄漏 markup、保住前面的正文、追加故障告知（ADR 047 甲案）。
+
+    截断点 = 第一个标记出现的位置。真实样本有两型（047 地面真值表，8 条）：
+    - 纯 markup 型（7 条）：整条回答只有泄漏格式，正文全塞在未执行的调用
+      参数里 → 截断后只剩告知。丢的是「没做成的事的参数」，不是交付物。
+    - 混合型（1 条）：前半是完好的自然语言回答（实机样本：五日行情表 +
+      周变动分析），「现在写入笔记：」之后才接泄漏的 write_note →
+      保住截断点之前的正文，一次局部故障才不会升级成整轮零交付。
+
+    不解析 markup 补执行（丙案已否决）：那是第二套 tool-call 解析器，且
+    执行的是解析层已经拒绝过的意图，安全面变大。
+
+    replace 而非原地改：usage（token 账目）要跟着走，调用方手里的引用也
+    不该被悄悄改写。
+    """
+    content = reply.content or ""
+    cut = min(
+        (content.index(m) for m in _DSML_LEAK_MARKERS if m in content),
+        default=len(content),
+    )
+    keep = content[:cut].rstrip()
+    # 去重保序：同一工具泄漏多次只报一次名字
+    lost = list(dict.fromkeys(_DSML_INVOKE_RE.findall(content[cut:])))
+    notice = _dsml_leak_notice(lost)
+    if on_text:
+        # 已外发的泄漏块收不回来（流式固有 tradeoff），告知同样走 on_text
+        # 才能让流式视图与落盘至少「都说明了故障」
+        on_text("\n\n" + notice + "\n")
+    return replace(reply, content=f"{keep}\n\n{notice}" if keep else notice)
+
+
 def _merge_with_leak_guard(
     llm: LLM,
     payload: list[Message],
@@ -141,8 +191,9 @@ def _merge_with_leak_guard(
     - 重试提示注入投影尾部——投影本轮作废，提示随轮蒸发，不进底片
     - 重试独立计数上限 _DSML_LEAK_RETRIES，不吃 rounds 预算
 
-    超限后返回最后一次泄漏消息，调用方按普通回答诚实降级——无药可救
-    时把原样吐给用户（带故障文本），好过装作没事。
+    超限后不再原样返回（ADR 047 甲案推翻 033 的「原样吐出」）：截掉泄漏
+    markup、保住标记之前的正常正文、追加明确故障告知——诚实降级仍成立
+    （不装作没事、明说哪个工具没执行成），但用户不必再从裸格式串里刨内容。
 
     已外发的流式块收不回来（检查点③的流是边收边喂 on_text 的）——
     用户会看到泄漏文本闪现后跟着正常回答，这是流式的固有 tradeoff，
@@ -158,7 +209,7 @@ def _merge_with_leak_guard(
             return reply
         leaks += 1
         if leaks > _DSML_LEAK_RETRIES:
-            return reply   # 超限：最后一次泄漏消息按普通回答降级
+            return _salvage_dsml_leak(reply, on_text)   # 超限：截断 + 告知（ADR 047）
         if on_text:
             on_text("\n【检测到输出格式故障，正在自动重试…】\n")
         payload.append(Message(role="system", content=_DSML_LEAK_HINT))

@@ -38,8 +38,13 @@ class AuditLog:
         args: dict,
         result: str,
         is_readonly: bool,
+        extra: dict[str, str] | None = None,
     ) -> None:
-        """记一条工具调用。失败不炸调用方——审计是旁路，不该拖垮工具执行。"""
+        """记一条工具调用。失败不炸调用方——审计是旁路，不该拖垮工具执行。
+
+        extra（048）：附加字段平铺进 event（如 {"sandbox": "seatbelt"}），
+        缺省 None 零行为差——老日志无此字段，读侧按 .get 取。
+        """
         try:
             limit = READONLY_RESULT_MAX if is_readonly else WRITE_RESULT_MAX
             event = {
@@ -49,6 +54,8 @@ class AuditLog:
                 "args": args,
                 "result": result if len(result) <= limit else result[:limit] + "…",
             }
+            if extra:
+                event.update(extra)
             self._dir.mkdir(parents=True, exist_ok=True)
             path = self._dir / f"audit-{datetime.now():%Y%m%d}.jsonl"
             with self._lock, open(path, "a", encoding="utf-8") as f:

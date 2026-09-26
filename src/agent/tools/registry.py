@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from agent.core.audit import AuditLog
+from agent.tools.sandbox import detect_backend
 
 
 def _validate_args(args: dict, parameters: dict) -> str | None:
@@ -95,6 +96,8 @@ class Tool:
     is_readonly: bool = False       # S3 权限分级：只读 L0 / 写 L1（保守默认写类）
     idempotent: bool = False        # P0-3 崩溃恢复：写类工具能否安全重做（只读免声明）
     needs_confirmation: bool | Callable[[dict], bool] = False   # S4b L2 确认标记
+    sandboxed: bool = False           # 048：True=执行走进程级沙箱，审计条目
+                                      # 带 sandbox=seatbelt/off 标记（批准拒绝都带）
     receives_confirm: bool = False  # S5c 编排工具标记：func 额外接收 confirm 参数
                                     # （spawn_subagent 把主循环的确认缝透传给子执行流——
                                     # 子 agent 的高危工具照常弹确认，人审不分主子）
@@ -188,7 +191,7 @@ class ToolRegistry:
         if needs and (confirm is None or not confirm(name, args)):
             result = "用户拒绝了这次操作（未经确认不执行）。请换方案，或先向用户说明理由再重试。"
             if self._audit is not None:
-                self._audit.record(name, args, result, tool.is_readonly)
+                self._audit.record(name, args, result, tool.is_readonly, extra=_sandbox_extra(tool))
             return result
 
         try:
@@ -214,6 +217,14 @@ class ToolRegistry:
         # S3 审计收口：所有工具调用（含失败）在这里落盘——单一必经点，
         # 新工具零成本继承。失败也记（result 是错误串，事后可查）。
         if self._audit is not None:
-            self._audit.record(name, args, result, tool.is_readonly)
+            self._audit.record(name, args, result, tool.is_readonly, extra=_sandbox_extra(tool))
 
         return result
+
+
+def _sandbox_extra(tool: Tool) -> dict[str, str] | None:
+    """048 审计打标：沙箱工具的条目带 sandbox=seatbelt/off（批准拒绝都带）；
+    非沙箱工具 None=零行为差。which 毫秒级，不为省一次探测做缓存。"""
+    if not tool.sandboxed:
+        return None
+    return {"sandbox": detect_backend() or "off"}

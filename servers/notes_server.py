@@ -94,8 +94,8 @@ def _reply(msg: dict, result: dict) -> None:
 
 def main() -> None:
     SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
-    for line in sys.stdin:
-        line = line.strip()
+    for raw in sys.stdin:
+        line = raw.strip()
         if not line:
             continue
         try:
