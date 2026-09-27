@@ -7,6 +7,7 @@
 - 类别白名单：非法类别进 other 垃圾桶，不炸管道
 - 已知记忆进萃取提示词（写前比对的 v1 是提示词级——不重复记）
 - 无新对话（since 之后没有 user 消息）→ 直接跳过，不白烧 LLM
+- 053：sid 传下来就落成 [固化:sid] 行内 tag，不传则落盘形状逐字不变
 """
 
 import json
@@ -14,6 +15,7 @@ import json
 from agent.core.llm import ScriptedLLM
 from agent.core.types import Message
 from agent.memory.consolidate import consolidate
+from agent.memory.learned import ORIGIN_TAG_PREFIX, origin_tag
 from agent.memory.store import Session
 
 
@@ -456,3 +458,38 @@ def test_no_base_prompt_keeps_prior_behaviour(tmp_path):
     extract_input = llm.calls[0][-1].content
     assert "基础人设与工具清单" not in extract_input
     assert "（暂无）" in extract_input          # 无 learned 条目、无 user.md、无 base_prompt
+
+
+# ---------- ADR 053 来源侧：落盘行带 [固化:sid] ----------
+
+
+def test_sid_written_as_origin_tag(tmp_path):
+    """装配层往下传 sid → 落盘行带 [固化:sid]，「这条是哪次对话固化出来的」可查。
+    verified 条目两个 tag 都在场且顺序固定（[已验证] 在前，来源在后）。"""
+    learned = tmp_path / "learned"
+    entries = json.dumps(
+        [{"category": "constraints", "content": "测试全过的经验", "verified": True}],
+        ensure_ascii=False,
+    )
+    llm = ScriptedLLM([Message(role="assistant", content=entries)] * 2)
+
+    consolidate(_session(_dialogue()), llm, learned, sid="0007")
+
+    constraints = (learned / "constraints.md").read_text(encoding="utf-8")
+    assert f"[已验证] {origin_tag('0007')} 测试全过的经验" in constraints
+
+
+def test_no_sid_keeps_prior_line_shape(tmp_path):
+    """默认空 sid = 改动前落盘形状逐字相同（其余测试调用点与旧装配路径不受影响）。"""
+    learned = tmp_path / "learned"
+    entries = json.dumps(
+        [{"category": "constraints", "content": "测试全过的经验", "verified": True}],
+        ensure_ascii=False,
+    )
+    llm = ScriptedLLM([Message(role="assistant", content=entries)] * 2)
+
+    consolidate(_session(_dialogue()), llm, learned)
+
+    constraints = (learned / "constraints.md").read_text(encoding="utf-8")
+    assert "[已验证] 测试全过的经验" in constraints
+    assert ORIGIN_TAG_PREFIX not in constraints          # 没有空的 [固化:] 尾巴

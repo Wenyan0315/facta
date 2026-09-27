@@ -28,6 +28,10 @@ servers/sandbox/
 # 实机跑出来的笔记产物（不属人工策展的语料库；逐篇点名，等有命名约定再收口）
 data/notes/阿里巴巴股价分析报告-2026年9月24日.md
 
+# 笔记来源 sidecar（053）：运行时元数据，tracked 会让每次 write_note 都产生
+# diff 噪音；且 `git archive HEAD` 副本因此天然不带它，冻结集 verify 口径零影响
+data/notes/.provenance.json
+
 # IDE / agent 工作区规则
 .trae/
 

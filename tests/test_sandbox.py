@@ -174,6 +174,27 @@ def test_memory_write_denied_read_allowed(tmp_path):
 
 
 @seatbelt_only
+def test_provenance_sidecar_cannot_be_forged(tmp_path):
+    """053 判定标准 7：「人工改过」这个信号必须伪造不了——sidecar 落在 052 的
+    MEMORY_WRITE_FENCE（subpath data/notes）内，bash 与解释器直写都 EPERM。
+    没这条，search_notes 就不敢把它当「用户背书过」用（先有 052 才有 053）。"""
+    root = _root(tmp_path)
+    notes = root / "data" / "notes"
+    notes.mkdir(parents=True)
+    sidecar = notes / ".provenance.json"
+
+    r = _run_command('echo \'{"a.md": {"origin": "human"}}\' > data/notes/.provenance.json',
+                     root=root)
+    assert "Operation not permitted" in r and not sidecar.exists()
+    # i6 观测到的规避形状：解释器直写（绕开 shell 重定向）
+    r = _run_command(
+        f"{sys.executable} -c \"open('data/notes/.provenance.json','w').write('{{}}')\"",
+        root=root,
+    )
+    assert "Operation not permitted" in r and not sidecar.exists()
+
+
+@seatbelt_only
 def test_git_hooks_denied(tmp_path):
     root = _root(tmp_path)
     _init_repo_outside_sandbox(root)

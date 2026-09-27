@@ -5,11 +5,19 @@
 - 好行编辑保留日期前缀（时间戳归程序管）；坏行（手写行）原样替换可删
 - 空行/文件尾换行在重写后原样保留（append-only 固化的兼容前提）
 - category 白名单挡路径穿越，line 越界 404，空内容 400
+- 053：人工编辑过的行必须与程序固化的行可辨（[手改]），且原 tags 不丢
 """
 
 import pytest
 
-from agent.memory.learned import delete_line, read_learned, update_line
+from agent.memory.learned import (
+    delete_line,
+    format_line,
+    read_learned,
+    render,
+    update_line,
+    visible_text,
+)
 
 
 def _write(tmp_path, text):
@@ -46,7 +54,8 @@ def test_read_missing_file_is_empty(tmp_path):
 def test_update_keeps_date_prefix(tmp_path):
     path = _write(tmp_path, "- [2026-09-13] 原文\n")
     update_line(path, 0, "新正文")
-    assert path.read_text(encoding="utf-8") == "- [2026-09-13] 新正文\n"
+    # 053：日期照旧保留，同时打上 [手改]——「人碰过」从此可辨
+    assert path.read_text(encoding="utf-8") == "- [2026-09-13] [手改] 新正文\n"
 
 
 def test_update_bad_line_replaces_raw(tmp_path):
@@ -58,7 +67,7 @@ def test_update_bad_line_replaces_raw(tmp_path):
 def test_update_preserves_blank_lines_and_tail_newline(tmp_path):
     path = _write(tmp_path, "- [2026-09-13] 甲\n\n- [2026-09-14] 乙\n")
     update_line(path, 2, "乙改")
-    assert path.read_text(encoding="utf-8") == "- [2026-09-13] 甲\n\n- [2026-09-14] 乙改\n"
+    assert path.read_text(encoding="utf-8") == "- [2026-09-13] 甲\n\n- [2026-09-14] [手改] 乙改\n"
 
 
 def test_line_out_of_range_raises(tmp_path):
@@ -129,7 +138,8 @@ def test_api_roundtrip_edit_and_delete(monkeypatch, tmp_path):
 
     after = client.get("/api/learned").json()
     assert len(after) == 1
-    assert after[0]["date"] == "2026-09-13" and after[0]["content"] == "甲改"
+    # 053：面板的 content = 可见 tag + 正文（前端零改动：改完原样 PUT 回来）
+    assert after[0]["date"] == "2026-09-13" and after[0]["content"] == "[手改] 甲改"
     # 被删行后，剩余行号已变（0）——前端 refresh 后用新行号，协议自洽
     assert after[0]["line"] == 0
 
@@ -179,7 +189,7 @@ def test_api_user_scope_roundtrip(monkeypatch, tmp_path):
     # 编辑保留日期前缀、删除按行号——与项目桶同一套协议（同一个 learned.py）
     assert client.put("/api/learned/user/0", json={"content": "行程提早两周提醒"}).status_code == 200
     assert client.delete("/api/learned/user/1").status_code == 200
-    assert user_md.read_text(encoding="utf-8") == "- [2026-09-20] 行程提早两周提醒\n"
+    assert user_md.read_text(encoding="utf-8") == "- [2026-09-20] [手改] 行程提早两周提醒\n"
     # 用户级操作不动项目桶（字节级）
     assert project.read_bytes() == before
 
@@ -195,4 +205,72 @@ def test_api_user_scope_missing_file_and_guards(monkeypatch, tmp_path):
     # 白名单外的类别仍 400（含看起来像目录名的），穿越防线没被 user 撑开
     assert client.put("/api/learned/preferences/0", json={"content": "x"}).status_code == 400
     assert client.delete("/api/learned/notes/0").status_code == 400
+
+
+# ---------- 053：provenance（来源侧）----------
+
+def test_legacy_lines_parse_without_tags(tmp_path):
+    """零迁移：P0-7 之前的存量行（无 tag）照旧解析，渲染形状逐字节不变。"""
+    path = _write(tmp_path, "- [2026-09-13] 老行\n")
+    (e,) = read_learned(path)
+    assert (e.date, e.content, e.tags) == ("2026-09-13", "老行", ())
+    assert render(e) == "- [2026-09-13] 老行"
+
+
+def test_origin_tag_lands_on_disk_but_not_in_prompt(tmp_path):
+    """[固化:sid] 只落盘：解析得出来（给人排查），render 时被滤掉（不给模型看）。"""
+    path = _write(tmp_path, format_line("2026-09-13", ["[固化:0001]"], "用 BGE-M3") + "\n")
+    (e,) = read_learned(path)
+    assert (e.tags, e.content) == (("[固化:0001]",), "用 BGE-M3")
+    assert render(e) == "- [2026-09-13] 用 BGE-M3"
+    assert visible_text(e) == "用 BGE-M3"     # 面板也看不见它，要看就去磁盘看原行
+
+
+def test_visible_tags_render_in_order(tmp_path):
+    path = _write(tmp_path, format_line("2026-09-13", ["[已验证]", "[固化:s1]"], "正文") + "\n")
+    (e,) = read_learned(path)
+    assert render(e) == "- [2026-09-13] [已验证] 正文"
+
+
+def test_update_keeps_origin_tag_and_visible_tags(tmp_path):
+    """人工编辑：[手改] 强制在场，磁盘上的 [固化:sid] 补回（面板看不见它就改不着它）。"""
+    path = _write(tmp_path, format_line("2026-09-13", ["[已验证]", "[固化:s1]"], "原文") + "\n")
+    # 面板 GET 给的就是 visible_text，用户改完原样 PUT 回来（前端零改动的契约）
+    update_line(path, 0, visible_text(read_learned(path)[0]).replace("原文", "改后"))
+    assert path.read_text(encoding="utf-8") == "- [2026-09-13] [已验证] [手改] [固化:s1] 改后\n"
+
+
+def test_update_lets_user_drop_verified_tag(tmp_path):
+    """可见 tag 以回传为准：用户能删掉 [已验证]——021「能改」的语义不因 provenance 收回。"""
+    path = _write(tmp_path, format_line("2026-09-13", ["[已验证]"], "原文") + "\n")
+    update_line(path, 0, "原文改")          # 回传不带 [已验证]
+    assert path.read_text(encoding="utf-8") == "- [2026-09-13] [手改] 原文改\n"
+
+
+def test_update_does_not_duplicate_hand_edited_tag(tmp_path):
+    """连改两次只留一个 [手改]（不去重就一轮多一个，注入 prompt 越滚越长）。"""
+    path = _write(tmp_path, "- [2026-09-13] 原文\n")
+    update_line(path, 0, "[手改] 一次")
+    update_line(path, 0, "[手改] 二次")
+    assert path.read_text(encoding="utf-8") == "- [2026-09-13] [手改] 二次\n"
+
+
+def test_bracket_outside_vocabulary_stays_in_content(tmp_path):
+    """闭集词表：词表外的方括号是正文不是 tag——否则它从注入 prompt 里静默消失。"""
+    path = _write(tmp_path, "- [2026-09-13] [TODO] 修一下\n")
+    (e,) = read_learned(path)
+    assert e.tags == () and e.content == "[TODO] 修一下"
+    assert render(e) == "- [2026-09-13] [TODO] 修一下"
+    # 编辑侧同口径：剥不出词表外的 tag，用户写的字一个不少
+    update_line(path, 0, visible_text(e))
+    assert path.read_text(encoding="utf-8") == "- [2026-09-13] [手改] [TODO] 修一下\n"
+
+
+def test_tag_copied_into_content_self_heals(tmp_path):
+    """自愈：_load_known 把原行喂给内部 LLM，模型可能把 tag 抄进正文 → 落盘长出
+    重复 tag；下一轮读盘重新解析成 tag、visible_text 去重，注入 prompt 不膨胀。"""
+    path = _write(tmp_path, "- [2026-09-13] [已验证] [已验证] 用 BGE-M3\n")
+    (e,) = read_learned(path)
+    assert e.content == "用 BGE-M3"
+    assert render(e) == "- [2026-09-13] [已验证] 用 BGE-M3"
 

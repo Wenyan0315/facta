@@ -30,7 +30,7 @@ from agent.knowledge.extract import sync_graph
 from agent.knowledge.graph import GRAPH_LOCK
 from agent.knowledge.sync import file_hash, sync_notes
 from agent.memory.consolidate import CATEGORIES
-from agent.memory.learned import delete_line, read_learned, update_line
+from agent.memory.learned import delete_line, read_learned, update_line, visible_text
 from agent.memory.store import Session
 from agent.orchestrator.assemble import AppContext, settle_session
 from agent.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
@@ -45,7 +45,7 @@ from agent.server.run_store import (
     RunStore,
 )
 from agent.server.sse import encode_heartbeat, encode_sse
-from agent.tools.notes import resolve_note_path
+from agent.tools.notes import record_provenance, resolve_note_path
 
 # run_turn 的 on_event 类型 → Run 事件类型（统一用点分层命名，前端按 type 路由）
 _EVENT_MAP = {
@@ -461,7 +461,11 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
                     "category": category,
                     "line": entry.line,
                     "date": entry.date,
-                    "content": entry.content,
+                    # 053：content = 可见 tag + 正文（前端契约不变：改完原样
+                    # PUT 回来，update_line 再把 tag 与正文拆开）。[固化:sid]
+                    # 属排查用元数据，不在 VISIBLE_TAGS 里 → 面板看不到它，
+                    # 要看就去磁盘上看原行。
+                    "content": visible_text(entry),
                 })
         return out
 
@@ -528,6 +532,10 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(body.content, encoding="utf-8")
         os.replace(tmp, path)
+        # 053：面板保存＝人工改过。这是 sidecar 里 "human" 唯一的产生点，而
+        # sidecar 本身在 052 的 MEMORY_WRITE_FENCE 内 → 模型伪造不了这个标记，
+        # search_notes 才敢把它当「用户背书过」的信号用。
+        record_provenance(NOTES_DIR, name, "human")
 
         new_hash = file_hash(body.content)
         return {

@@ -21,14 +21,16 @@ import sys
 from pathlib import Path
 
 from agent.memory.consolidate import CATEGORIES, SCOPES
-from agent.memory.learned import read_learned
+from agent.memory.learned import read_learned, render, visible_text
 from agent.paths import LEARNED_DIR, user_memory_path
 
 # 项目级记忆目录。默认值取 paths.LEARNED_DIR（单份真值），env 覆写只是测试注入
 # 点——子进程里 monkeypatch 够不着，与 notes_server 的 MCP_SANDBOX_DIR 同款理由。
 PROJECT_MEMORY_DIR = Path(os.environ.get("MCP_LEARNED_DIR", str(LEARNED_DIR)))
 
-ENTRY_FORMAT = "- [YYYY-MM-DD] {[已验证] }内容"
+# 对外自述的行格式（tools/list 里给外部 harness 看）。053 起 tag 可有可无、
+# 可叠加；[固化:sid] 不在 learned.VISIBLE_TAGS 里 → 召回结果里看不到它。
+ENTRY_FORMAT = "- [YYYY-MM-DD] {[已验证] }{[手改] }内容"
 
 
 def _bucket(category: str) -> Path:
@@ -70,14 +72,16 @@ def _recall(args: dict) -> str:
     for name in buckets:
         entries = read_learned(_bucket(name))   # 读侧单份真值：不自己 open()
         if query:
-            entries = [e for e in entries if query in e.content.lower()]
+            # 匹配面 = 可见 tag + 正文：tag 从 content 拆出去（053）之后，
+            # 只搜 content 会悄悄丢掉「按 [已验证] 过滤」这个既有能力。
+            entries = [e for e in entries if query in visible_text(e).lower()]
         if not entries:
             continue   # 空桶跳过（与 _learned_block 一致：「暂无」是给模型看的噪声）
-        # 条目渲染 = 落盘格式（零翻译层，与 agent._learned_block 同款表达式）；
+        # 条目渲染 = 落盘格式（零翻译层，learned.render 单份表达式）；
         # 节头多带 scope 是因为这里两个作用域会同屏返回
         label = "user" if name == "user" else f"project:{name}"
         lines = [f"[{label}]"]
-        lines.extend(f"- [{e.date}] {e.content}" if e.date else e.content for e in entries)
+        lines.extend(render(e) for e in entries)
         sections.append("\n".join(lines))
 
     if not sections:

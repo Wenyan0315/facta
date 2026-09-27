@@ -94,6 +94,20 @@ def test_recall_filters_by_scope_category_and_query(client):
     assert client.call_tool("memory_recall", {"query": "不存在的词"}) == "（无匹配的记忆条目）"
 
 
+def test_origin_tag_not_recalled_but_visible_tag_queryable(client, memory_dirs):
+    """053：召回面只带可见 tag。[固化:sid] 是给人排查的元数据，不进召回文本；
+    同时保住「按 [已验证] 过滤」这个既有能力——tag 从 content 拆出去之后，
+    query 的匹配面必须是 visible_text，只搜 content 会悄悄把它丢掉。"""
+    learned, _ = memory_dirs
+    with (learned / "decisions.md").open("a", encoding="utf-8") as f:
+        f.write("- [2026-09-26] [已验证] [固化:0007] 用 BGE-M3\n")
+
+    text = client.call_tool("memory_recall", {})
+    assert "[已验证] 用 BGE-M3" in text and "固化:" not in text
+    assert client.call_tool("memory_recall", {"query": "[已验证]"}) != "（无匹配的记忆条目）"
+    assert client.call_tool("memory_recall", {"query": "0007"}) == "（无匹配的记忆条目）"
+
+
 def test_recall_rejects_illegal_scope(client):
     """白名单外的参数值是业务错误（isError），不是静默返回全部。"""
     with pytest.raises(McpCallError, match="scope 非法"):

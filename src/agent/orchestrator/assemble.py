@@ -177,6 +177,8 @@ def settle_session(
             # ADR 045：基础 prompt 当冗余对照物（memory 层不能反向 import
             # orchestrator——agent.py 已 import consolidate，会循环）
             base_prompt=DEFAULT_SYSTEM_PROMPT,
+            # ADR 053：sid 本来就在作用域里，往下传一行 → 落盘行带 [固化:{sid}]
+            sid=sid,
         )
         # 游标只在固化没抛异常时推进：失败就下轮重来，宁可重复萃取也不丢记忆
         session.consolidated_upto = len(session.messages)

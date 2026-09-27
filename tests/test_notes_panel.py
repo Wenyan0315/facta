@@ -7,12 +7,13 @@
 - base_hash 不匹配 → 409 且磁盘一字不动（挡「IDE 与面板同时改一篇」的盲覆盖）
 - 面板 PUT 对不存在的笔记 404，绝不顺手创建（新建会绕过 write_note 的查重闸门）
 - 陈旧标记按指纹现算，不猜：图谱只在该篇曾进过图时才算陈旧
+- 053：保存成功记 origin="human"（sidecar 里人工的唯一产生点），失败路径不留痕
 """
 
 import pytest
 
 from agent.knowledge.sync import file_hash
-from agent.tools.notes import resolve_note_path
+from agent.tools.notes import human_edited_notes, resolve_note_path
 
 # ---------- 围栏本体：纯函数层（避开 HTTP 客户端的路径规范化） ----------
 
@@ -136,8 +137,22 @@ def test_save_roundtrip_is_atomic(client_env):
     body = resp.json()
     assert body["hash"] == file_hash("改过的\n")
     assert path.read_text(encoding="utf-8") == "改过的\n"
-    # 原子写不留尾巴：.tmp 已 rename 走，目录里只剩那一篇
-    assert list(notes_dir.iterdir()) == [path]
+    # 原子写不留尾巴：.tmp 已 rename 走，目录里只剩那一篇 + 053 的来源 sidecar
+    assert sorted(p.name for p in notes_dir.iterdir()) == [".provenance.json", "a.md"]
+
+
+def test_save_records_human_origin(client_env):
+    """053：面板保存＝人工改过，这是 sidecar 里 "human" 的唯一产生点。
+    失败路径（409 陈旧 / 404 不存在）不留痕——没改成就不能算「人碰过」。"""
+    client, _, notes_dir = client_env
+    _note(notes_dir, text="原文\n")
+
+    client.put("/api/notes/a.md", json={"content": "改过的\n", "base_hash": file_hash("原文\n")})
+    assert human_edited_notes(notes_dir) == {"a.md"}
+
+    client.put("/api/notes/a.md", json={"content": "盲覆盖\n", "base_hash": "陈旧的载入值\n"})
+    client.put("/api/notes/new.md", json={"content": "x", "base_hash": ""})
+    assert human_edited_notes(notes_dir) == {"a.md"}
 
 
 def test_save_stale_hash_is_409_and_disk_untouched(client_env):

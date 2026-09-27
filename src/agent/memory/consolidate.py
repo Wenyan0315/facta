@@ -30,7 +30,7 @@ from pathlib import Path
 
 from agent.core.llm import LLM
 from agent.core.types import Message
-from agent.memory.learned import LEARNED_LOCK
+from agent.memory.learned import LEARNED_LOCK, format_line, origin_tag
 from agent.memory.store import Session
 
 CATEGORIES = ("decisions", "constraints", "other")
@@ -248,34 +248,41 @@ def _harden(items: list[dict]) -> tuple[list[Entry], list[Entry], list[Entry]]:
     return entries, candidates, perishable
 
 
-def _append(entries: list[Entry], learned_dir: Path, user_memory_path: Path | None) -> list[str]:
-    """按作用域落盘；时间戳由程序加——出处链条里程序是唯一可信作者。
+def _append(entries: list[Entry], learned_dir: Path, user_memory_path: Path | None,
+            sid: str = "") -> list[str]:
+    """按作用域落盘；时间戳与来源 tag 由程序加——出处链条里程序是唯一可信作者。
 
     P0-7：verified 条目行内带 [已验证] 前缀——「入库条目有背书占比」
     事后可度量（grep 计数 / 总行数），不靠运行时记忆。
+    053：sid 非空时行内再带 [固化:{sid}]（sid = 会话 id，store._alloc_id 的
+    零填充时间戳）——「这条是哪次对话固化出来的」从此可查，不用去猜。
+    sid 为空（测试、或调用点拿不到会话 id）就不写这个 tag，落盘形状与 053
+    之前逐字节相同。它不在 learned.VISIBLE_TAGS 里 → 落盘但不进注入 prompt。
     返回写入位置清单（如 ["decisions", "user"]）供文案汇报。
     user_memory_path=None 时的 user 条目已被上游过滤，这里不会再遇到。
     """
     written: list[str] = []
     learned_dir.mkdir(parents=True, exist_ok=True)
     today = date.today().isoformat()
+    origin = [origin_tag(sid)] if sid else []
     # 与记忆面板编辑侧（learned.update_line/delete_line 的读改写整重写）互斥：
     # 整重写会把窗口期内这里 append 的行连旧内容一起覆盖掉。一批条目一次
     # 拿锁写完，不逐条抢——锁内只有本地文件 append（微秒级），饿不死编辑请求。
     with LEARNED_LOCK:
         for entry in entries:
-            mark = "[已验证] " if entry.verified else ""
+            tags = ["[已验证]", *origin] if entry.verified else origin
+            line = format_line(today, tags, entry.content) + "\n"
             if entry.scope == "user":
                 assert user_memory_path is not None   # 上游过滤的契约（防御性）
                 user_memory_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(user_memory_path, "a", encoding="utf-8") as f:
-                    f.write(f"- [{today}] {mark}{entry.content}\n")
+                    f.write(line)
                 if "user" not in written:
                     written.append("user")
             else:
                 path = learned_dir / f"{entry.category}.md"
                 with open(path, "a", encoding="utf-8") as f:
-                    f.write(f"- [{today}] {mark}{entry.content}\n")
+                    f.write(line)
                 if entry.category not in written:
                     written.append(entry.category)
     return written
@@ -300,6 +307,7 @@ def consolidate(
     window: int = WINDOW,
     user_memory_path: Path | None = None,
     base_prompt: str = "",
+    sid: str = "",
 ) -> str:
     """退出复盘主入口。since = 本次启动时的消息数——无新对话则不白烧 LLM。
 
@@ -308,6 +316,9 @@ def consolidate(
 
     base_prompt（ADR 045）：基础人设与工具清单，进「已知记忆」当冗余对照物；
     装配层传 DEFAULT_SYSTEM_PROMPT（见 _load_known 的依赖方向说明）。
+
+    sid（ADR 053）：会话 id，落盘时写成 [固化:{sid}] 行内 tag——装配层的
+    settle_session 手里本来就有它，往下传一行。空串 = 不带来源 tag。
     """
     if not any(m.role == "user" for m in session.messages[since:]):
         return "记忆固化：本轮无新对话，跳过复盘"
@@ -359,7 +370,7 @@ def consolidate(
             base += f"；另有 {dropped_unplaced} 条用户级候选因未配置位置丢弃"
         return base
 
-    written = _append(entries, learned_dir, user_memory_path)
+    written = _append(entries, learned_dir, user_memory_path, sid)
     n_user = sum(1 for e in entries if e.scope == "user")
     n_verified = sum(1 for e in entries if e.verified)
     report = (

@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import date
 from pathlib import Path
 
 from agent.core.types import Message
@@ -126,6 +128,55 @@ def content_gate(content: str) -> str | None:
     return None
 
 
+# ── 来源 sidecar（053）───────────────────────────────────────────────
+# 为什么是 sidecar 而不是 front-matter：front-matter 会进 chunk → 污染
+# embedding 与召回文本，且 15 篇老笔记要格式迁移（ADR 053 否决档案 2）。
+# 文件名不以 .md 结尾 → kb 索引（loader 只 glob *.md）与 list_notes 都看不见
+# 它，零回归面；它本身落在 052 的 MEMORY_WRITE_FENCE 内（subpath data/notes），
+# 所以 bash / write_file 伪造不了「人工改过」这个信号——先有 052 才有 053。
+PROVENANCE_NAME = ".provenance.json"
+
+
+def record_provenance(notes_dir: Path, filename: str, origin: str) -> None:
+    """记一笔「这篇笔记最后一次是谁写的」（origin = "tool" | "human"）。
+
+    工具侧（write_note）与 Web 面板（app.notes_save）共用这一份——042 把
+    resolve_note_path 抽成模块级函数是同一个理由：写入口有两处，记录只能有
+    一份真值。失败静默：sidecar 是**可选增强**，缺条目按老笔记宽进（ADR 053），
+    不能因为它写不进去就把已经成功的笔记保存报成失败。
+    """
+    path = notes_dir / PROVENANCE_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if not isinstance(data, dict):
+            data = {}   # 坏文件当空表重建，不因为一个脏字节就永久写不进去
+        data[filename] = {"origin": origin, "time": date.today().isoformat()}
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except (OSError, ValueError):
+        pass
+
+
+def human_edited_notes(notes_dir: Path) -> set[str]:
+    """人工改过的笔记名集合（sidecar 里 origin == "human"）。
+
+    唯一消费者是 search_notes 的出处标注（裁定三：只在人工改过时出声）。
+    文件缺失／损坏 → 空集，召回文本与 053 之前逐字节相同。
+    """
+    try:
+        data = json.loads((notes_dir / PROVENANCE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    return {
+        name
+        for name, rec in data.items()
+        if isinstance(rec, dict) and rec.get("origin") == "human"
+    }
+
+
 def _nav_blocks(notes_dir: Path, query: str, note_names: list[str]) -> list[tuple[str, str]]:
     """图谱导航补充块：每篇候选笔记取词袋覆盖最高的一块（零 LLM，去重保序）。
 
@@ -207,6 +258,10 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             return f"已存在同名笔记 {filename}，如需修改请先读取原文，或换一个文件名"
         try:
             path.write_text(content, encoding="utf-8")
+            # 053：落盘成功后记来源。只记「工具写的」这一维——它是程序能背书
+            # 的事实；「内容抄自网页还是用户原话」只有模型知道，注入下会伪报，
+            # 按纪律不当信号用（ADR 053 否决档案 1）。
+            record_provenance(ctx.notes_dir, filename, "tool")
             # S7a 闭环提示：新笔记默认只进向量库（下次启动/手动同步才进图谱）
             # ——用户说「把它加进图谱」时点 sync_graph（界面可操作拍板）
             return (
@@ -223,10 +278,15 @@ def register_note_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         # 命中 → 给模型看的编号文本。
         # 分数+来源都展示给模型：分数让它判断检索质量（偏低=可换关键词再查），
         # 来源让它引用资料时能说清出处（RAG 溯源，S4 评审 #R5）。
-        lines = [
-            f"{i+1}. {hit.chunk}（出处：{hit.source}，相关度 {hit.score:.2f}）"
-            for i, hit in enumerate(results)
-        ]
+        # 053：出处再带一维「人碰过没有」——人工改过＝用户背书过，模型写＝待核。
+        # 只在人工改过时出声（裁定三）：每篇都标「来源：工具」是给模型看的噪音。
+        edited = human_edited_notes(ctx.notes_dir)
+        lines = []
+        for i, hit in enumerate(results):
+            mark = "，人工改过" if hit.source in edited else ""
+            lines.append(
+                f"{i+1}. {hit.chunk}（出处：{hit.source}{mark}，相关度 {hit.score:.2f}）"
+            )
 
         # 图谱导航补充（043 检索分诊）：query 里的实体锚定图节点 → BFS 2 跳
         # 拿邻笔记 → 词袋选块追加。零 LLM 调用、纯图遍历；孤岛锚点导航空集

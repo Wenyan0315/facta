@@ -110,6 +110,27 @@ def test_learned_bad_line_injected_as_is(tmp_path):
     assert "手写行没有日期格式" in agent.system_prompt
 
 
+def test_provenance_tags_filtered_at_injection(tmp_path):
+    """053：每轮全量注入的地方只带可见 tag。[固化:sid] 是给人排查的元数据，
+    进 prompt 就是纯噪音；[已验证]/[手改] 照旧可见（模型据此判断可信度）。
+    项目桶与用户记忆段共用 learned.render，一处收口两处生效。"""
+    (tmp_path / "decisions.md").write_text(
+        "- [2026-09-12] [已验证] [固化:0007] 用 BGE-M3\n"
+        "- [2026-09-15] [手改] [固化:0009] 换 Chroma\n"
+        "- [2026-09-16] [TODO] 词表外的方括号是正文\n",
+        encoding="utf-8",
+    )
+    user_md = tmp_path / "user.md"
+    user_md.write_text("- [2026-09-20] [固化:0011] 用户偏好短回答\n", encoding="utf-8")
+
+    p = build_default_agent(ToolRegistry(), tmp_path, user_memory_path=user_md).system_prompt
+    assert "- [2026-09-12] [已验证] 用 BGE-M3" in p
+    assert "- [2026-09-15] [手改] 换 Chroma" in p
+    assert "- [2026-09-16] [TODO] 词表外的方括号是正文" in p
+    assert "- [2026-09-20] 用户偏好短回答" in p
+    assert "固化:" not in p          # sid 一个都不漏进 prompt
+
+
 def test_empty_learned_dir_no_injection(tmp_path):
     # 目录存在但三桶全空：与 learned_dir=None 同收敛——无注入
     agent = build_default_agent(ToolRegistry(), tmp_path)

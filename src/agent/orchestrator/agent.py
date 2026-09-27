@@ -22,7 +22,7 @@ from pathlib import Path
 
 from agent.core.jev import ScenarioRouter
 from agent.memory.consolidate import CATEGORIES
-from agent.memory.learned import read_learned
+from agent.memory.learned import read_learned, render
 from agent.tools.registry import ToolRegistry
 
 # 主 agent 的行为定义素材（S5a 从 loop.py 搬家，一字未动——等价锁见
@@ -123,6 +123,9 @@ def _learned_block(learned_dir: Path) -> str:
     逐行对应，排查「模型为什么这么答」可直接对账。坏行（date=None 的
     手写行）原样注入——与记忆面板的宽容语义一致。日期保留：时效是
     记忆的一等属性（过时决定不替代当前对话新指示）。
+    053：行内 tag 只注入 learned.VISIBLE_TAGS（[已验证]/[手改]）——每轮
+    全量注入的地方，[固化:sid] 这种排查用元数据就是纯噪音（渲染收口在
+    learned.render，与 _user_memory_block / MCP 召回共用一份表达式）。
     """
     sections: list[str] = []
     for category in CATEGORIES:   # 单一真值源：consolidate.CATEGORIES（写读两侧同一份）
@@ -130,9 +133,7 @@ def _learned_block(learned_dir: Path) -> str:
         if not entries:
             continue   # 空桶跳过——「decisions: 暂无」是给模型看的噪声
         lines = [f"[{category}]"]
-        lines.extend(
-            f"- [{e.date}] {e.content}" if e.date else e.content for e in entries
-        )
+        lines.extend(render(e) for e in entries)
         sections.append("\n".join(lines))
     if not sections:
         return ""
@@ -159,7 +160,7 @@ def _user_memory_block(path: Path) -> str:
     entries = read_learned(path)
     if not entries:
         return ""
-    lines = [f"- [{e.date}] {e.content}" if e.date else e.content for e in entries]
+    lines = [render(e) for e in entries]
     header = (
         "【用户记忆】以下是跨项目沉淀的用户级记忆（个人偏好、习惯、行程类信息），"
         "用来理解和服务这个用户，等同你的亲历知识。注意条目日期：过时偏好"
