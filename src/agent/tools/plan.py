@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
-from agent.memory.plan import Plan, StepStatus
+from collections.abc import Callable
+
+from agent.memory.plan import Plan, PlanBoard, StepStatus
 from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
 
@@ -28,6 +30,11 @@ _MARKS = {   # 视图渲染记号：pending 空、in_progress 半、done 满、s
     "failed": "✗",
 }
 
+# 计划三件自身（057 范围闸门的豁免单）：不豁免则模型无法修订范围、无法回写
+# 状态、无法收官——收尾段的 _CLOSING_TOOLS（056）依赖后两件，拦了会让
+# 「预算耗尽时计划板挂 active」那条污染当场复发。
+_META_TOOLS = frozenset({"make_plan", "update_plan_step", "finish_plan"})
+
 
 def format_view(view: Plan | None) -> str:
     """计划视图的人/模型两用文本渲染（工具回灌与投影注入共用）。"""
@@ -37,7 +44,38 @@ def format_view(view: Plan | None) -> str:
     for s in view.steps:
         note = f" —— {s.note}" if s.note else ""
         lines.append(f"{_MARKS[s.status.value]} {s.id}. {s.title}{note}")
+    if view.tools:
+        # 057：范围写进视图（轮首投影 + 三处回灌共用这里）——模型开局就知道
+        # 边界，不必靠撞墙学（ACI：错误文案即提示词，投影同理）
+        lines.append(
+            f"〔工具范围〕{', '.join(view.tools)}"
+            "（范围外的调用会被程序拒绝；确需扩大请用 make_plan 修订 tools，需用户确认）"
+        )
     return "\n".join(lines)
+
+
+def plan_scope_check(board: PlanBoard) -> Callable[[str, dict], str | None]:
+    """P0-8（057）范围闸门工厂：产物交给 registry.scope_check，执行前逐调用判定。
+
+    放行三种情况：meta 三件（见 _META_TOOLS）、无活跃计划、空声明（＝不限制，
+    兼容存量 session.json 与 027「简单请求直接做」）。其余按声明白名单判。
+    策略留在 plan 域（registry 只认回调，依赖方向不反）；错误串照 M5 惯例
+    指路自纠——升级路径必须经过 make_plan，而它 needs_confirmation=True。
+    """
+
+    def check(name: str, args: dict) -> str | None:
+        if name in _META_TOOLS:
+            return None
+        view = board.view()
+        if view is None or not view.tools or name in view.tools:
+            return None
+        return (
+            f"错误：{name} 不在本计划声明的工具范围内（当前范围：{', '.join(view.tools)}），"
+            "未执行。确有需要请先用 make_plan 修订计划、把它加进 tools 声明"
+            "（修订需用户确认），再继续。"
+        )
+
+    return check
 
 
 def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
@@ -45,10 +83,15 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     if ctx.session is None:
         return
     board = ctx.session.plan
+    # 057 范围闸门在此挂载：本函数手里同时有 registry 与 board ⇒ wiring 的最省
+    # 落点（assemble.py 零改动即覆盖 per-session registry；worktree 子 registry
+    # 由 spawn._worktree_registry 显式继承，否则主 agent 声明窄范围后把渗出步骤
+    # spawn 出去就是第二个洞）
+    registry.scope_check = plan_scope_check(board)
 
-    def _make_plan(steps: list[dict], reason: str = "") -> str:
+    def _make_plan(steps: list[dict], reason: str = "", tools: list[str] | None = None) -> str:
         try:
-            kind = board.make_plan(steps, reason=reason)
+            kind = board.make_plan(steps, reason=reason, tools=tools)
         except ValueError as e:
             return f"计划操作被拒：{e}"
         verb = "已创建" if kind == "created" else "已修订"
@@ -85,6 +128,8 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "仅在任务足够复杂、值得先出蓝图时使用；简单请求直接做。"
             "修改当前计划也用本工具：steps 是完整新表（修订时每步必须显式声明 status，"
             "对照旧计划继承），reason 必填说明修订原因。"
+            "建议同时用 tools 声明本计划需要的工具范围：声明后范围外的调用会被程序"
+            "直接拒绝（防中途读到的内容把任务带偏），要扩大只能再来一次本工具修订。"
         ),
         parameters={
             "type": "object",
@@ -107,6 +152,16 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                     },
                 },
                 "reason": {"type": "string", "description": "修订原因（修改已有计划时必填）"},
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "本计划要用的工具名清单，按最小必要声明（如只做读取与写笔记就写 "
+                        '["read_file","search_notes","write_note"]，不必带 run_command）。'
+                        "省略＝不限制；修订时省略＝沿用原范围，给空数组＝解除限制。"
+                        "计划三件（make_plan/update_plan_step/finish_plan）无需声明，恒可用。"
+                    ),
+                },
             },
             "required": ["steps"],
         },

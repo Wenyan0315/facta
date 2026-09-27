@@ -61,9 +61,14 @@ class Step:
 class Plan:
     """任务的工作分解视图。frozen=不可变：由事件流 fold 出来（view()），
     修订从不改对象——「当前计划」永远是推导值，不是存储值。
+
+    tools（P0-8 / 057）：本计划声明要用的工具名。空元组＝不限制（存量事件
+    没有这个键，fold 出来天然是空）。同样是推导值——由 plan.created/
+    plan.revised 事件 fold，不另立存储真值源。
     """
 
     steps: tuple[Step, ...]
+    tools: tuple[str, ...] = ()
 
     def is_complete(self) -> bool:
         """完成判据（拍板③）：全部步骤显式终态化才算完。"""
@@ -95,6 +100,24 @@ def _check_steps_shape(steps: list[dict], *, revision: bool) -> list[dict]:
     return steps
 
 
+def _norm_tools(tools: list[str] | None) -> list[str]:
+    """工具范围声明的形状校验（057）：list[str]、剥空、去重保序。
+
+    只做形状，**不校验工具名是否存在**——registry 不在本域，跨域查名字会
+    把依赖方向搞反；声明了不存在的名字，效果等同「它永不被调用」，无害。
+    """
+    if tools is None:
+        return []
+    if not isinstance(tools, list) or any(not isinstance(t, str) for t in tools):
+        raise ValueError("tools 必须是工具名字符串数组（如 [\"read_file\"]）；不限制请省略本参数")
+    out: list[str] = []
+    for t in tools:
+        name = t.strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
 class PlanState:
     """单个计划：事件史 + 校验 + fold 视图。
 
@@ -110,23 +133,28 @@ class PlanState:
 
     # ---- 变更入口（board 调用；校验过的事件同时返回给 board 入传输队列）----
 
-    def create(self, steps: list[dict]) -> PlanEvent:
+    def create(self, steps: list[dict], tools: list[str] | None = None) -> PlanEvent:
         """新建计划：id 程序分配 1..N（编号是定位键，程序是唯一可信作者——
         时间戳同款哲学），强制全 pending（执行史从零开始）。
+        tools 是范围声明（057）：省略＝不限制。
         """
         _check_steps_shape(steps, revision=False)
-        ev = PlanEvent(
-            "plan.created",
-            {"steps": [{"id": i, "title": s["title"].strip()} for i, s in enumerate(steps, 1)]},
-        )
+        scope = _norm_tools(tools)
+        data: dict = {"steps": [{"id": i, "title": s["title"].strip()} for i, s in enumerate(steps, 1)]}
+        if scope:
+            data["tools"] = scope
+        ev = PlanEvent("plan.created", data)
         self.events.append(ev)
         return ev
 
-    def revise(self, reason: str, steps: list[dict]) -> PlanEvent:
+    def revise(self, reason: str, steps: list[dict], tools: list[str] | None = None) -> PlanEvent:
         """修订计划：换表（新 id 重排），新表自带 status/note——模型从旧视图
         继承的显式声明。reason 记进事件：修订不带原因 = 审计断档。
+        tools 同上（057）；None＝继承旧范围还是解除，由 board 决定（那里
+        才看得见旧视图）。
         """
         _check_steps_shape(steps, revision=True)
+        scope = _norm_tools(tools)
         table = []
         for i, s in enumerate(steps, 1):
             status = StepStatus(str(s["status"]))   # 白名单外值在此炸（入口闸门）
@@ -136,7 +164,10 @@ class PlanState:
                 "status": status.value,
                 "note": str(s.get("note", "")),
             })
-        ev = PlanEvent("plan.revised", {"reason": reason, "steps": table})
+        data: dict = {"reason": reason, "steps": table}
+        if scope:
+            data["tools"] = scope
+        ev = PlanEvent("plan.revised", data)
         self.events.append(ev)
         return ev
 
@@ -194,9 +225,11 @@ class PlanState:
         事件几十条 × dict 操作 = 微秒级，缓存要管失效时机，YAGNI。
         """
         steps: dict[int, Step] = {}
+        tools: tuple[str, ...] = ()
         for ev in self.events:
             if ev.type == "plan.created":
                 steps = {s["id"]: Step(id=s["id"], title=s["title"]) for s in ev.data["steps"]}
+                tools = tuple(ev.data.get("tools", []))
             elif ev.type == "plan.revised":
                 steps = {
                     s["id"]: Step(
@@ -205,6 +238,8 @@ class PlanState:
                     )
                     for s in ev.data["steps"]
                 }
+                # 键缺席＝解除范围（board 在修订时已把「继承」折算成显式清单）
+                tools = tuple(ev.data.get("tools", []))
             elif ev.type == "plan.step_updated":
                 old = steps.get(ev.data["id"])
                 if old is not None:   # 修订重排后的孤儿事件：跳过
@@ -213,7 +248,7 @@ class PlanState:
                         status=StepStatus(ev.data["status"]),
                         note=ev.data.get("note", ""),
                     )
-        return Plan(steps=tuple(steps[i] for i in sorted(steps)))
+        return Plan(steps=tuple(steps[i] for i in sorted(steps)), tools=tools)
 
     # ---- 序列化（session.json 落盘；_pending 不落盘——它是本轮传输队列）----
 
@@ -250,18 +285,24 @@ class PlanBoard:
         """
         self._pending.append(ev)
 
-    def make_plan(self, steps: list[dict], reason: str = "") -> str:
+    def make_plan(self, steps: list[dict], reason: str = "", tools: list[str] | None = None) -> str:
         """分叉入口：无活跃 → create；有活跃 → revise（修订复用同工具）。
         返回结果标签（"created"/"revised"）给工具层组提示。
+
+        tools（057）：新建时 None＝不限制；**修订时 None＝继承当前范围**，
+        显式给 [] 才是解除——沉默不解除约束（与「修订强制显式 status」同一
+        哲学：缺省会静默丢东西，显式才可审计）。
         """
         if self.active is None:
             state = PlanState()
-            self._emit(state, state.create(steps))
+            self._emit(state, state.create(steps, tools))
             self.active = state
             return "created"
         if not reason.strip():
             raise ValueError("已有活跃计划，再次 make_plan 是修订——必须带 reason 说明为什么改")
-        self._emit(self.active, self.active.revise(reason, steps))
+        if tools is None:
+            tools = list(self.active.view().tools)
+        self._emit(self.active, self.active.revise(reason, steps, tools))
         return "revised"
 
     def update_step(self, step_id: int, status: str, note: str = "") -> None:

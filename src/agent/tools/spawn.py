@@ -86,7 +86,10 @@ def _worktree_registry(registry: ToolRegistry, ctx: ToolContext, wt: Path) -> To
     ——知识库/待办/时钟共享是正确语义）。审计同源（registry.audit 透传），
     S3「单一必经点」与 S5a「确认缝收口不分叉」都保持。
     """
-    sub = ToolRegistry(audit=registry.audit)
+    # scope_check 一并继承（057）：范围声明锚的是主会话的 plan 棋盘，子 agent 受
+    # 主计划约束是正确语义——不继承就成洞（主 agent 声明窄范围，再把渗出步骤
+    # spawn_subagent(worktree=True) 派出去，子 agent 在裸 registry 里想用什么用什么）
+    sub = ToolRegistry(audit=registry.audit, scope_check=registry.scope_check)
     wt_ctx = ToolContext(notes_dir=ctx.notes_dir, workspace_root=wt)
     register_file_tools(sub, wt_ctx)
     register_terminal_tools(sub, wt_ctx)

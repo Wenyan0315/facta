@@ -112,9 +112,17 @@ class Tool:
 class ToolRegistry:
     """登记工具 + 生成菜单 + 执行点单。"""
 
-    def __init__(self, audit: AuditLog | None = None) -> None:
+    def __init__(
+        self,
+        audit: AuditLog | None = None,
+        scope_check: Callable[[str, dict], str | None] | None = None,
+    ) -> None:
         self._tools: dict[str, Tool] = {}
         self._audit = audit   # S3 审计：None=不落盘（测试/教学路径）；装配层注入真 log
+        # P0-8（057）计划工具范围闸门：(工具名, 参数) → 错误串（越界）或 None（放行）。
+        # 公开属性不设 property——挂它的是 tools/plan.py（策略在 plan 域，registry 只认
+        # 回调，依赖方向不反），继承它的是 spawn._worktree_registry（与 audit 同源同理）。
+        self.scope_check = scope_check
 
     def register(self, tool: Tool) -> None:
         """登记一个工具（名字重复时后者覆盖前者）。"""
@@ -190,6 +198,11 @@ class ToolRegistry:
         if error:
             return f"错误：参数校验失败（{error}）"
 
+        # P0-8（057）计划工具范围闸门：越界在执行前拦掉（细节见 _scope_denial）
+        denied = _scope_denial(self, tool, name, args)
+        if denied:
+            return denied
+
         # S4b L2 确认：裁决点在执行前。拒绝走同一审计收口（留痕可查）
         needs = (
             tool.needs_confirmation(args)
@@ -202,8 +215,7 @@ class ToolRegistry:
         guard = needs if isinstance(needs, str) else None
         if needs and (confirm is None or not confirm(name, args)):
             result = "用户拒绝了这次操作（未经确认不执行）。请换方案，或先向用户说明理由再重试。"
-            if self._audit is not None:
-                self._audit.record(name, args, result, tool.is_readonly, extra=_audit_extra(tool, guard))
+            _record(self._audit, tool, name, args, result, guard)
             return result
 
         try:
@@ -232,10 +244,43 @@ class ToolRegistry:
 
         # S3 审计收口：所有工具调用（含失败）在这里落盘——单一必经点，
         # 新工具零成本继承。失败也记（result 是错误串，事后可查）。
-        if self._audit is not None:
-            self._audit.record(name, args, result, tool.is_readonly, extra=_audit_extra(tool, guard))
+        _record(self._audit, tool, name, args, result, guard)
 
         return result
+
+
+def _record(
+    audit: AuditLog | None,
+    tool: Tool,
+    name: str,
+    args: dict,
+    result: str,
+    guard: str | None,
+) -> None:
+    """审计落盘收口（057 抽出）：三处调用点（确认拒绝／正常执行／范围越界）
+    共用同一份 extra 组装。抽出前是三份逐字重复的 `if audit is not None`，
+    抽出后顺带把 execute 的分支数压回 ruff PLR0912 预算内——不提高阈值。
+    """
+    if audit is not None:
+        audit.record(name, args, result, tool.is_readonly, extra=_audit_extra(tool, guard))
+
+
+def _scope_denial(registry: ToolRegistry, tool: Tool, name: str, args: dict) -> str | None:
+    """P0-8（057）计划工具范围闸门：越界**直接拒，不进 L2 弹窗**——弹窗等于给
+    注入多一次「说服人批准」的机会（i 系列已多次观测到人照样批准）。升级路径
+    另有其门：错误串指路 make_plan 修订，而 make_plan 自己 needs_confirmation=True
+    ⇒ 扩大范围必经人审、绕过范围不必经人审，方向是对的。
+
+    拒绝也落审计，且 guard 复用 050 的同一份 extra["guard"] ⇒ 评测 record 的
+    guards 字段零新仪器就能看到「机制有没有出手」。抽成函数与 054 的
+    _approval_trace 同款理由：execute 的分支数已撞 ruff PLR0912，不提高阈值。
+    """
+    if registry.scope_check is None:
+        return None
+    denied = registry.scope_check(name, args)
+    if denied:
+        _record(registry.audit, tool, name, args, denied, "plan-scope")
+    return denied
 
 
 def _approval_trace(needs: object, guard: str | None) -> str:
