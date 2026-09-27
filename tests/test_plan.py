@@ -328,3 +328,118 @@ def test_dangling_finish_feeds_back_for_self_correction():
     assert any("尚未终态化" in r for r in tool_results)   # 第一次收官被拒（程序闸）
     assert session.plan.active is None   # 第二次过了
     assert len(session.plan.archive) == 1
+
+
+# ---------- 保险丝熔断后的收尾段（ADR 056）----------
+
+
+def _fused_agent(session: Session, rounds: int) -> Agent:
+    """轮次预算压到 rounds，逼 run_turn 走收尾段（默认 5 轮测不到它）。"""
+    return Agent(
+        name="test", system_prompt="sys",
+        registry=_plan_registry(session), max_tool_rounds=rounds,
+    )
+
+
+def test_rounds_exhausted_closing_menu_keeps_plan_closeout_only():
+    # 根因现场：预算耗尽时模型正想调 finish_plan，而收尾请求原本 tools=None
+    # ⇒ 它结构上无法产出 tool_calls，只能把调用吐成正文（DSML 泄漏）。
+    # 修法甲轻量版：收尾段只留收官两个菜（update_plan_step + finish_plan），
+    # 计划板因此能被正常关闭。
+    session = Session()
+    llm = ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("make_plan", {"steps": [{"title": "甲"}]}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 1, "status": "done", "note": "做完了"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[   # 收尾段点的
+            _call("finish_plan", {"summary": "甲已完成"}),
+        ]),
+        Message(role="assistant", content="已收官：甲做完，无遗留。"),
+    ])
+
+    result, reply = run_turn(
+        session, "做完甲这件事",
+        agent=_fused_agent(session, 2), llm=llm,
+        on_confirm=lambda name, args: True,   # 计划审批：批准
+    )
+
+    assert result is RunResult.COMPLETED
+    assert reply is not None and reply.content == "已收官：甲做完，无遗留。"
+    # 调用序：2 轮工具循环 + 1 次收尾（递收官两个菜）+ 1 次文字总结（撤干净）
+    assert len(llm.calls) == 4
+    closing_menu = llm.tool_menus[2]
+    assert closing_menu is not None
+    assert [s["function"]["name"] for s in closing_menu] == [
+        "update_plan_step", "finish_plan",
+    ]
+    assert llm.tool_menus[3] is None          # 收官跑完即撤菜单
+    assert session.plan.active is None        # 计划板真被关闭（047 反方第 4 条的遗留损害）
+    assert len(session.plan.archive) == 1
+
+
+def test_rounds_exhausted_without_plan_announces_empty_menu_upfront():
+    # 修法乙：无活跃计划时收尾照旧撤干净菜单，但**事前**告知预算已尽——
+    # 不再靠泄漏后的 _DSML_LEAK_HINT 事后教训（那条 hint 要求走「标准
+    # tool_calls 字段」，是条结构上不存在的出路，重试因此恒失败）
+    session = Session()
+    llm = ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 1, "status": "done", "note": "x"}),
+        ]),
+        Message(role="assistant", content="预算用完了，这是已做的部分……"),
+    ])
+
+    result, reply = run_turn(
+        session, "做点事",
+        agent=_fused_agent(session, 1), llm=llm,
+    )
+
+    assert result is RunResult.COMPLETED
+    assert reply is not None and reply.content.startswith("预算用完了")
+    assert llm.tool_menus[-1] is None         # 无计划 ⇒ 收尾不递任何菜
+    assert any(
+        "工具预算已用完" in (m.content or "") and "不会再执行任何工具调用" in (m.content or "")
+        for m in llm.calls[-1]
+    )
+    # 告知只进投影、不进底片（时间戳/计划戳同款手法）：入史会堆垃圾并被摘要吸收
+    assert all("工具预算已用完" not in (m.content or "") for m in session.messages)
+
+
+def test_rounds_exhausted_closing_can_finalize_dangling_step():
+    # 实机回归（2026-09-27 定向跑 r4）：只递 finish_plan 时模型点了它、被
+    # 终态闸拒（有步骤悬空），而补终态的工具已不在菜单里 ⇒ 板子照样挂在
+    # active，正是修法要消除的污染。两个菜都递，模型才能同批补终态 + 收官。
+    session = Session()
+    llm = ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("make_plan", {"steps": [{"title": "甲"}, {"title": "乙"}]}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 1, "status": "done", "note": "做完了"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[   # 收尾段：同批补终态 + 收官
+            # 同批多点菜必须带 index：merge_stream_chunks 按 index 归并，
+            # 缺省全落 0 会被拼成一坨（test_parallel_spawn.py 同款约定）
+            {**_call("update_plan_step", {"step_id": 2, "status": "skipped", "note": "预算用尽"}),
+             "index": 0},
+            {**_call("finish_plan", {"summary": "甲完成，乙因预算用尽跳过"}), "index": 1},
+        ]),
+        Message(role="assistant", content="甲已完成；乙因工具预算用尽跳过。"),
+    ])
+
+    result, reply = run_turn(
+        session, "做完甲乙两件事",
+        agent=_fused_agent(session, 2), llm=llm,
+        on_confirm=lambda name, args: True,
+    )
+
+    assert result is RunResult.COMPLETED
+    assert reply is not None and reply.content.startswith("甲已完成")
+    assert session.plan.active is None        # 悬空步骤在收尾段被补终态后真收官
+    assert len(session.plan.archive) == 1
+    tool_results = [m.content for m in session.messages if m.role == "tool"]
+    assert not any("尚未终态化" in r for r in tool_results)   # 没撞上终态闸
+

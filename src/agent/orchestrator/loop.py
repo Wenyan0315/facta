@@ -64,6 +64,23 @@ _DSML_LEAK_HINT = (
 # 等于把「没做成的事」当交付物端给用户
 _DSML_INVOKE_RE = re.compile(r'<｜｜DSML｜｜\s+invoke\s+name="([^"]+)"')
 
+# 收尾段（ADR 056）：菜单与配套告知的取值，语义见 _close_out。
+# 只递 finish_plan 等于递一条必被终态闸拒的菜（memory/plan.py 的 finish
+# 要求全部步骤终态化），所以 update_plan_step 必须同行——菜单与前置条件
+# 也要配套，这与「菜单与告知配套」是同一类缺陷
+_CLOSING_TOOLS = ("update_plan_step", "finish_plan")
+_CLOSING_HINT = (
+    "工具预算已用完，{menu}"
+    "请直接用自然语言总结：已经完成了什么、哪些没做完、为什么。"
+    "正文中不要出现任何函数调用格式。"
+)
+_MENU_GONE = "本轮不会再执行任何工具调用。"
+_MENU_PLAN_ONLY = (
+    "本轮仍可为计划收官：先用 update_plan_step 把未终态步骤标 skipped 或 "
+    "failed（终态必须带 note），再调 finish_plan，两者可在同一批里发。"
+    "除此之外不会再执行任何工具。"
+)
+
 # P0-6 无进展检测上限（LongHorizon 基线 agent 对无响应弹窗原地重试 400+
 # 步的形态）：连续完全相同的点菜批次达上限即熔断工具循环、事件升人审。
 # rounds 保险丝管「点太多」，这里管「原地踏步」——每次执行都「成功」、
@@ -388,6 +405,67 @@ def _execute_tool_calls(
     return True
 
 
+def _close_out(
+    llm: LLM,
+    payload: list[Message],
+    schemas: list[dict],
+    session: Session,
+    agent: Agent,
+    on_confirm: Callable | None,
+    on_event: Callable | None,
+    should_cancel: Callable | None,
+    on_text: Callable[[str], None] | None,
+) -> tuple[RunResult, Message | None]:
+    """收尾段（ADR 056）：保险丝熔断后的最后一问。
+
+    这里原本恒 tools=None（「最后一问不递菜单，逼它说话」），但模型此刻的
+    意图往往正是调 finish_plan 收官——请求里没有 tools 字段 ⇒ 它结构上无法
+    产出 tool_calls，只能用训练时学到的文本格式把调用吐进 content（DSML
+    泄漏）。重试也救不回：_merge_with_leak_guard 的 tools 参数在 while 里
+    不变，而 _DSML_LEAK_HINT 要求「通过标准 tool_calls 字段发起」——一条
+    结构上不存在的出路（047 记的「重试 2 次全无效」是死锁，不是采样噪声）。
+
+    修法两半，且**菜单与告知必须配套**（不配套正是病根）：
+    - 认知：生成前就说清预算已尽，不再等泄漏之后事后教训
+    - 结构：只留收官这两个菜（update_plan_step + finish_plan），让计划板能
+      被正常关闭。选它们的理由是意图丢失代价最大（板子挂在 active 会污染
+      后续每一轮的投影），且都是幂等的收官动作、不开新战线。两个都要递：
+      实机（2026-09-27 定向跑 r4）显示只递 finish_plan 时模型点了它、被
+      终态闸拒（有步骤悬空），而补终态的工具已不在菜单里 ⇒ 板子照样挂在
+      active，正是本修法要消除的污染。无活跃计划 / 菜单里一个都没有 →
+      照旧全撤
+
+    菜单收窄不是安全边界：收官点菜照走 needs_confirmation 的 L2 掌舵点，
+    也照走取消检查点与事件缝（复用 _execute_tool_calls，不另起一套）。
+    """
+    closing: list[dict] | None = None
+    if session.plan.active is not None:
+        closing = [s for s in schemas if s["function"]["name"] in _CLOSING_TOOLS] or None
+    payload.append(Message(
+        role="system",
+        content=_CLOSING_HINT.format(
+            menu=_MENU_PLAN_ONLY if closing is not None else _MENU_GONE
+        ),
+    ))
+    reply = _merge_with_leak_guard(llm, payload, closing, should_cancel, on_text)
+    if not reply.tool_calls:            # 没点收官菜 → 这就是最终回答
+        session.messages.append(reply)
+        return RunResult.COMPLETED, reply
+
+    session.messages.append(reply)
+    payload.append(reply)
+    if not _execute_tool_calls(
+        reply.tool_calls, session, payload, agent, on_confirm, on_event, should_cancel
+    ):
+        return RunResult.CANCELLED, None
+    # 收官跑完再撤菜单逼文字总结，并钉一条新告知盖掉上一条「仍可收官」
+    # ——否则模型会再点一次，而这次没有 tools 字段可承载
+    payload.append(Message(role="system", content=_CLOSING_HINT.format(menu=_MENU_GONE)))
+    final = _merge_with_leak_guard(llm, payload, None, should_cancel, on_text)
+    session.messages.append(final)
+    return RunResult.COMPLETED, final
+
+
 def run_turn(
     session: Session,
     user_text: str | None,
@@ -536,12 +614,11 @@ def run_turn(
         # （P0-6 原地踏步熔断已自带 stuck 事件，不再发 max_rounds 噪声）
         if not stuck and on_event:
             on_event("max_rounds", {})
-        # 最后一问不递菜单，逼它说话（同流式消费，同样罩检查点③）；
-        # 泄漏守卫同款——保险丝已熔断再泄漏也无菜单可点，超限即降级
-        reply = _merge_with_leak_guard(llm, payload, None, should_cancel, on_text)
-
-        session.messages.append(reply)
-        return RunResult.COMPLETED, reply   # noqa: TRY300  # 紧贴 for 收尾段陈述「保险丝收尾也入史」，不挪 else
+        # 收尾段整块交给 _close_out（ADR 056：菜单与告知必须配套，见其 docstring）
+        return _close_out(   # noqa: TRY300  # 紧贴 for 收尾段陈述「保险丝收尾也入史」，不挪 else
+            llm, payload, schemas, session, agent,
+            on_confirm, on_event, should_cancel, on_text,
+        )
     except _RunCancelled:
         trim_incomplete_round(session.messages)
         return RunResult.CANCELLED, None
