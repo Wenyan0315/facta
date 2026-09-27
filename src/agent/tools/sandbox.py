@@ -28,6 +28,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from agent.paths import MEMORY_WRITE_FENCE
+
 ENV_SWITCH = "CORTEX_SANDBOX"   # =off 强制关闭（其余值/缺省 = auto）
 
 # 与 files.py 黑名单交叉同源的目录项（root 相对）——tests/test_sandbox.py
@@ -100,8 +102,12 @@ def build_seatbelt_profile(root: Path) -> str:
         '(deny file-read* (regex "/\\.env/"))',
     ]
     # 目录黑名单（root 相对；子 agent root=副本时这些路径不存在，规则无害
-    # 空转——零特判）
-    rules += [f'(deny file-write* (subpath "{r}/{d}"))' for d in _BLACKLIST_DIRS]
+    # 空转——零特判）。052 记忆围栏同形状追加：subpath 对普通文件
+    # （graph.json）也生效，本机实测写/追加/rm 全 EPERM 而 cat 照常放行。
+    rules += [
+        f'(deny file-write* (subpath "{r}/{d}"))'
+        for d in (*_BLACKLIST_DIRS, *MEMORY_WRITE_FENCE)
+    ]
     return "\n".join(rules)
 
 

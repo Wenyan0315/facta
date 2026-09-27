@@ -142,6 +142,25 @@ def test_write_file_respects_fence(tmp_path):
         _write_file(".env", "STOLEN=1", root=tmp_path)
 
 
+def test_memory_write_fence_blocks_write_but_not_read(tmp_path):
+    """052：记忆资产 write_file 拒写且未落盘；read_file 照常放行——围栏只作用于写。"""
+    notes = tmp_path / "data" / "notes"
+    notes.mkdir(parents=True)
+    (notes / "a.md").write_text("hi", encoding="utf-8")
+    (tmp_path / "data" / "graph.json").write_text("{}", encoding="utf-8")
+
+    for target in ("data/notes/x.md", "data/notes/a.md", "data/learned/f.md", "data/graph.json"):
+        assert "拒绝直写" in _write_file(target, "poison", root=tmp_path), target
+    assert not (notes / "x.md").exists()
+    assert (notes / "a.md").read_text(encoding="utf-8") == "hi"
+    assert (tmp_path / "data" / "graph.json").read_text(encoding="utf-8") == "{}"
+
+    # 读语义不变（防过度封堵的回归守卫：notes 是 r1/i3/i4 的 verify 语料）
+    assert "hi" in _read_file("data/notes/a.md", root=tmp_path)
+    # 正对照：非记忆路径照常写
+    assert "已新建" in _write_file("data/other.md", "ok", root=tmp_path)
+
+
 # ---------- 注册与分级 ----------
 
 def test_file_tools_registered_with_levels():

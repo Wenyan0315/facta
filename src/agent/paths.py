@@ -60,3 +60,11 @@ WORKTREES_DIR = DATA_ROOT / "worktrees"
 # S7a 知识图谱落盘位置：notes 的结构化投影——文本可读、可审查、可 diff，
 # 知识资产进 git（与 vector_db 二进制缓存相反的判断）
 GRAPH_PATH = DATA_ROOT / "graph.json"
+
+# 052 记忆写围栏：只作用于「写」的清单（root 相对 posix）。与 files.py 的
+# _BLACKLIST_DIRS 分列——那份清单被 _resolve_in_workspace 用于读写两条路径，
+# 而 notes 是必须可读的语料资产（r1/i3/i4 的 verify 基准就是这 15 篇），
+# 塞进去等于当场产品回归。消费方两处同源 import：files.py（write_file 写侧拒）
+# 与 sandbox.py（deny file-write*）。记忆落盘唯一入口＝工具进程（write_note /
+# sync_graph / 记忆固化，都是进程内写，不经这两层）。
+MEMORY_WRITE_FENCE = ("data/notes", "data/learned", "data/graph.json")

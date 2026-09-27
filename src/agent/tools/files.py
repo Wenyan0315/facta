@@ -20,7 +20,7 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
-from agent.paths import WORKSPACE_ROOT
+from agent.paths import MEMORY_WRITE_FENCE, WORKSPACE_ROOT
 from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
 
@@ -30,6 +30,8 @@ MAX_SEARCH_HITS = 30              # search_code 命中上限（防海啸）
 MAX_DIFF_LINES = 40               # write_file 返回的 diff 行数上限
 
 # 敏感黑名单：路径 resolve 后命中即拒（读都不行）
+# 注意：本清单被 _resolve_in_workspace 用于读写两条路径——052 的记忆写围栏
+# （data/notes 等「可写要拒、可读必须放行」的资产）另列 paths.MEMORY_WRITE_FENCE。
 _BLACKLIST_PARTS = (".env", ".git")
 _BLACKLIST_DIRS = ("data/memory", "data/audit", "data/vector_db", "servers/sandbox", ".venv", "data/worktrees")   # 末项 S6a：worktree 沙箱区（search_code rglob 双扫+主 agent 读子沙箱都挡）
 
@@ -190,6 +192,13 @@ def _list_dir(path: str = ".", *, root: Path = WORKSPACE_ROOT) -> str:
 def _write_file(path: str, content: str, *, root: Path = WORKSPACE_ROOT) -> str:
     """写项目文件（新建或覆盖）。覆盖时返回 diff 摘要——改了什么一眼可见。"""
     target = _resolve_in_workspace(path, root=root)
+    # 052 记忆写围栏：只拒写，读语义不动（_read_file 仍走 _resolve_in_workspace
+    # 原路径）。记忆落盘的唯一入口是 write_note / sync_graph——它们带内容闸，
+    # 从这里直写等于绕过闸门投毒（bash 臂的同款路径由 sandbox.py 的 deny 挡）。
+    rel = target.relative_to(root).as_posix()
+    for banned in MEMORY_WRITE_FENCE:
+        if rel == banned or rel.startswith(banned + "/"):
+            return f"记忆资产拒绝直写（走 write_note / sync_graph，内容闸在那条路上）：{rel}"
     if target.exists() and not target.is_file():
         return f"目标不是普通文件：{path}"
     if len(content.encode("utf-8")) > MAX_FILE_BYTES:

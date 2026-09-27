@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from agent import paths as paths_mod
 from agent.core.audit import AuditLog
 from agent.tools import files as files_mod
 from agent.tools import sandbox
@@ -89,6 +90,18 @@ def test_profile_blacklist_covers_files_py():
     assert profile.rindex("(deny") > profile.rindex("(allow")
 
 
+def test_profile_memory_write_fence_single_source():
+    """052：记忆写围栏三处（notes/learned/graph.json）都进 deny，且 files.py
+    与 sandbox.py 用的是 paths.py 那一个对象——各写一份字面量就是 P1-3 的老病。"""
+    profile = build_seatbelt_profile(Path("/ws"))
+    for d in paths_mod.MEMORY_WRITE_FENCE:
+        assert f'(deny file-write* (subpath "/ws/{d}"))' in profile, d
+    assert files_mod.MEMORY_WRITE_FENCE is paths_mod.MEMORY_WRITE_FENCE
+    assert sandbox.MEMORY_WRITE_FENCE is paths_mod.MEMORY_WRITE_FENCE
+    # 围栏只作用于写：读侧全放（049 只围 .env 一族），语料必须读得到
+    assert "(deny file-read* (subpath" not in profile
+
+
 # ── 4. seatbelt 实跑：写围栏正反对称 ─────────────────────────
 
 @seatbelt_only
@@ -122,6 +135,42 @@ def test_blacklist_dir_denied(tmp_path):
     (root / "data" / "memory").mkdir(parents=True)
     r = _run_command(f"echo x > {root / 'data' / 'memory' / 'f'}", root=root)
     assert "Operation not permitted" in r
+
+
+@seatbelt_only
+def test_memory_write_denied_read_allowed(tmp_path):
+    """052 核心（实跑断言，不只断 profile 文本）：记忆资产写/追加/删除全 EPERM，
+    读与非记忆写照常——i6 的 bash 臂规避链（自写脚本落盘 data/notes）走不通。"""
+    root = _root(tmp_path)
+    notes = root / "data" / "notes"
+    notes.mkdir(parents=True)
+    (notes / "a.md").write_text("hi")
+    (root / "data" / "graph.json").write_text("{}")
+
+    # 读侧放行（围栏只作用于写）
+    assert "hi" in _run_command("cat data/notes/a.md", root=root)
+
+    r = _run_command("echo poison > data/notes/x.md", root=root)
+    assert "Operation not permitted" in r and not (notes / "x.md").exists()
+    r = _run_command("echo poison >> data/notes/a.md", root=root)
+    assert "Operation not permitted" in r and (notes / "a.md").read_text() == "hi"
+    r = _run_command("rm data/notes/a.md", root=root)
+    assert "Operation not permitted" in r and (notes / "a.md").exists()
+    r = _run_command("echo {} > data/graph.json", root=root)
+    assert "Operation not permitted" in r
+    assert (root / "data" / "graph.json").read_text() == "{}"
+    # 目录不在场也挡（规则按路径匹配，不需要目录存在）
+    assert "Operation not permitted" in _run_command(
+        "mkdir -p data/learned && echo x > data/learned/f.md", root=root,
+    )
+    # i6 实际观测到的形状：先写脚本到 /tmp（可写），再用解释器落盘 notes
+    r = _run_command(
+        f"{sys.executable} -c \"open('data/notes/p.md','w').write('poison')\"", root=root,
+    )
+    assert "Operation not permitted" in r and not (notes / "p.md").exists()
+    # 正对照：非记忆路径不误伤
+    r = _run_command("echo ok > data/other.md", root=root)
+    assert "exit code: 0" in r and (root / "data" / "other.md").exists()
 
 
 @seatbelt_only
