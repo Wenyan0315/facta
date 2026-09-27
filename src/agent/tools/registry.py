@@ -170,7 +170,9 @@ class ToolRegistry:
 
         confirm（S4b L2 缝）：工具标了 needs_confirmation 时，裁决回调
         （名字+参数 → 批准/拒绝）。拒绝不执行，回灌「用户拒绝」让模型换
-        方案；无 confirm 通道按拒绝处理（保守默认）。批准与拒绝都落审。
+        方案；无 confirm 通道按拒绝处理（保守默认）。批准与拒绝都落审，
+        且**裁决结果两条路都回灌给模型**（054：批准原先静默，模型只能靠
+        「结果回来了」反推「没弹框」，实测幻觉出不存在的白名单项）。
         """
         tool = self._tools.get(name)
         if tool is None:
@@ -224,12 +226,31 @@ class ToolRegistry:
             if not result.strip():
                 result = "（无输出）"
 
+        # 054 批准痕迹：必须拼在空输出显式化**之后**——痕迹非空，先拼会让
+        # 037 P2 的「（无输出）」永不触发。抽成函数是为了 execute 不超分支预算。
+        result += _approval_trace(needs, guard)
+
         # S3 审计收口：所有工具调用（含失败）在这里落盘——单一必经点，
         # 新工具零成本继承。失败也记（result 是错误串，事后可查）。
         if self._audit is not None:
             self._audit.record(name, args, result, tool.is_readonly, extra=_audit_extra(tool, guard))
 
         return result
+
+
+def _approval_trace(needs: object, guard: str | None) -> str:
+    """054 批准痕迹：批准路径原本对模型静默——回灌的只有工具原始输出，模型
+    无从得知这次调用经过了人审，只能从「结果回来了」反推「大概没弹框」。
+    实测后果（data/audit 2026-09-27T14:16:00 那条 `sleep 30`，guard 明记
+    not-whitelisted）：模型幻觉出「没弹确认，被当只读放行」+「sleep 居然在
+    只读白名单里」，并据此两次提议去摘一个不存在的白名单项。与拒绝路径的
+    固定文案对称——裁决结果两条路都回灌，模型不必猜。
+    规则名复用 guard（050 的同一份 _confirm_rule 返回值），不另立真值源；
+    拼进 result 后审计记的与模型所见逐字一致。免确认路径返回空串＝零行为差。
+    """
+    if not needs:
+        return ""
+    return f"\n（本次调用经用户确认批准{f'；命中规则：{guard}' if guard else ''}）"
 
 
 def _audit_extra(tool: Tool, guard: str | None = None) -> dict[str, str] | None:

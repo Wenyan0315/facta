@@ -14,7 +14,7 @@ import json
 import pytest
 
 from agent.core.audit import AuditLog
-from agent.tools.registry import ToolRegistry
+from agent.tools.registry import Tool, ToolRegistry
 from agent.tools.terminal import (
     WORKSPACE_ROOT,
     _confirm_rule,
@@ -245,6 +245,48 @@ def test_confirm_approved_executes(tmp_path):
 
     assert "exit code: 0" in out
     assert (tmp_path / "approved.txt").exists()
+
+
+def test_confirm_approved_leaves_trace_for_model(tmp_path):
+    # 054：批准路径原先对模型静默——回灌的只有工具原始输出，模型只能从
+    # 「结果回来了」反推「大概没弹框」。实测（audit 2026-09-27T14:16:00
+    # 那条 sleep 30，guard 明记 not-whitelisted）它幻觉出「被当只读放行」+
+    # 「sleep 居然在只读白名单里」，还据此提议去摘一个不存在的白名单项。
+    registry = _terminal_registry(root=tmp_path)
+
+    out = registry.execute(
+        "run_command", json.dumps({"command": "sleep 0"}),
+        confirm=lambda name, args: True,
+    )
+
+    assert "exit code: 0" in out        # 原始输出不被痕迹挤掉
+    assert "经用户确认批准" in out        # 裁决结果回灌：模型不必再猜
+    assert "not-whitelisted" in out     # 规则名复用 050 的 guard，不另立真值源
+
+
+def test_whitelisted_command_leaves_no_confirm_trace():
+    # 对称的另一半：免确认路径**不带**痕迹——否则模型会以为白名单命令也
+    # 弹过窗，把「静默直跑」这个既有认知也搞错。
+    registry = _terminal_registry()
+
+    out = registry.execute("run_command", json.dumps({"command": "echo free"}))
+
+    assert "exit code: 0" in out and "经用户确认批准" not in out
+
+
+def test_confirm_trace_appended_after_empty_output_marker():
+    # 顺序回归靶子：痕迹必须拼在 037 P2 的空输出显式化**之后**——
+    # 先拼会让 result 非空，「（无输出）」永不触发，两条信息一起丢。
+    registry = ToolRegistry()
+    registry.register(Tool(
+        name="silent_danger", description="", parameters={},
+        func=lambda: "", needs_confirmation=True,
+    ))
+
+    out = registry.execute("silent_danger", "{}", confirm=lambda n, a: True)
+
+    assert "（无输出）" in out
+    assert "经用户确认批准" in out
 
 
 def test_no_confirm_channel_defaults_to_reject(tmp_path):
