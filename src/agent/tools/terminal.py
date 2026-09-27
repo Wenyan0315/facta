@@ -18,6 +18,10 @@
      cat/open 都拿不到内容）；home 凭证（~/.ssh/id_rsa、.pem、.aws 等）
      不进沙箱 deny（会打断沙箱内 git 的 SSH 认证），改由 needs_confirm
      的凭证模式一律弹窗——白名单免确认对凭证失效
+  ⑦ 围栏归因（050）：判定抽成 _confirm_rule → 规则名（shell-meta /
+     env-prefix / dangerous-arg / credential-path / not-whitelisted /
+     empty），经 needs_confirmation 进审计的 extra["guard"]。「这次弹窗
+     撞的是哪道围栏」从此是记录里的事实，不再靠模型自述
 """
 
 from __future__ import annotations
@@ -78,6 +82,42 @@ def _has_credential_path(command: str) -> bool:
     )
 
 
+def _confirm_rule(command: str) -> str | None:
+    """命中哪道确认规则；免确认返回 None（050 归因）。
+
+    与 needs_confirm 是同一份判定的两种读法——needs_confirm 是它的薄封装，
+    真值不可能漂移。规则名进审计的 extra["guard"]，回答「这次弹窗到底撞了
+    哪道围栏」：049 执行校正 ⑥ 的缺口是 i4 那 1 次 run_command 确认，记录里
+    查不出是凭证围栏还是非白名单命令，只能靠模型自述。
+    """
+    if any(ch in _SHELL_META for ch in command):
+        return "shell-meta"
+    tokens = command.split()
+    if not tokens:
+        return "empty"
+    head = tokens[0].rsplit("/", 1)[-1]      # /usr/bin/git → git
+    if "=" in head:                          # FOO=1 cmd 环境变量前缀 → 保守确认
+        return "env-prefix"
+    # 参数级拦截：白名单命令带危险参数 → 确认（S4 评审 #17）
+    # split("=") 兼容长选项等号形式（sort --output=file）
+    dangerous = _DANGEROUS_ARGS.get(head)
+    if dangerous is not None and any(
+        arg.split("=", 1)[0] in dangerous for arg in tokens[1:]
+    ):
+        return "dangerous-arg"
+    # 凭证路径拦截（049）：优先级高于白名单——cat/head 等免确认命令读 .env
+    # 或私钥同样要人裁决（048 只围了写，读侧全放开，注入载荷一条 cat 就穿）
+    if _has_credential_path(command):
+        return "credential-path"
+    if head in _WHITELIST_SIMPLE:
+        return None
+    if head == "git" and len(tokens) > 1 and tokens[1] in _GIT_READONLY:
+        return None
+    if head in ("python", "python3") and tokens[1:3] == ["-m", "pytest"]:
+        return None
+    return "not-whitelisted"
+
+
 def needs_confirm(command: str) -> bool:
     """保守判定：白名单命令 且 无 shell 元字符 且 无危险参数 且 不含凭证路径
     → 免确认；其余一律确认。
@@ -90,32 +130,7 @@ def needs_confirm(command: str) -> bool:
 
     凭证路径校验（049）：.env / 私钥一类命中即确认，优先级高于白名单。
     """
-    if any(ch in _SHELL_META for ch in command):
-        return True
-    tokens = command.split()
-    if not tokens:
-        return True
-    head = tokens[0].rsplit("/", 1)[-1]      # /usr/bin/git → git
-    if "=" in head:                          # FOO=1 cmd 环境变量前缀 → 保守确认
-        return True
-    # 参数级拦截：白名单命令带危险参数 → 确认（S4 评审 #17）
-    # split("=") 兼容长选项等号形式（sort --output=file）
-    dangerous = _DANGEROUS_ARGS.get(head)
-    if dangerous is not None and any(
-        arg.split("=", 1)[0] in dangerous for arg in tokens[1:]
-    ):
-        return True
-    # 凭证路径拦截（049）：优先级高于白名单——cat/head 等免确认命令读 .env
-    # 或私钥同样要人裁决（048 只围了写，读侧全放开，注入载荷一条 cat 就穿）
-    if _has_credential_path(command):
-        return True
-    if head in _WHITELIST_SIMPLE:
-        return False
-    if head == "git" and len(tokens) > 1 and tokens[1] in _GIT_READONLY:
-        return False
-    if head in ("python", "python3") and tokens[1:3] == ["-m", "pytest"]:
-        return False
-    return True
+    return _confirm_rule(command) is not None
 
 
 def _run_command(command: str, *, root: Path = WORKSPACE_ROOT) -> str:
@@ -182,7 +197,9 @@ def register_terminal_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                 "required": ["command"],
             },
             func=lambda command: _run_command(command, root=root),
-            needs_confirmation=lambda args: needs_confirm(args["command"]),
+            # 050：吐规则名而非 bool——registry 据此写 audit 的 extra["guard"]。
+            # 非空 str 为真、None 为假，真值语义与 needs_confirm 完全一致。
+            needs_confirmation=lambda args: _confirm_rule(args["command"]),
             sandboxed=True,   # 048：审计条目带 sandbox=seatbelt/off 标记
         )
     )

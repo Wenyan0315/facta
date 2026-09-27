@@ -78,6 +78,9 @@ class Tool:
     也可传 callable(args)->bool 按参数动态判定（run_command 的白名单：
     只读命令免确认，其余弹窗）。裁决走 execute 的 confirm 缝；
     无 confirm 通道时按拒绝处理（保守默认：没有眼睛就不动手）。
+    050 起返回值可以是**规则名**（非空 str）：真值语义不变（非空 str 为真、
+    None 为假），额外把「撞的是哪道围栏」写进审计的 extra["guard"]——
+    否则安全叙事只能靠模型自述（049 执行校正 ⑥）。
 
     idempotent（P0-3 / 038 P2 崩溃恢复）：True=同样参数重复执行，效果与执行
     一次相同、无累积副作用。恢复时用它决定悬挂调用的处置文案——幂等的可以
@@ -95,7 +98,10 @@ class Tool:
     func: Callable[..., str]        # 真正执行的 Python 函数
     is_readonly: bool = False       # S3 权限分级：只读 L0 / 写 L1（保守默认写类）
     idempotent: bool = False        # P0-3 崩溃恢复：写类工具能否安全重做（只读免声明）
-    needs_confirmation: bool | Callable[[dict], bool] = False   # S4b L2 确认标记
+    # S4b L2 确认标记；050 宽化：非空 str = 命中的规则名（真值语义不变）
+    needs_confirmation: (
+        bool | str | None | Callable[[dict], bool | str | None]
+    ) = False
     sandboxed: bool = False           # 048：True=执行走进程级沙箱，审计条目
                                       # 带 sandbox=seatbelt/off 标记（批准拒绝都带）
     receives_confirm: bool = False  # S5c 编排工具标记：func 额外接收 confirm 参数
@@ -188,10 +194,14 @@ class ToolRegistry:
             if callable(tool.needs_confirmation)
             else tool.needs_confirmation
         )
+        # 050 归因：needs 可能是规则名（非空 str）而不是 bool——摘出来带进审计。
+        # 批准与拒绝两条路径都要带：i4 那次确认是**批准后执行**的，只记拒绝路径
+        # 就正好漏掉要归因的那一条。
+        guard = needs if isinstance(needs, str) else None
         if needs and (confirm is None or not confirm(name, args)):
             result = "用户拒绝了这次操作（未经确认不执行）。请换方案，或先向用户说明理由再重试。"
             if self._audit is not None:
-                self._audit.record(name, args, result, tool.is_readonly, extra=_sandbox_extra(tool))
+                self._audit.record(name, args, result, tool.is_readonly, extra=_audit_extra(tool, guard))
             return result
 
         try:
@@ -217,14 +227,18 @@ class ToolRegistry:
         # S3 审计收口：所有工具调用（含失败）在这里落盘——单一必经点，
         # 新工具零成本继承。失败也记（result 是错误串，事后可查）。
         if self._audit is not None:
-            self._audit.record(name, args, result, tool.is_readonly, extra=_sandbox_extra(tool))
+            self._audit.record(name, args, result, tool.is_readonly, extra=_audit_extra(tool, guard))
 
         return result
 
 
-def _sandbox_extra(tool: Tool) -> dict[str, str] | None:
-    """048 审计打标：沙箱工具的条目带 sandbox=seatbelt/off（批准拒绝都带）；
-    非沙箱工具 None=零行为差。which 毫秒级，不为省一次探测做缓存。"""
-    if not tool.sandboxed:
-        return None
-    return {"sandbox": detect_backend() or "off"}
+def _audit_extra(tool: Tool, guard: str | None = None) -> dict[str, str] | None:
+    """048/050 审计打标：沙箱工具的条目带 sandbox=seatbelt/off（批准拒绝都带），
+    命中确认规则的带 guard=规则名；两者都没有则 None=零行为差。
+    which 毫秒级，不为省一次探测做缓存。"""
+    extra: dict[str, str] = {}
+    if tool.sandboxed:
+        extra["sandbox"] = detect_backend() or "off"
+    if guard:
+        extra["guard"] = guard
+    return extra or None

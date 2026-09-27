@@ -17,6 +17,7 @@ from agent.core.audit import AuditLog
 from agent.tools.registry import ToolRegistry
 from agent.tools.terminal import (
     WORKSPACE_ROOT,
+    _confirm_rule,
     _run_command,
     needs_confirm,
     register_terminal_tools,
@@ -133,6 +134,41 @@ def test_non_credential_paths_stay_whitelisted(command):
     assert needs_confirm(command) is False
 
 
+# ---------- 确认规则归因（050）：撞了哪道围栏是可记录的事实 ----------
+
+@pytest.mark.parametrize("command,rule", [
+    ("cat .env", "credential-path"),
+    ("cat ~/.ssh/id_rsa", "credential-path"),
+    ("echo a; rm -rf b", "shell-meta"),
+    ("FOO=1 pytest", "env-prefix"),
+    ("sort --output=x in", "dangerous-arg"),
+    ("lsof -i :8000", "not-whitelisted"),
+    ("touch pwned.txt", "not-whitelisted"),
+    ("", "empty"),
+    ("   ", "empty"),
+])
+def test_confirm_rule_names(command, rule):
+    assert _confirm_rule(command) == rule
+
+
+@pytest.mark.parametrize("command", [
+    "ls -la", "cat README.md", "git status", "python -m pytest -q", "grep -r env src/",
+])
+def test_confirm_rule_is_none_when_whitelisted(command):
+    assert _confirm_rule(command) is None
+
+
+def test_confirm_rule_never_drifts_from_needs_confirm():
+    # needs_confirm 是薄封装：真值必须逐条一致，否则 60+ 条既有断言与归因各说各话
+    commands = [
+        "ls", "cat .env", "cat README.md", "git status", "git push", "rm -rf x",
+        "python -m pytest", "python x.py", "echo a; rm b", "", "sort -o out in",
+        "find . -delete", "FOO=1 ls", "cat ~/.ssh/id_rsa", "cat keyboard.md",
+    ]
+    for cmd in commands:
+        assert needs_confirm(cmd) is (_confirm_rule(cmd) is not None), cmd
+
+
 # ---------- _run_command 六用例 ----------
 
 def test_run_command_echo_and_exit_code():
@@ -244,6 +280,28 @@ def test_rejection_is_audited(tmp_path):
     assert len(records) == 1
     assert records[0]["tool"] == "run_command"
     assert "用户拒绝了" in records[0]["result"]
+
+
+def test_guard_rule_is_audited_on_both_paths(tmp_path):
+    # 050 归因：批准与拒绝都要带 guard——i4 那次是批准后执行的，
+    # 只记拒绝路径就正好漏掉要归因的那一条。白名单命令不带 guard 键。
+    audit = AuditLog(tmp_path)
+    registry = _terminal_registry(audit, root=tmp_path)
+
+    registry.execute(
+        "run_command", json.dumps({"command": "cat .env"}),
+        confirm=lambda name, args: True,
+    )
+    registry.execute(
+        "run_command", json.dumps({"command": "rm -rf x"}),
+        confirm=lambda name, args: False,
+    )
+    registry.execute("run_command", json.dumps({"command": "echo free"}))
+
+    records = audit.read()
+    assert [r.get("guard") for r in records] == [
+        "credential-path", "not-whitelisted", None,
+    ]
 
 
 def test_default_tools_unaffected_by_confirm_seam():

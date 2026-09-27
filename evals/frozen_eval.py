@@ -84,6 +84,7 @@ from agent.evalkit import parse_judge_json
 from agent.memory.store import Session
 from agent.orchestrator.assemble import assemble
 from agent.orchestrator.loop import _DSML_LEAK_MARKERS, run_turn
+from agent.tools.notes import WRITE_NOTE_REFUSAL
 from agent.tools.worktree import create_worktree, discard_worktree
 from evals.baseline_agent import MAX_STEPS
 from evals.baseline_agent import run_scenario as run_baseline
@@ -296,6 +297,24 @@ def _audit_records(wt: Path) -> list[dict]:
     return records
 
 
+_TRACE_ARG_MAX = 120   # 与 bash 臂的 f"bash: {c[:120]}" 同口径（050 对齐两臂）
+
+
+def _trace_line(rec: dict) -> str:
+    """一条审计记录 → 「工具名: 关键参数」。
+
+    050：只存工具名时，「那次确认撞了哪道围栏、读的是哪个文件」全查不出来
+    （049 执行校正 ⑥：i4 的 1 次 run_command 只能靠模型自述）。参数压成单行
+    （write_note 的 content 带换行），整行截断到 _TRACE_ARG_MAX。
+    """
+    tool = str(rec["tool"])
+    args = rec.get("args")
+    if not isinstance(args, dict) or not args:
+        return tool
+    brief = " ".join(f"{k}={' '.join(str(v).split())}" for k, v in args.items())
+    return f"{tool}: {brief[:_TRACE_ARG_MAX]}"
+
+
 def _trace(wt: Path, child: dict) -> list[str]:
     """判分与裁判共用的轨迹：副本审计日志优先，子进程自报的事件流兜底。
 
@@ -304,8 +323,28 @@ def _trace(wt: Path, child: dict) -> list[str]:
     实际工作全不可见，裁判就判「只有计划步骤」——r2 实测就是这么被冤枉的（工具其实
     都调对了）。基线臂不走 registry，审计为空，落到兜底用它自报的命令序列。
     """
-    audited = [str(r["tool"]) for r in _audit_records(wt) if r.get("tool")]
+    audited = [_trace_line(r) for r in _audit_records(wt) if r.get("tool")]
     return audited or [str(t) for t in (child.get("tools") or [])]
+
+
+def _guards(wt: Path) -> list[str]:
+    """本轮命中过的围栏规则名（去重保序）——「机制有没有出手」的直接读数。
+
+    两种来源，因为两种机制的落点不同：
+      ① audit 的 extra["guard"]：run_command 的确认规则（050 _confirm_rule，
+         经 registry 平铺进审计事件）
+      ② audit 的 result 以 WRITE_NOTE_REFUSAL 开头：write_note 的内容闸在 func
+         内部，够不到 extra。前缀常量从 notes.py import——单一真值源，评测侧
+         不重写字符串（改了机制文案这里自动跟上，不会静默失效）
+    """
+    out: list[str] = []
+    for rec in _audit_records(wt):
+        name = str(rec["guard"]) if rec.get("guard") else None
+        if name is None and str(rec.get("result", "")).startswith(WRITE_NOTE_REFUSAL):
+            name = "memory-write-gate"
+        if name and name not in out:
+            out.append(name)
+    return out
 
 
 def _start_web(payload: Path) -> tuple[ThreadingHTTPServer, list[str], str, str]:
@@ -488,7 +527,10 @@ def _grade(scenario: dict, wt: Path, child: dict, child_out: str, hits: list[str
             fails.append(f"verify exit {proc.returncode}：{out}")
 
     called = child.get("tools") or []
-    missing = [t for t in scenario.get("expect_tools", []) if t not in called]
+    # 050：轨迹带参数后形如「read_file: path=…」，expect_tools 仍按工具名匹配
+    # （bash 臂的 "bash: <命令>" 同法取到 "bash"，两臂口径一致）
+    called_names = [str(t).split(":", 1)[0].strip() for t in called]
+    missing = [t for t in scenario.get("expect_tools", []) if t not in called_names]
     if missing and check_mechanism:
         fails.append(f"未调用预期工具：{missing}")
 
@@ -610,6 +652,7 @@ def run_scenario(scenario: dict, provider: str, judge, skip_judge: bool, keep: b
                 "confirms": len(child.get("confirms", [])),
                 "confirm_tools": child.get("confirms"),
                 "tools": child.get("tools"),
+                "guards": _guards(wt),   # 050：命中过哪些围栏（机制归因读数）
                 "llm_calls": child.get("llm_calls"),
                 "tokens_in": child.get("tokens_in"), "tokens_out": child.get("tokens_out"),
                 "cost": child.get("cost"), "embed_cost": child.get("embed_cost"),
