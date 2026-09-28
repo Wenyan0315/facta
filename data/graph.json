@@ -98,7 +98,10 @@
     },
     {
       "id": "一致性检查-第2_3层实操示例.md",
-      "type": "概念"
+      "type": "概念",
+      "aliases": [
+        "一致性检查-第2_3层实操示例"
+      ]
     },
     {
       "id": "Agent.md",
@@ -163,19 +166,68 @@
     {
       "id": "实体向量",
       "type": "概念"
+    },
+    {
+      "id": "golden set",
+      "type": "概念"
+    },
+    {
+      "id": "阿里巴巴",
+      "type": "概念",
+      "aliases": [
+        "阿里"
+      ]
+    },
+    {
+      "id": "云栖大会",
+      "type": "概念"
+    },
+    {
+      "id": "花旗",
+      "type": "概念"
+    },
+    {
+      "id": "通义千问 Qwen v3.8",
+      "type": "技术"
+    },
+    {
+      "id": "MaaS 平台",
+      "type": "技术"
+    },
+    {
+      "id": "平头哥",
+      "type": "概念"
+    },
+    {
+      "id": "企业智能体应用",
+      "type": "概念"
+    },
+    {
+      "id": "恒生指数",
+      "type": "概念"
+    },
+    {
+      "id": "纳斯达克",
+      "type": "概念"
     }
   ],
   "edges": [
     {
-      "source": "Agent",
-      "target": "大模型应用",
+      "source": "仿制 coding agent",
+      "target": "复杂任务",
       "relation": "包含",
-      "source_note": "Agent.md"
+      "source_note": "Agent仿制-能力分层与演进.md"
     },
     {
-      "source": "仿制 coding agent",
-      "target": "Agent 骨架",
-      "relation": "包含",
+      "source": "课程",
+      "target": "项目",
+      "relation": "依赖",
+      "source_note": "Agent仿制-能力分层与演进.md"
+    },
+    {
+      "source": "论文",
+      "target": "项目",
+      "relation": "依赖",
       "source_note": "Agent仿制-能力分层与演进.md"
     },
     {
@@ -185,40 +237,34 @@
       "source_note": "Agent仿制-能力分层与演进.md"
     },
     {
-      "source": "Agent 骨架",
-      "target": "工具",
-      "relation": "依赖",
-      "source_note": "Agent仿制-能力分层与演进.md"
-    },
-    {
-      "source": "Agent 骨架",
-      "target": "LLM",
-      "relation": "依赖",
-      "source_note": "Agent仿制-能力分层与演进.md"
-    },
-    {
-      "source": "政策",
-      "target": "能力与政策一致性检查.md",
+      "source": "能力与政策一致性检查.md",
+      "target": "政策",
       "relation": "引用",
       "source_note": "Agent仿制-能力分层与演进.md"
     },
     {
-      "source": "政策",
-      "target": "政策自动复查落地手册.md",
+      "source": "政策自动复查落地手册.md",
+      "target": "政策",
       "relation": "引用",
       "source_note": "Agent仿制-能力分层与演进.md"
     },
     {
-      "source": "政策",
-      "target": "一致性检查-第2_3层实操示例.md",
+      "source": "一致性检查-第2_3层实操示例.md",
+      "target": "政策",
       "relation": "引用",
       "source_note": "Agent仿制-能力分层与演进.md"
     },
     {
-      "source": "Agent",
-      "target": "Agent.md",
+      "source": "Agent.md",
+      "target": "Agent",
       "relation": "引用",
       "source_note": "Agent仿制-能力分层与演进.md"
+    },
+    {
+      "source": "Embedding",
+      "target": "向量",
+      "relation": "包含",
+      "source_note": "Embedding.md"
     },
     {
       "source": "一致性检查-第2_3层实操示例.md",
@@ -227,9 +273,9 @@
       "source_note": "一致性检查-第2_3层实操示例.md"
     },
     {
-      "source": "一致性检查-第2_3层实操示例.md",
-      "target": "政策",
-      "relation": "引用",
+      "source": "Agent",
+      "target": "工具",
+      "relation": "依赖",
       "source_note": "一致性检查-第2_3层实操示例.md"
     },
     {
@@ -239,63 +285,21 @@
       "source_note": "一致性检查-第2_3层实操示例.md"
     },
     {
-      "source": "政策",
+      "source": "模型",
       "target": "工具",
-      "relation": "包含",
-      "source_note": "一致性检查-第2_3层实操示例.md"
+      "relation": "依赖",
+      "source_note": "三级信息政策.md"
     },
     {
       "source": "Agent",
       "target": "能力",
       "relation": "包含",
-      "source_note": "一致性检查-第2_3层实操示例.md"
-    },
-    {
-      "source": "Agent",
-      "target": "工具",
-      "relation": "依赖",
-      "source_note": "一致性检查-第2_3层实操示例.md"
-    },
-    {
-      "source": "政策",
-      "target": "工具",
-      "relation": "依赖",
-      "source_note": "三级信息政策.md"
-    },
-    {
-      "source": "Agent",
-      "target": "政策",
-      "relation": "依赖",
-      "source_note": "三级信息政策.md"
-    },
-    {
-      "source": "能力",
-      "target": "政策",
-      "relation": "依赖",
       "source_note": "三级信息政策.md"
     },
     {
       "source": "向量数据库",
       "target": "向量",
-      "relation": "包含",
-      "source_note": "向量数据库.md"
-    },
-    {
-      "source": "Chroma",
-      "target": "向量数据库",
-      "relation": "包含",
-      "source_note": "向量数据库.md"
-    },
-    {
-      "source": "Qdrant",
-      "target": "向量数据库",
-      "relation": "包含",
-      "source_note": "向量数据库.md"
-    },
-    {
-      "source": "pgvector",
-      "target": "向量数据库",
-      "relation": "包含",
+      "relation": "依赖",
       "source_note": "向量数据库.md"
     },
     {
@@ -311,68 +315,8 @@
       "source_note": "政策自动复查落地手册.md"
     },
     {
-      "source": "政策自动复查落地手册.md",
-      "target": "政策",
-      "relation": "包含",
-      "source_note": "政策自动复查落地手册.md"
-    },
-    {
-      "source": "政策自动复查落地手册.md",
-      "target": "能力",
-      "relation": "依赖",
-      "source_note": "政策自动复查落地手册.md"
-    },
-    {
-      "source": "政策自动复查落地手册.md",
-      "target": "Agent",
-      "relation": "引用",
-      "source_note": "政策自动复查落地手册.md"
-    },
-    {
-      "source": "能力与政策一致性检查.md",
-      "target": "政策",
-      "relation": "引用",
-      "source_note": "能力与政策一致性检查.md"
-    },
-    {
-      "source": "能力与政策一致性检查.md",
-      "target": "能力",
-      "relation": "包含",
-      "source_note": "能力与政策一致性检查.md"
-    },
-    {
-      "source": "Agent",
-      "target": "能力",
-      "relation": "包含",
-      "source_note": "能力与政策一致性检查.md"
-    },
-    {
-      "source": "能力",
-      "target": "工具",
-      "relation": "包含",
-      "source_note": "能力与政策一致性检查.md"
-    },
-    {
-      "source": "能力与政策一致性检查.md",
-      "target": "一致性检查-第2_3层实操示例.md",
-      "relation": "引用",
-      "source_note": "能力与政策一致性检查.md"
-    },
-    {
-      "source": "能力与政策一致性检查.md",
-      "target": "政策自动复查落地手册.md",
-      "relation": "引用",
-      "source_note": "能力与政策一致性检查.md"
-    },
-    {
       "source": "知识图谱",
       "target": "Embedding",
-      "relation": "依赖",
-      "source_note": "知识图谱.md"
-    },
-    {
-      "source": "知识图谱",
-      "target": "向量数据库",
       "relation": "依赖",
       "source_note": "知识图谱.md"
     },
@@ -387,10 +331,99 @@
       "target": "向量数据库",
       "relation": "依赖",
       "source_note": "知识图谱.md"
+    },
+    {
+      "source": "知识图谱",
+      "target": "向量数据库",
+      "relation": "依赖",
+      "source_note": "知识图谱.md"
+    },
+    {
+      "source": "能力与政策一致性检查.md",
+      "target": "政策",
+      "relation": "引用",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "能力与政策一致性检查.md",
+      "target": "能力",
+      "relation": "包含",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "能力与政策一致性检查.md",
+      "target": "工具",
+      "relation": "包含",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "能力与政策一致性检查.md",
+      "target": "Agent",
+      "relation": "引用",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "能力与政策一致性检查.md",
+      "target": "golden set",
+      "relation": "包含",
+      "source_note": "能力与政策一致性检查.md"
+    },
+    {
+      "source": "花旗",
+      "target": "云栖大会",
+      "relation": "引用",
+      "source_note": "阿里巴巴股价分析报告-2026年9月24日.md"
+    },
+    {
+      "source": "花旗",
+      "target": "阿里巴巴",
+      "relation": "引用",
+      "source_note": "阿里巴巴股价分析报告-2026年9月24日.md"
+    },
+    {
+      "source": "云栖大会",
+      "target": "通义千问 Qwen v3.8",
+      "relation": "包含",
+      "source_note": "阿里巴巴股价分析报告-2026年9月24日.md"
+    },
+    {
+      "source": "云栖大会",
+      "target": "MaaS 平台",
+      "relation": "包含",
+      "source_note": "阿里巴巴股价分析报告-2026年9月24日.md"
+    },
+    {
+      "source": "云栖大会",
+      "target": "平头哥",
+      "relation": "包含",
+      "source_note": "阿里巴巴股价分析报告-2026年9月24日.md"
+    },
+    {
+      "source": "云栖大会",
+      "target": "企业智能体应用",
+      "relation": "包含",
+      "source_note": "阿里巴巴股价分析报告-2026年9月24日.md"
+    },
+    {
+      "source": "Agent",
+      "target": "工具",
+      "relation": "依赖",
+      "source_note": "Agent.md"
+    },
+    {
+      "source": "Agent",
+      "target": "任务",
+      "relation": "依赖",
+      "source_note": "Agent.md"
+    },
+    {
+      "source": "Agent",
+      "target": "大模型应用",
+      "relation": "包含",
+      "source_note": "Agent.md"
     }
   ],
   "note_hashes": {
-    "Agent.md": "68269dc770dd5f7f",
     "Agent仿制-能力分层与演进.md": "fbbedadf7343d190",
     "Embedding.md": "53ad4b03067ab22b",
     "PHP是最好的语言.md": "a5b327139e812148",
@@ -403,8 +436,9 @@
     "余弦相似度.md": "c447bf1132a81511",
     "向量数据库.md": "ab402cf2f4370624",
     "政策自动复查落地手册.md": "39fee38ab8bce033",
-    "能力与政策一致性检查.md": "7b80c105cacb1bc0",
     "知识图谱.md": "cc68257f585d470e",
-    "阿里巴巴股价分析报告-2026年9月24日.md": "215f8728a2de4bce"
+    "能力与政策一致性检查.md": "7b80c105cacb1bc0",
+    "阿里巴巴股价分析报告-2026年9月24日.md": "215f8728a2de4bce",
+    "Agent.md": "68269dc770dd5f7f"
   }
 }
