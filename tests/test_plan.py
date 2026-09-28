@@ -712,3 +712,138 @@ def test_recall_keeps_provenance_tags(tmp_path, monkeypatch):
     assert "[已验证]" in out
     assert "固化:sid-1" not in out
 
+
+# ---------- 062 收官回验（承诺漂移） ----------
+
+_LEDGER = "ledger.jsonl"
+_DRIFT_REASON = "总结说两步全成，步骤 #2 却标着 failed"
+_DRIFT = '{"score": 0, "reason": "' + _DRIFT_REASON + '"}'
+_OK = '{"score": 1, "reason": ""}'
+
+
+class _JudgeLLM:
+    """062 回验桩：只回一条判决；记录调用次数、收到的提示词、以及是否被传了 tools。"""
+
+    def __init__(self, reply: str = _OK, boom: bool = False):
+        self.reply, self.boom = reply, boom
+        self.tools_seen: list[object] = []
+        self.prompts: list[str] = []
+
+    def generate(self, messages, tools=None):
+        if self.boom:
+            raise RuntimeError("网关炸了")
+        self.tools_seen.append(tools)
+        self.prompts.append(messages[0].content)
+        return Message(role="assistant", content=self.reply)
+
+
+def _verify_setup(tmp_path, monkeypatch, judge, approve, *, complete: bool = True):
+    """062 装配：一个「甲 done／乙 failed」的计划（complete=False 则乙悬空）。
+
+    approve=None ⇒ 不挂 confirm 通道（模拟评测/无头运行）；否则桩返回该值并把
+    每次 (name, args) 记进 calls。直接走 registry.execute 而不走 run_turn：判定
+    标准要断言返回串**逐字节**，中间不该混进循环与投影的噪声。台账路径一并
+    monkeypatch 掉——否则归档会写真实 data/plan_failures.jsonl（污染仓库资产）。
+    """
+    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", tmp_path / _LEDGER)
+    session = Session()
+    registry = ToolRegistry()
+    ctx = ToolContext(notes_dir=None, session=session, llm=judge)   # type: ignore[arg-type]
+    register_plan_tools(registry, ctx)
+    calls: list[tuple[str, dict]] = []
+
+    def yes(name: str, args: dict) -> bool:        # make_plan 的人审：一律批准
+        return True
+
+    def stub(name: str, args: dict) -> bool:       # finish_plan 的漂移裁决桩
+        calls.append((name, args))
+        return bool(approve)
+
+    registry.execute("make_plan", '{"steps": [{"title": "甲"}, {"title": "乙"}]}', yes)
+    registry.execute("update_plan_step", '{"step_id": 1, "status": "done", "note": "成了"}', yes)
+    if complete:
+        registry.execute("update_plan_step", '{"step_id": 2, "status": "failed", "note": "404"}', yes)
+    return session, registry, calls, (stub if approve is not None else None)
+
+
+def test_finish_plan_drift_rejected_keeps_plan_active(tmp_path, monkeypatch):
+    # 判定标准①：漂移 + 人拒 ⇒ 不归档、计划留在 active（整改路可用）。
+    # 指路必须是**真能走通**的路：此时全步骤已终态，update_plan_step 改不动
+    # （终态锁定），所以只有 make_plan 修订／补产出／改如实总结三条
+    judge = _JudgeLLM(_DRIFT)
+    session, registry, calls, confirm = _verify_setup(tmp_path, monkeypatch, judge, False)
+    out = registry.execute("finish_plan", '{"summary": "两步全部完成"}', confirm)
+    assert session.plan.active is not None and not session.plan.archive
+    assert "计划收官被用户拒绝" in out and "仍然活跃" in out
+    assert "update_plan_step 改不动" in out          # 不指死路
+    assert "make_plan 修订" in out and "如实的 summary" in out
+    assert calls == [("finish_plan", {"summary": "两步全部完成", "drift": _DRIFT_REASON})]
+    assert judge.tools_seen == [None]                # 判定标准⑦：内部调用绝不传 tools
+
+
+def test_finish_plan_drift_approved_archives_with_trace(tmp_path, monkeypatch):
+    # 判定标准②：漂移 + 人批 ⇒ 照常归档（060 台账照跑），漂移进返回串 ⇒
+    # registry 审计收口把 result 落盘，零新仪器就留了痕
+    judge = _JudgeLLM(_DRIFT)
+    session, registry, _, confirm = _verify_setup(tmp_path, monkeypatch, judge, True)
+    out = registry.execute("finish_plan", '{"summary": "两步全部完成"}', confirm)
+    assert session.plan.active is None and len(session.plan.archive) == 1
+    assert out.startswith("任务收官（全部步骤已终态化，计划转入归档）：两步全部完成")
+    assert _DRIFT_REASON in out and "用户已确认接受" in out
+    ledger = json.loads((tmp_path / _LEDGER).read_text(encoding="utf-8"))
+    assert ledger["summary"] == "两步全部完成"        # 060 台账未被本刀打断
+
+
+def test_finish_plan_drift_without_confirm_degrades_to_notice(tmp_path, monkeypatch):
+    # 判定标准③：无 confirm 通道 ⇒ 降级为**告知**（照旧归档），刻意不照搬
+    # registry 的「无 confirm 按拒绝」——没人能解锁时拒收官＝板子永久挂 active
+    judge = _JudgeLLM(_DRIFT)
+    session, registry, calls, none_confirm = _verify_setup(tmp_path, monkeypatch, judge, None)
+    out = registry.execute("finish_plan", '{"summary": "两步全部完成"}', none_confirm)
+    assert session.plan.active is None and calls == []
+    assert "本次运行没有人审通道" in out and _DRIFT_REASON in out
+
+
+@pytest.mark.parametrize("judge", [
+    _JudgeLLM(_OK),                                 # 判为一致 ⇒ 放行
+    _JudgeLLM('{"score": "0", "reason": "x"}'),     # score 不是 int ⇒ 解析器返 None
+    _JudgeLLM("我看没问题"),                          # 整段非 JSON、也抠不出块
+    _JudgeLLM('判决：{"score": 1, "reason": ""} 完毕'),  # 散文包裹 ⇒ 走正则抠块兜底
+    _JudgeLLM(boom=True),                            # LLM 抛异常
+    None,                                            # ctx.llm 缺席（既有测试全是这一档）
+], ids=["一致", "score非int", "非JSON", "散文包裹", "网关异常", "无llm"])
+def test_finish_plan_lenient_when_verdict_unusable(tmp_path, monkeypatch, judge):
+    # 判定标准④+⑥：回验器任何故障一律放行，且**不调用 confirm**（不拿故障去烦人）。
+    # 返回串与 062 前逐字节一致 ⇒ 无漂移路径零回归；confirm 桩返回 False 却照样
+    # 归档，也反证了 finish_plan **没有**被挂上 needs_confirmation（拍板 4）
+    session, registry, calls, confirm = _verify_setup(tmp_path, monkeypatch, judge, False)
+    out = registry.execute("finish_plan", '{"summary": "两步全部完成"}', confirm)
+    assert session.plan.active is None and calls == []
+    assert out == "任务收官（全部步骤已终态化，计划转入归档）：两步全部完成"
+
+
+def test_finish_plan_dangling_skips_verification(tmp_path, monkeypatch):
+    # 判定标准⑤：悬空计划被 is_complete() 前置挡住 ⇒ 一次 LLM 都不发起（不白花），
+    # 走既有 dangling 拒绝串，逐字节不变
+    judge = _JudgeLLM(_DRIFT)
+    session, registry, calls, confirm = _verify_setup(
+        tmp_path, monkeypatch, judge, False, complete=False)
+    out = registry.execute("finish_plan", '{"summary": "全做完了"}', confirm)
+    assert judge.prompts == [] and calls == []
+    assert out == ("计划操作被拒：步骤 [2] 尚未终态化（pending/in_progress 悬空），"
+                   "先逐个 update_plan_step 到 done/skipped/failed 再收官")
+    assert session.plan.active is not None
+
+
+def test_verify_prompt_reuses_single_source_of_truth(tmp_path, monkeypatch):
+    # 061 遗留 5 的共用约束：回验读的「计划原文」必须复用 board.view() + format_view
+    # 这**同一份**真值源（不另起第二份计划快照）⇒ 提示词里应出现视图渲染的记号与 note
+    judge = _JudgeLLM(_OK)
+    _, registry, _, confirm = _verify_setup(tmp_path, monkeypatch, judge, False)
+    registry.execute("finish_plan", '{"summary": "两步全部完成"}', confirm)
+    prompt = judge.prompts[0]
+    assert "● 1. 甲 —— 成了" in prompt and "✗ 2. 乙 —— 404" in prompt   # format_view 渲染
+    assert "收官总结：两步全部完成" in prompt
+    assert '"score": 1' in prompt and "一句话" in prompt     # 二元判决 + 理由限长
+
+

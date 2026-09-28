@@ -23,6 +23,13 @@
 工具声明与步骤标题里的 ASCII 标识符，从 data/learned 三桶里挑出字面相关的
 条目（≤3 条）一并回灌。全量快照注入链（agent._learned_block）一行不动——
 本层补的是「决策时刻的相关条目」，纯读、零派生资产、零缓存。
+
+062（P0-5 收官回验）给 finish_plan 添第五件事：归档**之前**用一次 LLM 二元
+判决核对「计划原文（含每步 note）」与「收官总结」是否对得上（承诺漂移）。
+只有判为漂移才手工调 confirm 缝转人审——被拒则不归档、计划留在 active，
+整改路（update_plan_step / make_plan 修订）全程可用；confirm 缺席降级为
+告知（照旧归档 + 漂移进返回串），回验器任何故障一律放行（绝不阻断收官）。
+正常收官零行为差：finish_plan 只标 receives_confirm、不标 needs_confirmation。
 """
 
 from __future__ import annotations
@@ -34,6 +41,9 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 
+from agent.core.llm import LLM
+from agent.core.types import Message
+from agent.evalkit.judge import parse_judge_json
 from agent.memory.consolidate import CATEGORIES
 from agent.memory.learned import read_learned, render, visible_text
 from agent.memory.plan import Plan, PlanBoard, StepStatus
@@ -219,6 +229,49 @@ def _recall_learned(view: Plan | None) -> str:
     )
 
 
+def _verify_delivery(llm: LLM | None, view: Plan, summary: str) -> str | None:
+    """062：收官回验——核对「计划原文（含每步 note）」与「收官总结」。
+
+    返回漂移描述（一句话级）；一致、不可判、回验器故障一律返回 None（放行）。
+
+    判决形状＝扁平 {"score": int, "reason": str}，1＝一致 / 0＝漂移，且**只有
+    显式 0 算漂移**——二元是为了不养阈值旋钮（032「文件数>10」教训：分数制
+    必然引来「几分算漂移」的魔数与后续调参）；「裁判失灵绝不猜分」在本处的
+    方向是**绝不阻断收官**（与 060 台账缺席、061 零命中同款宽容）。要求扁平是
+    为了保住兜底路径：evalkit.parse_judge_json 先试整段 JSON，失败才用正则抠
+    {..} 块，而那条正则不吃嵌套花括号——裁判多包一层，就只剩「整段恰好是合法
+    JSON」这一条命。复用它而非另写一份，是为了不产生第二份裁判 JSON 解析真值源
+    （062 拍板 7）。
+
+    诚实边界：只看得见**叙事层**（步骤 title/status/note vs summary），看不见
+    **产物层**（实际写了哪些文件、哪些笔记）——产物层要喂审计轨迹，是真复杂度
+    （062 遗留 1）。所以提示词明写「不要因为没有证据就假定造假」。
+    """
+    if llm is None:
+        return None
+    try:
+        # 关键安全设计：内部这次调用【绝不传 tools】——沿用 notes.py
+        # search_and_summarize 的既有裁定：① 传了就可能工具调工具无限递归；
+        # ② 一次性核对任务不需要任何行动能力
+        reply = llm.generate([Message(role="user", content=(
+            "核对下面这份执行计划的「计划原文」与「收官总结」是否对得上。\n\n"
+            f"计划原文：\n{format_view(view)}\n\n收官总结：{summary}\n\n"
+            "只判叙事一致性：总结声称的交付，步骤状态与 note 撑不撑得住"
+            "（例如总结说全部完成、步骤却标着 failed 或 skipped；或总结提到某项"
+            "产出，而计划里根本没有对应步骤）。你看不见真实产物，这是本核对的"
+            "固有局限——不要因为没有证据就假定造假。\n"
+            '只输出一行 JSON，不要别的内容：{"score": 1, "reason": ""}。'
+            "score=1 表示对得上（reason 留空字符串），score=0 表示对不上"
+            "（承诺漂移，reason 用**一句话**说明对不上的地方）。"
+        ))])
+    except Exception:   # 回验器故障绝不阻断收官（含网关超时/额度/网络）
+        return None
+    data = parse_judge_json(reply.content)
+    if data is None or data.get("score") != 0:
+        return None
+    return str(data.get("reason") or "").strip() or "（裁判判为漂移但未给出理由）"
+
+
 def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     """计划三件上菜单（S5b）。session 缺席 = 不上菜单（条件注册惯例）。"""
     if ctx.session is None:
@@ -256,13 +309,41 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "\n（继续执行；全部步骤终态化后用 finish_plan 收官）"
         )
 
-    def _finish_plan(summary: str) -> str:
+    def _finish_plan(summary: str, confirm: Callable[[str, dict], bool] | None = None) -> str:
+        # 062 顺序是本案的全部要点：回验必须在 board.finish_plan **之前**——
+        # 归档会 active=None，此后 update_step 抛「没有活跃计划」、make_plan 变
+        # 新建，「要求整改」就结构上无路可走（062 真值 2/3）。is_complete() 是
+        # 零成本确定性前置：悬空计划先被域层 dangling 闸拒，不必白花一次 LLM。
+        view = board.view()
+        drift = (
+            _verify_delivery(ctx.llm, view, summary)
+            if view is not None and view.is_complete() else None
+        )
+        if drift is not None and confirm is not None and not confirm(
+            "finish_plan", {"summary": summary, "drift": drift},
+        ):
+            return (
+                f"计划收官被用户拒绝：回验发现收官总结与计划步骤的产出对不上——{drift}\n"
+                "计划**仍然活跃**（未归档），请整改后重新收官。注意所有步骤都已是终态，"
+                "update_plan_step 改不动（终态锁定），三条真能走的路：① 计划本身有变或"
+                "状态写错了，用 make_plan 修订——给完整新表、每步显式声明 status（修订"
+                "可以把终态步骤重开为 in_progress，需用户确认）；② 缺的产出真去补齐，"
+                "再按 ① 修订状态；③ 只是总结说过头了，就用如实的 summary 重新收官。"
+                "不要只改措辞掩盖差异。"
+            )
         try:
             board.finish_plan(summary)
         except ValueError as e:
             return f"计划操作被拒：{e}"
         _record_failures(board, summary)   # 060：failed 步骤落跨会话台账
-        return f"任务收官（全部步骤已终态化，计划转入归档）：{summary}"
+        out = f"任务收官（全部步骤已终态化，计划转入归档）：{summary}"
+        if drift is not None:
+            # 062：漂移照旧归档（人批准 / 无 confirm 通道降级为告知），但文本必须
+            # 进返回串——registry 的审计收口把 result 落盘，这是唯一留痕面
+            # （confirm 的 args 不进审计，062 真值 7）
+            how = "用户已确认接受" if confirm is not None else "本次运行没有人审通道"
+            out += f"\n（⚠ 收官回验发现承诺漂移：{drift} —— {how}，计划照常归档。）"
+        return out
 
     registry.register(Tool(
         name="make_plan",
@@ -328,7 +409,11 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     ))
     registry.register(Tool(
         name="finish_plan",
-        description="计划收官：全部步骤终态化（done/skipped/failed，无悬空）后调用，summary 一句话总结交付。未终态化会被拒绝。",
+        description=(
+            "计划收官：全部步骤终态化（done/skipped/failed，无悬空）后调用，summary 一句话总结交付。"
+            "未终态化会被拒绝。summary 要与步骤的真实产出对得上——收官前会核对一遍，"
+            "对不上（承诺漂移）会转用户裁决，被拒则计划留在活跃状态等你整改。"
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -337,4 +422,8 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "required": ["summary"],
         },
         func=_finish_plan,
+        # 062：只接 confirm 缝、**不标 needs_confirmation**——两者在 registry 里
+        # 互相独立（真值 5）。正常收官一次都不弹窗（零摩擦、零行为差），只有
+        # 回验判为漂移才手工调 confirm 转人审（漂移是稀有事件，挂成常态闸＝狼来了）
+        receives_confirm=True,
     ))
