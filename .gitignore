@@ -25,6 +25,9 @@ data/worktrees/
 data/evals/
 servers/sandbox/
 
+# 外部公开基准（LongMemEval 等）：单文件数百 MB，可一键重下，不入库
+data/bench/
+
 # 实机跑出来的笔记产物（不属人工策展的语料库；逐篇点名，等有命名约定再收口）
 data/notes/阿里巴巴股价分析报告-2026年9月24日.md
 
