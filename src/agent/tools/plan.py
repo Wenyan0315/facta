@@ -12,13 +12,24 @@
 薄包装原则：状态机全部在 memory/plan.py（board），本层只做三件事——
 调 board、ValueError 转错误串（M5 反馈环：错误也返回字符串让模型自纠，
 错误文案即给模型的提示词，每条拒绝都指路）、回灌格式化。
+
+060（P0-5 失败台账）给本层添了第四件事：finish_plan 成功后把 failed 步骤
+追加进跨会话派生索引 data/plan_failures.jsonl（真值源＝plan 归档事件史，
+台账可删可重建），make_plan 创建/修订时字面查重、命中软拦回灌（计划照常
+创建，改向权归模型）。读写同居本层，memory/plan.py 零改动——board 不知道
+台账存在（薄包装原则不倒灌）。
 """
 
 from __future__ import annotations
 
+import json
+import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
+from difflib import SequenceMatcher
 
 from agent.memory.plan import Plan, PlanBoard, StepStatus
+from agent.paths import DATA_ROOT
 from agent.tools.context import ToolContext
 from agent.tools.registry import Tool, ToolRegistry
 
@@ -34,6 +45,18 @@ _MARKS = {   # 视图渲染记号：pending 空、in_progress 半、done 满、s
 # 状态、无法收官——收尾段的 _CLOSING_TOOLS（056）依赖后两件，拦了会让
 # 「预算耗尽时计划板挂 active」那条污染当场复发。
 _META_TOOLS = frozenset({"make_plan", "update_plan_step", "finish_plan"})
+
+# 060 失败台账：跨会话派生索引（真值源＝session.json 的 plan 归档事件史，
+# 本文件可删可重建）。只被本模块读写 ⇒ 路径常量按 paths.py 居住规则住这里；
+# 测试 monkeypatch 本模块属性换 tmp。
+_FAILURES_PATH = DATA_ROOT / "plan_failures.jsonl"
+_FAILURES_LOCK = threading.Lock()   # S8a 多会话并发 + 059 并行 spawn 的 append 互斥
+# 阈值实机校准记录（060 拍板 5 预登记「拍脑袋起步、实机校准」）：起步 0.6 →
+# 首个真实相似计划（模型给步骤标题补括注，稀释了对称 ratio）实测 0.582 漏报
+# ⇒ 调 0.5。软拦下误报成本≈零（一段可忽略的警告），漏报＝机制永不触发，
+# 代价不对称 ⇒ 宁低勿高。
+_SIMILAR_THRESHOLD = 0.5
+_MAX_HITS = 3
 
 
 def format_view(view: Plan | None) -> str:
@@ -78,6 +101,68 @@ def plan_scope_check(board: PlanBoard) -> Callable[[str, dict], str | None]:
     return check
 
 
+def _record_failures(board: PlanBoard, summary: str) -> None:
+    """060：finish_plan 成功后落台账。扫刚归档的事件史逐事件 fold id→title
+    当时表（step_updated 事件不带 title；created/revised 换表），把 failed
+    步骤——含修订换表前的，事件史记得而 view() fold 只看得见最终表——追加为
+    一行自含 JSON：查重所需字段全在行内，读侧不回查会话。无 failed 不写。
+    """
+    state = board.archive[-1]
+    titles: dict[int, str] = {}
+    failed: list[dict] = []
+    for ev in state.events:
+        if ev.type in ("plan.created", "plan.revised"):
+            titles = {s["id"]: s["title"] for s in ev.data["steps"]}
+        elif ev.type == "plan.step_updated" and ev.data["status"] == "failed":
+            failed.append({"title": titles.get(ev.data["id"], ""), "note": ev.data["note"]})
+    if not failed:
+        return
+    record = {
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+        "steps": [s.title for s in state.view().steps],
+        "failed": failed,
+        "summary": summary,
+    }
+    with _FAILURES_LOCK, _FAILURES_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _check_history(steps: list[dict]) -> str:
+    """060：make_plan 查重软拦。新计划步骤标题拼接串 vs 台账每行 steps 拼接串，
+    字面相似度 ≥ 阈值即命中——命中不拦（计划照常创建），只把当时的失败记录
+    回灌给模型，改向权归模型（M5：回灌文案即提示词）。台账是派生索引：
+    文件缺席/坏行都按「无历史」处理，不为它拒服务。
+    """
+    try:
+        with _FAILURES_LOCK:
+            text = _FAILURES_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    new = "\n".join(s["title"] for s in steps)
+    hits: list[tuple[float, dict]] = []
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ratio = SequenceMatcher(None, new, "\n".join(rec["steps"])).ratio()
+        if ratio >= _SIMILAR_THRESHOLD:
+            hits.append((ratio, rec))
+    if not hits:
+        return ""
+    hits.sort(key=lambda h: h[0], reverse=True)
+    parts = [
+        f"· {rec['ts'][:10]} 的相似计划失败于："
+        + "；".join(f"「{f['title']}」——当时记录的原因：{f['note']}" for f in rec["failed"])
+        for _, rec in hits[:_MAX_HITS]
+    ]
+    return (
+        "\n（⚠ 历史相似失败：\n" + "\n".join(parts)
+        + "\n以上原因描述来自当时 agent 自述（未经客观背书，P0-7）。"
+        "请对照检查本方案是否重蹈覆辙：要改向/修订可直接调整本计划；确认不相关则忽略。）"
+    )
+
+
 def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     """计划三件上菜单（S5b）。session 缺席 = 不上菜单（条件注册惯例）。"""
     if ctx.session is None:
@@ -102,7 +187,7 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             f"计划{verb}（用户已确认）。当前计划：\n{format_view(board.view())}"
             "\n（执行提示：步骤可自己做，也可用 spawn_step 派子任务执行——"
             "过程啰嗦或值得上下文隔离的步骤建议派出去，它会自动回写状态）"
-        )
+        ) + _check_history(steps)
 
     def _update_plan_step(step_id: int, status: str, note: str = "") -> str:
         try:
@@ -119,6 +204,7 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             board.finish_plan(summary)
         except ValueError as e:
             return f"计划操作被拒：{e}"
+        _record_failures(board, summary)   # 060：failed 步骤落跨会话台账
         return f"任务收官（全部步骤已终态化，计划转入归档）：{summary}"
 
     registry.register(Tool(

@@ -443,3 +443,164 @@ def test_rounds_exhausted_closing_can_finalize_dangling_step():
     tool_results = [m.content for m in session.messages if m.role == "tool"]
     assert not any("尚未终态化" in r for r in tool_results)   # 没撞上终态闸
 
+
+# ---------- 060：失败台账（finish_plan 落账 + make_plan 查重软拦）----------
+
+
+def _run(session: Session, llm: ScriptedLLM) -> None:
+    result, _ = run_turn(
+        session, "做事", agent=_agent(session), llm=llm,
+        on_confirm=lambda name, args: True,   # 计划审批：批准
+    )
+    assert result is RunResult.COMPLETED
+
+
+def test_finish_plan_with_failed_step_appends_ledger(tmp_path, monkeypatch):
+    # 判定标准①：failed 收官 → 台账一行、字段自含（查重不回查会话）
+    ledger = tmp_path / "plan_failures.jsonl"
+    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    session = Session()
+    _run(session, ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("make_plan", {"steps": [{"title": "甲"}, {"title": "乙"}]}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 1, "status": "done", "note": "好"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 2, "status": "failed", "note": "接口 404"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("finish_plan", {"summary": "甲成乙败"}),
+        ]),
+        Message(role="assistant", content="收官"),
+    ]))
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["steps"] == ["甲", "乙"]
+    assert rec["failed"] == [{"title": "乙", "note": "接口 404"}]
+    assert rec["summary"] == "甲成乙败"
+    assert "sid" not in rec   # Session 不持 id（S8a：身份=文件名）
+
+
+def test_finish_plan_all_done_writes_nothing(tmp_path, monkeypatch):
+    # 判定标准②：无 failed ⇒ 不落账（台账只记失败，成功不进索引）
+    ledger = tmp_path / "plan_failures.jsonl"
+    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    session = Session()
+    _run(session, ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("make_plan", {"steps": [{"title": "甲"}]}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 1, "status": "done", "note": "好"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("finish_plan", {"summary": "完事"}),
+        ]),
+        Message(role="assistant", content="收官"),
+    ]))
+    assert not ledger.exists()
+
+
+def test_failed_step_before_revision_still_recorded(tmp_path, monkeypatch):
+    # 修订换表前的 failed 也入账：view() fold 只看得见最终表，事件史记得——
+    # 失败经历是事实，title 靠逐事件 fold 当时表找回
+    ledger = tmp_path / "plan_failures.jsonl"
+    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    session = Session()
+    _run(session, ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("make_plan", {"steps": [{"title": "甲"}, {"title": "乙"}]}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 2, "status": "failed", "note": "接口 404"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[   # 换表：乙不在新表
+            _call("make_plan", {
+                "steps": [{"title": "丙", "status": "pending"}],
+                "reason": "乙路不通，改走丙",
+            }),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 1, "status": "done", "note": "丙成"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("finish_plan", {"summary": "改走丙完成"}),
+        ]),
+        Message(role="assistant", content="收官"),
+    ]))
+    rec = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
+    assert rec["steps"] == ["丙"]   # 相似度比对用最终表
+    assert rec["failed"] == [{"title": "乙", "note": "接口 404"}]
+
+
+_LEDGER_ROW = json.dumps({
+    "ts": "2026-09-20T10:00:00+00:00",
+    "steps": ["搜索 RAG 最新实践", "整理成笔记"],
+    "failed": [{"title": "搜索 RAG 最新实践", "note": "网络被墙，搜索全超时"}],
+    "summary": "搜索全灭，任务失败",
+}, ensure_ascii=False)
+
+
+def test_make_plan_softwarns_on_similar_history(tmp_path, monkeypatch):
+    # 判定标准③④：预置台账（＝跨会话持久化，新会话读同一文件）→ 相似计划
+    # 命中软拦——回灌带历史失败，但计划照常创建（「计划已创建」开头）
+    ledger = tmp_path / "plan_failures.jsonl"
+    ledger.write_text(_LEDGER_ROW + "\n", encoding="utf-8")
+    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    session = Session()
+    _run(session, ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("make_plan", {"steps": [{"title": "搜索 RAG 最新实践"}, {"title": "整理成笔记"}]}),
+        ]),
+        Message(role="assistant", content="好"),
+    ]))
+    hit = next(m.content for m in session.messages if m.role == "tool")
+    assert hit.startswith("计划已创建")        # 软拦：照创，改向权归模型
+    assert "历史相似失败" in hit
+    assert "网络被墙，搜索全超时" in hit       # 当时 note 摘要回灌
+    assert "agent 自述" in hit                 # 未经客观背书的标注（P0-7）
+
+
+def test_make_plan_dissimilar_history_no_warning(tmp_path, monkeypatch):
+    # 零命中：不相似的计划不带警告段
+    ledger = tmp_path / "plan_failures.jsonl"
+    ledger.write_text(_LEDGER_ROW + "\n", encoding="utf-8")
+    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    session = Session()
+    _run(session, ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("make_plan", {"steps": [{"title": "给周报排个版"}]}),
+        ]),
+        Message(role="assistant", content="好"),
+    ]))
+    hit = next(m.content for m in session.messages if m.role == "tool")
+    assert "历史相似失败" not in hit
+
+
+def test_make_plan_warns_despite_embellished_titles(tmp_path, monkeypatch):
+    # 校准钉住（2026-09-28 m1 首跑漏报现场）：模型不会照抄题面措辞，会给
+    # 步骤标题补括注/路径细节，对称 ratio 被稀释到 0.582——阈值 0.5 必须仍命中
+    ledger = tmp_path / "plan_failures.jsonl"
+    ledger.write_text(json.dumps({   # 与 m1 场景预置台账同措辞（漏报现场原件）
+        "ts": "2026-09-20T10:00:00+00:00",
+        "steps": ["搜索 RAG 的最新实践", "把结果整理成一篇笔记"],
+        "failed": [{"title": "搜索 RAG 的最新实践", "note": "联网搜索全部超时"}],
+        "summary": "搜索全灭，调研失败",
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    session = Session()
+    _run(session, ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("make_plan", {"steps": [
+                {"title": "搜索 RAG 的最新实践（检索个人知识库 + 联网补充）"},
+                {"title": "把调研结果整理成一篇笔记并写入 data/notes/"},
+            ]}),
+        ]),
+        Message(role="assistant", content="好"),
+    ]))
+    hit = next(m.content for m in session.messages if m.role == "tool")
+    assert "历史相似失败" in hit
+
