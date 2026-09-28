@@ -21,6 +21,12 @@
 确认缝透传（receives_confirm 通道）：子 agent 的高危工具照常走 registry
 确认缝 → 主循环 on_confirm → Web 上挂起当前 Run 弹窗——人审不分主子。
 
+事件透传（059，receives_event 通道）：子 agent 的过程事件以 `sub.*`
+命名空间转进父事件流——**隔离的是主 agent 的上下文（底片），不是人的
+眼睛**。子事件不进 checkpoint 账本（writer 只认精确类型，见 059），
+所以恢复语义、评测轨迹口径都不受影响；并行 spawn 时兄弟事件会交织，
+每条带 task 摘要用于区分。
+
 失败语义走反馈环：子 run_turn FAILED/CANCELLED → 返回错误串，主 agent
 自纠（换方案或如实汇报），不炸主轮（M5「错误也返回字符串」惯例）。
 """
@@ -78,6 +84,41 @@ TASK_TEMPLATE = (
     "不要寒暄、不要复述任务、不要展开中间过程。"
 )
 
+# 059 子事件命名映射：run_turn 的五种事件 → 点分 sub.* 命名空间。
+# 点分风格与 plan.* 一致 ⇒ server 侧 `_EVENT_MAP.get(type_, type_)` 原样
+# 透传到 SSE / Run Store，零改动（未知类型不丢）。子 agent 没有计划工具
+# （_FORBIDDEN），所以不会出现 sub.plan.*——命名空间只需覆盖这五种。
+_SUB_EVENT_MAP = {
+    "tool_started": "sub.tool.started",
+    "tool_result": "sub.tool.result",
+    "stuck": "sub.stuck",
+    "max_rounds": "sub.max_rounds",
+    "error": "sub.error",
+}
+
+_SUB_TASK_LEN = 60   # 事件里带的 task 摘要长度：够区分并行兄弟，不撑爆事件流
+
+
+def _sub_emitter(
+    on_event: Callable[[str, dict], None] | None,
+    task: str,
+) -> Callable[[str, dict], None] | None:
+    """把父事件缝包成子事件缝：改名进 sub.* 命名空间 + 挂 task 摘要。
+
+    None 进 None 出（CLI/评测不关心事件时子 agent 也零开销）。
+    `{**data, ...}` 而非原地改：data 由 loop 造出后会同时喂给多个消费者
+    （RunStore、checkpoint writer、SSE），在这条缝上加字段就用副本，
+    不动上游对象。
+    """
+    if on_event is None:
+        return None
+    brief = task.strip()[:_SUB_TASK_LEN]
+
+    def emit(type_: str, data: dict) -> None:
+        on_event(_SUB_EVENT_MAP.get(type_, f"sub.{type_}"), {**data, "task": brief})
+
+    return emit
+
 
 def _worktree_registry(registry: ToolRegistry, ctx: ToolContext, wt: Path) -> ToolRegistry:
     """S6a worktree 模式的子 registry：file/terminal 五件重锚 worktree，其余原样共享。
@@ -134,13 +175,15 @@ def spawn_subagent(
     tools: list[str] | None = None,
     max_rounds: int = DEFAULT_ROUNDS,
     confirm: Callable[[str, dict], bool] | None = None,
+    on_event: Callable[[str, dict], None] | None = None,
     worktree: bool = False,
     ctx: ToolContext | None = None,
 ) -> str:
     """构造子 agent + 临时会话跑一轮，只回传结论（spawn 工具的本体）。
 
     单独导出为模块级函数（不是闭包）：测试可直接调，不经 registry 菜单。
-    confirm 由 registry.execute 的 receives_confirm 通道注入（见 registry.py）。
+    confirm / on_event 由 registry.execute 的 receives_confirm /
+    receives_event 通道注入（见 registry.py）。
 
     worktree（S6a）：True = 子 agent 在独立 git worktree 里干活——文件
     改动不碰主工作区；跑完后 diff 经确认缝裁决（人审掌舵，与 make_plan
@@ -195,6 +238,9 @@ def spawn_subagent(
         agent=sub_agent,
         llm=llm,
         on_confirm=confirm,   # 确认缝透传：子 agent 高危工具照常请求裁决
+        # 事件缝透传（059）：过程事件改名进 sub.* 后写进父流；on_text 不透传
+        # （子 agent 的流式正文不是给人看的成品，只回传结论这条边界不动）
+        on_event=_sub_emitter(on_event, task),
         # should_cancel 不透传：取消等主循环下一检查点（子任务通常几轮内完成）
     )
     if result is RunResult.COMPLETED and reply is not None:
@@ -217,10 +263,10 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     sub_llm = ctx.llm   # 局部窄化：闭包捕获局部变量（mypy 不认跨闭包的属性窄化）
 
     def _spawn(task: str, tools: list[str] | None = None, max_rounds: int = DEFAULT_ROUNDS,
-               worktree: bool = False, confirm=None) -> str:
+               worktree: bool = False, confirm=None, event=None) -> str:
         return spawn_subagent(
             task, llm=sub_llm, registry=registry,
-            tools=tools, max_rounds=max_rounds, confirm=confirm,
+            tools=tools, max_rounds=max_rounds, confirm=confirm, on_event=event,
             worktree=worktree, ctx=ctx,
         )
 
@@ -252,6 +298,7 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         },
         func=_spawn,
         receives_confirm=True,   # S5c：确认缝透传给子执行流（registry 注入 confirm 参数）
+        receives_event=True,     # 059：事件缝透传（registry 注入 event 参数 → sub.* 进父流）
     ))
 
     # ---- S6c spawn_step：计划步骤派发（真编排的焊缝）----
@@ -261,7 +308,8 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     if ctx.session is not None:
         board = ctx.session.plan
 
-        def _spawn_step(step_id: int, task: str, worktree: bool = False, confirm=None) -> str:
+        def _spawn_step(step_id: int, task: str, worktree: bool = False,
+                        confirm=None, event=None) -> str:
             # 校验在 board.update_step 里统一做（薄包装原则，与 plan.py 工具同款）：
             # 无活跃计划 / step_id 不在计划 / 已终态，都 ValueError → 错误串回灌
             try:
@@ -269,10 +317,10 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             except ValueError as e:
                 return f"步骤派发被拒：{e}"
 
-            # 复用 spawn_subagent 全套（噪声隔离/工具子集/worktree 隔离/确认透传）
+            # 复用 spawn_subagent 全套（噪声隔离/工具子集/worktree 隔离/确认透传/事件透传）
             result = spawn_subagent(
                 task, llm=sub_llm, registry=registry,
-                worktree=worktree, ctx=ctx, confirm=confirm,
+                worktree=worktree, ctx=ctx, confirm=confirm, on_event=event,
             )
 
             # 成败回写：spawn 的失败是固定信号（_FAILURE_PREFIXES），其余皆视为
@@ -307,4 +355,5 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             },
             func=_spawn_step,
             receives_confirm=True,   # worktree 合回确认透传（S6a 同款）
+            receives_event=True,     # 059：子步骤过程同样以 sub.* 进父流
         ))

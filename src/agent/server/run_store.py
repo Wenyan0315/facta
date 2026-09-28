@@ -76,6 +76,11 @@ class Run:
     # 的裁决通道冲掉。锁串行化裁决：同一时刻只处理一个确认，其余排队——
     # 语义正确（人一次只能看一个确认弹窗，确认本就该串行）。
     _confirm_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # 059 事件写入锁：spawn 并行时各 worker 线程都会 emit（此前只有确认缝
+    # 跨线程，059 起子 agent 的 sub.* 过程事件也常态跨线程）。_next_seq 是
+    # `self._seq += 1` 非原子，并发下会重号（seq 是排序/去重/重放的位置键，
+    # 重号=客户端可能漏读一条）。修共享收口点一次，不在调用侧各自加锁。
+    _emit_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -87,11 +92,16 @@ class Run:
         返回 None 而不是 RunEvent：emit 的一个主要用途是直接当 run_turn 的
         on_text/on_event 回调，而那两处要 Callable[..., None]——返回事件会让
         lambda 形式过不了类型检查。要读事件走 run.events。
+
+        整体持锁（059）：seq 分配、events.append、广播三步必须原子——
+        否则两个线程可能先各自拿到 seq 再乱序 append，重放段与实时流顺序打架。
         """
-        event = RunEvent(seq=self._next_seq(), type=type, data=data or {})
-        self.events.append(event)
-        for q in self._subscribers:
-            q.put(event)
+        event = RunEvent(seq=0, type=type, data=data or {})
+        with self._emit_lock:
+            event.seq = self._next_seq()
+            self.events.append(event)
+            for q in self._subscribers:
+                q.put(event)
 
     def subscribe(self) -> queue.Queue:
         """新订阅者获得独立队列（广播模型）；断开时必须 unsubscribe 防泄漏。

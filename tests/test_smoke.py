@@ -216,11 +216,14 @@ def test_smoke_plan_lifecycle_through_sse():
 
 
 def test_smoke_spawn_through_sse():
-    """spawn_subagent 的 tool.started/result 通过 SSE + 子 agent 事件不泄漏。
+    """spawn_subagent 的 tool.started/result 通过 SSE + 子过程以 sub.* 可见。
 
-    回归目标：R3（tool.started/result 点分命名）+ R5（spawn 噪声隔离——
-    子 agent 的中间工具事件不出现在主 SSE 流）。spawn 的 run_turn 不传
-    on_event，所以子 agent 的事件天然不进主流——这是设计保证，本测试验它没退化。
+    回归目标：R3（tool.started/result 点分命名）+ R5（spawn 噪声隔离）。
+    R5 的口径经 059 收窄：隔离的是**主 agent 上下文**（主底片只多一条 tool
+    消息），不是事件流——此前 spawn 的 run_turn 不传 on_event，子过程对人
+    完全不可见（architecture 活清单记的「产品侧同源缺陷」）。现在子事件走
+    sub.* 命名空间进主流，而父命名空间仍只有 spawn 自己 ⇒ checkpoint 账本
+    与冻结集评测轨迹都按精确类型匹配，口径逐字不变。
     """
     # 子 agent 的 LLM：先点 search_notes，再出结论
     sub_llm = ScriptedLLM([
@@ -253,13 +256,22 @@ def test_smoke_spawn_through_sse():
     tool_results = [e for e in events if e["type"] == "tool.result"]
     assert any(e["data"]["name"] == "spawn_subagent" for e in tool_results)
 
-    # 噪声隔离：子 agent 的 search_notes 事件不出现在主 SSE 流
-    # （spawn 的 run_turn 不传 on_event，子 agent 的 tool.started/result 天然不进主流）
+    # 059：子 agent 的 search_notes 过程以 sub.* 进主流（人的眼睛看得见），
+    # data 带 task 摘要——并行 spawn 时靠它区分是哪个兄弟
+    sub_starts = [e for e in events if e["type"] == "sub.tool.started"]
+    assert any(
+        e["data"]["name"] == "search_notes" and "查向量库是什么" in e["data"]["task"]
+        for e in sub_starts
+    ), "子 agent 的过程事件没进主 SSE 流——059 事件透传失效"
+    assert any(e["type"] == "sub.tool.result" for e in events)
+
+    # 噪声隔离的现行口径：父命名空间（tool.started/result）里没有子工具——
+    # 这条保住 checkpoint 账本与评测轨迹的精确类型匹配不受影响
     assert not any(
         e["data"].get("name") == "search_notes"
         for e in events
         if e["type"] in ("tool.started", "tool.result")
-    ), "子 agent 的 search_notes 事件泄漏到主 SSE 流——噪声隔离退化"
+    ), "子 agent 的 search_notes 进了父命名空间——上下文隔离退化"
 
 
 # ---------- 4. 路由降级：无 router → fail-open → 正常完成 ----------

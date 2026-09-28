@@ -344,9 +344,11 @@ def _trace(wt: Path, child: dict) -> list[str]:
     """判分与裁判共用的轨迹：副本审计日志优先，子进程自报的事件流兜底。
 
     为什么不用子进程自报的：spawn_step 派的子 agent 与主 agent 共享 registry.audit
-    （审计同源，spawn.py:89），但它的事件不透传给父 on_event。只看事件流，委派出去的
-    实际工作全不可见，裁判就判「只有计划步骤」——r2 实测就是这么被冤枉的（工具其实
-    都调对了）。基线臂不走 registry，审计为空，落到兜底用它自报的命令序列。
+    （审计同源，spawn.py:89）；059 起它的过程事件会以 sub.* 进父流，但本 harness 的
+    采集口只认精确 tool_started（评测口径刻意不动，见 059），自报序列里依旧没有子过程。
+    只看自报，委派出去的实际工作全不可见，裁判就判「只有计划步骤」——r2 实测就是这么
+    被冤枉的（工具其实都调对了）。基线臂不走 registry，审计为空，落到兜底用它自报的
+    命令序列。
     """
     audited = [_trace_line(r) for r in _audit_records(wt) if r.get("tool")]
     return audited or [str(t) for t in (child.get("tools") or [])]

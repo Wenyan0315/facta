@@ -177,8 +177,9 @@ def test_baseline_arm_trace_carries_commands(tmp_path, monkeypatch):
 def test_trace_prefers_audit_over_self_report(tmp_path):
     """委派出去的工作必须可见：轨迹取副本审计日志，不取子进程自报的事件流。
 
-    spawn_step 的子 agent 与主 agent 共享 registry.audit（审计同源），但它的事件
-    不透传给父 on_event。只信自报轨迹，r2 里子 agent 真做的调研动作在裁判眼里等于
+    spawn_step 的子 agent 与主 agent 共享 registry.audit（审计同源）；059 起它的事件
+    以 sub.* 进父流，但 harness 采集口只认精确 tool_started（口径不动），自报轨迹里
+    依然没有子过程。只信自报，r2 里子 agent 真做的调研动作在裁判眼里等于
     没发生，判词成了「只有计划步骤」——那是「机制越复杂越吃亏」的假象。
     """
     wt = _wt(tmp_path)

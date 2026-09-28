@@ -333,16 +333,31 @@ def _split_tool_batches(tool_calls: list[dict]) -> list[tuple[bool, list[dict]]]
     return batches
 
 
-def _run_parallel(tool_calls: list[dict], agent: Agent, on_confirm: Callable | None) -> list[str]:
+def _run_parallel(
+    tool_calls: list[dict],
+    agent: Agent,
+    on_confirm: Callable | None,
+    on_event: Callable | None,
+) -> list[str]:
     """并行执行一批 spawn（线程池）；结果按提交顺序返回（点菜顺序=确定性）。
 
     spawn 是 IO-bound（子 agent 大量时间等 LLM），GIL 不碍事——线程池
     就够，不必上进程。f.result() 按 futures 提交序取，非完成序——
     结果顺序与模型点菜顺序一致（它靠位置对应 tool_call_id）。
+
+    059：on_event 一并下发——各 worker 线程内的子 agent 事件会**交织**
+    写进同一条父流（谁先跑完谁先到），故子事件带 task 摘要用于区分兄弟；
+    emit 侧的序号原子性由 RunStore 的锁保证（共享收口点，一处修）。
     """
     with ThreadPoolExecutor(max_workers=len(tool_calls)) as ex:
         futures = [
-            ex.submit(agent.execute, tc["name"], tc["arguments"], confirm=on_confirm)
+            ex.submit(
+                agent.execute,
+                tc["name"],
+                tc["arguments"],
+                confirm=on_confirm,
+                on_event=on_event,
+            )
             for tc in tool_calls
         ]
         results: list[str] = []
@@ -382,10 +397,17 @@ def _execute_tool_calls(
                     "id": tc["id"], "name": tc["name"], "arguments": tc["arguments"],
                 })
         # 执行：连续 spawn 段用线程池并行，其余串行
+        # 059：on_event 顺着 agent.execute 往下走，声明 receives_event 的
+        # 工具（spawn 两件）拿到父事件缝，把子 agent 过程以 sub.* 转出来
         if parallel_ok and len(batch) > 1:
-            results = _run_parallel(batch, agent, on_confirm)
+            results = _run_parallel(batch, agent, on_confirm, on_event)
         else:
-            results = [agent.execute(tc["name"], tc["arguments"], confirm=on_confirm) for tc in batch]
+            results = [
+                agent.execute(
+                    tc["name"], tc["arguments"], confirm=on_confirm, on_event=on_event
+                )
+                for tc in batch
+            ]
         # 按序回填（点菜顺序，确定性——模型靠位置对应 tool_call_id）
         for tc, result in zip(batch, results, strict=True):
             # 结果以 role="tool" 回填，tool_call_id 对应是哪次调用
@@ -499,6 +521,11 @@ def run_turn(
                         max_rounds    {}       保险丝熔断，强制收尾
                         stuck         {"tools": [str]}  P0-6 原地踏步熔断，升人审
                         error         {"message": str}  模型全挂，本轮无产出
+                        sub.*         spawn 的子 agent 过程事件（059）：上面五种
+                                      各有一个 sub. 前缀版，data 额外带 task 摘要
+                                      （并行兄弟靠它区分）。隔离的是主 agent 上下文，
+                                      不是人的眼睛；不进 checkpoint 账本（writer 只认
+                                      精确类型），故恢复语义与评测轨迹口径都不受影响
         should_cancel 协作式取消检查点回调：返回 True 时在下一个检查点掐半截轮、
                       返回 (CANCELLED, None)（不发事件——cancelled 是 Run 级终态，归调用方）。
                       检查点粒度 = 每次模型调用前（①）+ 流式生成中每块到手时（③，

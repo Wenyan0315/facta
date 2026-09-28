@@ -109,6 +109,26 @@ def test_writer_result_goes_to_ledger_only(tmp_path):
     assert types == ["run", "result", "done"]
 
 
+def test_writer_ignores_sub_events(tmp_path):
+    """059：子 agent 的 sub.* 事件不进账本、不触发底片落盘。
+
+    子调用不属于父底片（父底片里只有 spawn 那一条 tool 消息）；记进账本，
+    恢复时会按父 tool_call_id 找不到对应消息。writer 只认精确类型
+    （tool_started / tool_result / plan.*），点分 sub.* 天然被忽略——
+    这是 059 敢把子过程接进父事件流的底气。
+    """
+    path = tmp_path / "s.jsonl"
+    saves: list[int] = []
+    writer = CheckpointWriter(path, lambda: saves.append(1))
+    writer.begin("run-1")
+    writer.on_event("sub.tool.started", {"id": "c9", "name": "search_notes", "arguments": "{}"})
+    writer.on_event("sub.tool.result", {"id": "c9", "name": "search_notes", "result": "子结果"})
+    writer.end("run-1", "completed")
+    assert saves == []                       # 子事件不触发底片落盘
+    types = [json.loads(x)["type"] for x in path.read_text(encoding="utf-8").splitlines()]
+    assert types == ["run", "done"]          # 账本里没有 intent/result 行
+
+
 def test_begin_truncates_previous_run(tmp_path):
     """每轮重写账本：历史 run 的记录没有消费者，留着就是无界增长。"""
     path = tmp_path / "s.jsonl"

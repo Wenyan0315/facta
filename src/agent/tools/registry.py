@@ -107,6 +107,10 @@ class Tool:
     receives_confirm: bool = False  # S5c 编排工具标记：func 额外接收 confirm 参数
                                     # （spawn_subagent 把主循环的确认缝透传给子执行流——
                                     # 子 agent 的高危工具照常弹确认，人审不分主子）
+    receives_event: bool = False    # 059 编排工具标记：func 额外接收 event 参数
+                                    # （spawn 把主循环的事件缝透传给子执行流——子 agent 的
+                                    # 工具过程以 sub.* 命名空间进父事件流：隔离的是主 agent
+                                    # 上下文，不是人的眼睛。默认 False，老工具零改动）
 
 
 class ToolRegistry:
@@ -170,6 +174,7 @@ class ToolRegistry:
         name: str,
         arguments_json: str,
         confirm: Callable[[str, dict], bool] | None = None,
+        on_event: Callable[[str, dict], None] | None = None,
     ) -> str:
         """执行模型点的菜。注意：错误也返回字符串，而不是抛异常。
 
@@ -219,13 +224,15 @@ class ToolRegistry:
             return result
 
         try:
-            # S5c 编排工具（receives_confirm）：确认缝作为关键字参数注入——
+            # 编排缝注入（S5c confirm / 059 event）：作为关键字参数注入——
             # 显式声明而非 registry 隐藏状态（接口演进老规矩：默认 False，
-            # 老工具零改动）。func 签名须有 confirm 形参（spawn_subagent）
+            # 老工具零改动）。func 签名须有同名形参（spawn_subagent 两个都有）
+            extra: dict = {}
             if tool.receives_confirm:
-                result = tool.func(confirm=confirm, **args)
-            else:
-                result = tool.func(**args)
+                extra["confirm"] = confirm
+            if tool.receives_event:
+                extra["event"] = on_event
+            result = tool.func(**extra, **args)
         except TypeError as e:
             result = f"错误：参数不匹配（{e}）"
         except Exception as e:  # 兜底：工具内部任何异常都不让程序崩溃

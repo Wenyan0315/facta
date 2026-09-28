@@ -4,6 +4,8 @@
 - 只回传结论：主底片只多一条 tool 消息（=子 agent 结论），中间过程零泄漏
 - 工具子集：默认全量减禁止单（spawn 自己 + 计划三件）；显式指定也强制过滤
 - confirm 透传（receives_confirm 通道）：子 agent 高危工具照常请求裁决
+- 事件透传（059，receives_event 通道）：子过程以 sub.* 进父事件流——
+  隔离的是主 agent 上下文，不是人的眼睛
 - 失败走反馈环：错误串回灌，主轮不炸
 """
 
@@ -72,6 +74,46 @@ def test_spawn_returns_conclusion_only():
     )
     # 子 agent 确实跑过工具循环（子链两次 generate），子会话用完即弃
     assert len(sub_llm.calls) == 2
+
+
+def test_sub_events_reach_parent_stream_namespaced():
+    """059：子过程以 sub.* 进父事件流，父命名空间与主底片都不受污染。
+
+    「只回传结论」的精确语义是**上下文**隔离（主底片只多一条 tool 消息），
+    不是事件流隔离——人的眼睛该看见子过程（architecture 活清单原话：
+    隔离的是主 agent 上下文，不是人的眼睛）。
+    """
+    sub_llm = ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[_call("search_notes", {"query": "X"})]),
+        Message(role="assistant", content="结论：X 是向量库"),
+    ])
+    registry, _ = _setup(sub_llm, "search_notes")
+    main_llm = ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("spawn_subagent", {"task": "查一下 X 是什么"})]),
+        Message(role="assistant", content="已让子任务查完"),
+    ])
+
+    got: list[tuple[str, dict]] = []
+    session = Session()
+    session.messages.append(Message(role="system", content="主 sys"))
+    result, _ = run_turn(
+        session, "查 X", agent=_main_agent(registry), llm=main_llm,
+        on_event=lambda t, d: got.append((t, d)),
+    )
+
+    assert result is RunResult.COMPLETED
+    types = [t for t, _ in got]
+    # 子过程可见：sub.tool.started/result 带子工具名 + task 摘要（并行兄弟靠它区分）
+    sub_started = [d for t, d in got if t == "sub.tool.started"]
+    assert sub_started and sub_started[0]["name"] == "search_notes"
+    assert "查一下 X 是什么" in sub_started[0]["task"]
+    assert "sub.tool.result" in types
+    # 父命名空间干净：不带 sub 前缀的 tool_started 只有 spawn 自己——
+    # checkpoint writer 与 frozen_eval 都按精确类型匹配，口径逐字不变
+    assert {d["name"] for t, d in got if t == "tool_started"} == {"spawn_subagent"}
+    # 上下文隔离仍在：主底片只多一条 tool 消息（=子结论）
+    assert len([m for m in session.messages if m.role == "tool"]) == 1
 
 
 def test_sub_agent_task_book_in_first_payload():
@@ -219,6 +261,30 @@ def test_registry_receives_confirm_channel():
     out = registry.execute("probe", json.dumps({"task": "t"}), confirm=sentinel)
     assert out == "ok"
     assert seen["confirm"] is sentinel   # 原样注入，非 None 非 bool
+
+
+def test_registry_receives_event_channel():
+    # 059：receives_event 通道与 receives_confirm 同款——标记的工具收到 event
+    # 参数，未标记的工具收不到（不给未来工具埋 TypeError 陷阱）
+    registry = ToolRegistry()
+    seen: dict = {}
+
+    def _probe(task: str, event=None) -> str:
+        seen["event"] = event
+        return "ok"
+
+    def _plain(task: str) -> str:
+        return "plain"
+
+    registry.register(Tool(
+        name="probe", description="", parameters={}, func=_probe, receives_event=True,
+    ))
+    registry.register(Tool(name="plain", description="", parameters={}, func=_plain))
+
+    sink = lambda type_, data: None   # noqa: E731
+    assert registry.execute("probe", json.dumps({"task": "t"}), on_event=sink) == "ok"
+    assert seen["event"] is sink
+    assert registry.execute("plain", json.dumps({"task": "t"}), on_event=sink) == "plain"
 
 
 # ---------- 失败反馈环 ----------
