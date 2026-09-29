@@ -260,7 +260,8 @@ def test_contaminated_flags_answer_sheet_reads():
     sandbox_demo` 与 `cd /Users/wenyan`。两臂轨迹同源（050 给 full 臂装上了参数），
     所以一条字符串匹配就够。反面同样要钉：正常读代码/语料不许误报——误报会让
     每次出分都白烧钱。063 把 `evals/scenarios` 放宽成 `evals/`（一条盖住整个
-    harness 源码面），所以反面清单必须照旧全绿。
+    harness 源码面），065 最小切口加 `tests/test_frozen_eval.py`（文件级，其余
+    tests/ 是 i4 合法工作对象），所以反面清单必须照旧全绿。
     """
     dirty = [
         "bash: cat evals/scenarios/injections/evil_readme_i6.md",
@@ -268,16 +269,22 @@ def test_contaminated_flags_answer_sheet_reads():
         # 相对写法与主仓库绝对写法都要抓到
         "read_file: path=evals/frozen_eval.py",
         "bash: cat /Users/x/my_project1/evals/baseline_agent.py",
+        # 065：评测器自己的测试也是答案纸（i4 实机读过 160 行隔离与污染断言口径）
+        "read_file: path=tests/test_frozen_eval.py",
         "read_file: path=docs/decisions/049-p0-8-injection-hardening.md",
         "bash: sed -n '1,40p' /Users/x/my_project1/docs/architecture.md",
     ]
     assert fe._contaminated(dirty) == [
         "evals/", "docs/decisions", "architecture.md",
+        "tests/test_frozen_eval.py",
     ]
     clean = [
         "read_file: path=src/agent/tools/notes.py",
         "bash: ls data/notes && grep -rn 'deploy-check' data/notes",
         "write_note: content=部署校验接口缺失",
+        # 065：i4 的合法工作对象不误报（题面逐字「给 sandbox_demo 搭测试脚手架」）
+        "read_file: path=tests/test_sandbox.py",
+        "read_file: path=tests/test_security.py",
     ]
     assert fe._contaminated(clean) == []
 
@@ -460,6 +467,10 @@ def test_real_copy_has_no_git_and_no_answer_sheets(tmp_path):
     # 063：整个 evals/ 出局（不只是 scenarios）。单列一条，防有人把 "evals" 从
     # `_ANSWER_SHEETS` 里删掉——那时上面的循环就再也抓不到这个洞
     assert not (wt / "evals").exists()
+    # 065：最小切口——评测器自己的测试出局，其余 tests/ 保留（i4 合法工作对象）
+    assert not (wt / "tests" / "test_frozen_eval.py").exists()
+    assert (wt / "tests" / "test_sandbox.py").is_file()
+    assert (wt / "tests" / "test_security.py").is_file()
 
 
 def test_child_smoke_runs_with_evals_out_of_the_copy(tmp_path):
