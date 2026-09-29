@@ -60,3 +60,7 @@ docs/internal/
 
 # Node（FW 站）：源码在 frontend/，构建产物落 src/facta/server/static/fw/（进 git）
 frontend/node_modules/
+
+# 架构图构建过程产物（architecture.build.py 一跑即重新生成）
+docs/assets/architecture.html
+docs/assets/architecture.imagegen.png
