@@ -9,8 +9,10 @@ M6.5 之前用户级信息「一律不记」是红线（仓库外位置没建，
 管线五段（M6.4 四段 + 分流）：
   ① 萃取   LLM 读「滚动摘要 + 尾窗」→ 候选条目（档案员不是评论员：
            只提炼对话明确说过的东西，禁补全禁推断），每条带 scope
-  ② 审查   二次调用对照原文踢掉编造（critic 第一次值班：挂在不可逆写入前）；
-           用户级条目从宽：证据不够直接即弃（跨项目影响所有会话，污染代价高）
+  ② 审查   二次调用对照原文做枚举裁决 keep/drop/edit（ADR 064：改写必须显式
+           声明并留 diff 痕迹，keep 取萃取原文不信回抄；critic 第一次值班：
+           挂在不可逆写入前）；用户级条目从宽：证据不够直接即弃（跨项目影响
+           所有会话，污染代价高）
   ③ 硬校验 程序管形状：作用域/类别白名单 / 条数上限 / 单条长度 / 敏感凭证
            禁令 / 易腐事实禁令（ADR 045）/ JSON 容错——信模型的部分是语义，
            不信的部分全都交给代码
@@ -25,7 +27,7 @@ learned 入 RAG→注入成本越阈值（032 裁定二 v2 信号）；审查升
 import json
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from agent.core.llm import LLM
@@ -99,19 +101,22 @@ EXTRACT_TEMPLATE = """你是个人 agent 的「记忆档案员」。下面是本
 {transcript}
 
 只输出 JSON 数组，格式：
-[{{"category": "constraints", "content": "...", "scope": "project", "verified": false}}]
-（scope 缺省视为 project；用户级条目 category 填 other 即可；verified 缺省视为 false）"""
+[{{"id": "e1", "category": "constraints", "content": "...", "scope": "project", "verified": false}}]
+（id 自编 e1/e2/… 递增，只作审查对照锚、无语义，缺省由程序按顺序补位；
+scope 缺省视为 project；用户级条目 category 填 other 即可；verified 缺省视为 false）"""
 
-REVIEW_TEMPLATE = """你是记忆档案的「审查员」。下面是候选记忆条目和对应的对话复盘材料。
-逐条对照：条目内容是否都能在复盘材料里找到明确依据？
-- 找得到依据的保留；找不到的（编造/推断/过度概括）删除
-- scope=user 的条目从宽处理：依据不够直接即删除（用户级记忆跨项目影响
+REVIEW_TEMPLATE = """你是记忆档案的「审查员」。下面是候选记忆条目（每条带 id 对照锚）和
+对应的对话复盘材料。逐条裁决，verdict 三选一：
+- keep：条目内容在材料里有明确依据 → 保留原文
+- drop：编造/推断/过度概括，或依据不足 → 删除
+- edit：可以修正措辞使条目更忠实于原文（禁止添加原文没有的信息），
+  必须给出改后全文——改写必须显式声明，不允许悄悄重写
+- scope=user 的条目从宽处理：依据不够直接即 drop（用户级记忆跨项目影响
   所有会话，污染代价远高于漏记）
-- 可以修正措辞使条目更忠实于原文，但禁止添加原文没有的信息
-- 重复的条目只留一条
+- 重复的条目只 keep 一条，其余 drop
 - verified=true 的条目，其背书（测试通过/git 状态/工具验证结果）也必须
-  能在材料中找到；找不到就把 verified 改成 false 保留条目——背书造假
-  比条目失真更危险（P0-7）
+  能在材料中找到；找不到就在该条裁决上加 "verified": false（撤背书，
+  审查只能撤不能补）——背书造假比条目失真更危险（P0-7）
 
 候选条目：
 {entries_json}
@@ -119,7 +124,9 @@ REVIEW_TEMPLATE = """你是记忆档案的「审查员」。下面是候选记�
 对话复盘材料：
 {transcript}
 
-只输出审查后保留的 JSON 数组（同格式）。一条都不留就输出 []。"""
+只输出 JSON 数组，每条候选一个裁决，格式：
+[{{"id": "e1", "verdict": "keep"}}, {{"id": "e2", "verdict": "edit", "content": "改后全文"}}]
+（只有 edit 需要 content；一条都不留就输出 []；id 只能用候选清单里出现过的）"""
 
 
 @dataclass
@@ -197,6 +204,103 @@ def _is_perishable(content: str) -> bool:
     敏感是隐私泄漏，易腐是**污染用户资产且不可逆**（固化只追加、无过期），
     且模型会当真引用错答案——消融首轮就有一题因腐化条目答错方向。"""
     return any(p.search(content) for p in _PERISHABLE_PATTERNS)
+
+
+def _mint_ids(items: list[dict]) -> tuple[list[dict], int]:
+    """萃取条目 id 物化（ADR 064 ①）：「决定」先有身份才谈得上对账。
+
+    模型给了唯一 id 就用模型的；缺省由程序按序补位（宽进——旧格式萃取
+    输出零改动照跑，程序铸的锚同样确定）；重复 id 弃后到者（无法对账的
+    保守方向，记数进报告）。id 只是管线内的对照锚，不落盘、不进 Entry。
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    dup = 0
+    for i, item in enumerate(items, start=1):
+        eid = str(item.get("id", "")).strip()
+        if eid and eid in seen:
+            dup += 1
+            continue
+        if not eid:
+            eid = f"e{i}"
+            while eid in seen:   # 程序铸的锚撞上模型给的：加下划线让位
+                eid += "_"
+        seen.add(eid)
+        out.append({**item, "id": eid})
+    return out, dup
+
+
+def _apply_verdicts(
+    tagged: list[dict], review: list[dict]
+) -> tuple[list[dict], list[dict], dict[str, int | bool]]:
+    """枚举裁决对账（ADR 064 ②）：keep 取萃取原文（不信审查回抄——回抄本身
+    就是一次再生成，可能漂移；id 物化的意义正在于能回去取原文）、drop 弃、
+    edit 取审查改稿并留 diff；非法 verdict 归 drop（拍板 1 甲：审查连裁决
+    都表述不清时，条目命运不该交给猜测）、编造 id 的裁决整案弃并记「审查
+    幻觉」（枚举化白送的幻觉探针）、未获裁决的候选弃（审查没说 keep 就
+    不替它留）。P0-7 语义保留：审查只能撤背书（"verified": false），不能补。
+
+    旧格式宽进（拍板 2 甲）：审查输出缺 verdict 字段的条目清单＝现行行为
+    照跑（按保留清单处理，含信任其回抄），报告标注「旧格式」。
+
+    返回 (进入硬校验的条目, edit 留痕, 计数)。
+    """
+    counts: dict[str, int | bool] = {
+        "old_format": False, "dropped": 0, "illegal": 0,
+        "hallucinated": 0, "unruled": 0, "edit_no_content": 0,
+    }
+    if review and not any("verdict" in r for r in review):
+        counts["old_format"] = True
+        return review, [], counts
+    by_id = {str(item.get("id")): item for item in tagged}
+    kept: list[dict] = []
+    edits: list[dict] = []
+    ruled: set[str] = set()
+    for r in review:
+        rid = str(r.get("id", ""))
+        src = by_id.get(rid)
+        if src is None:
+            counts["hallucinated"] += 1
+            continue
+        if rid in ruled:
+            counts["illegal"] += 1   # 同一条的重复裁决：后到的算非法
+            continue
+        ruled.add(rid)
+        demoted = {**src, "verified": src.get("verified") is True and r.get("verified") is not False}
+        verdict = r.get("verdict")
+        if verdict == "keep":
+            kept.append(demoted)
+        elif verdict == "drop":
+            counts["dropped"] += 1
+        elif verdict == "edit":
+            content = str(r.get("content", "")).strip()
+            if not content:
+                counts["edit_no_content"] += 1   # edit 缺正文＝表述不清，保守归 drop
+            else:
+                kept.append({**demoted, "content": content})
+                edits.append({"id": rid, "before": str(src.get("content", "")), "after": content})
+        else:
+            counts["illegal"] += 1
+    counts["unruled"] = len(tagged) - len(ruled)
+    return kept, edits, counts
+
+
+def _log_edits(learned_dir: Path, edits: list[dict], sid: str) -> None:
+    """edit 留痕 sidecar（ADR 064 拍板 3 甲）：learned_dir/.review.jsonl。
+
+    append-only 事件日志——记「某时某刻审查对 eN 做了什么改写」，不承诺
+    与当前 learned 内容一致（行被面板编辑/删除后对不上是预期，053 的
+    .provenance.json 同语义：审计不因文件被改而失效）。落在 052 记忆写
+    围栏内（程序写、伪造不了），gitignore 后 git archive 副本天然不带。
+    """
+    if not edits:
+        return
+    learned_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().isoformat(timespec="seconds")
+    with LEARNED_LOCK, open(learned_dir / ".review.jsonl", "a", encoding="utf-8") as f:
+        f.writelines(
+            json.dumps({"ts": ts, "sid": sid, **e}, ensure_ascii=False) + "\n" for e in edits
+        )
 
 
 def _harden(items: list[dict]) -> tuple[list[Entry], list[Entry], list[Entry]]:
@@ -299,6 +403,32 @@ def _brief(items: list[Entry], reason: str) -> str:
     return f"；{len(items)} 条{reason}：{shown}"
 
 
+def _review_brief(edits: list[dict], counts: dict[str, int | bool], dup_ids: int) -> str:
+    """064 审查对账的报告段：edit diff（原文→改后各截 60 字）+ 各类计数，
+    原因分开说不混报（050 先例）。空账本返回空串，调用点直接相加。"""
+    parts: list[str] = []
+    if edits:
+        shown = "；".join(
+            f"{e['id']}「{e['before'][:60]}」→「{e['after'][:60]}」" for e in edits[:3]
+        )
+        if len(edits) > 3:
+            shown += f" 等 {len(edits)} 条"
+        parts.append(f"；{len(edits)} 条经审查修改已留痕（.review.jsonl）：{shown}")
+    if counts["old_format"]:
+        parts.append("；审查输出为旧格式（按保留清单处理）")
+    if counts["hallucinated"]:
+        parts.append(f"；{counts['hallucinated']} 条裁决引用了不存在的条目 id（审查幻觉），已弃")
+    if counts["illegal"]:
+        parts.append(f"；{counts['illegal']} 条裁决非法（非 keep/drop/edit），按 drop 处置")
+    if counts["edit_no_content"]:
+        parts.append(f"；{counts['edit_no_content']} 条 edit 缺改后正文，按 drop 处置")
+    if counts["unruled"]:
+        parts.append(f"；{counts['unruled']} 条候选未获裁决，按 drop 处置")
+    if dup_ids:
+        parts.append(f"；{dup_ids} 条萃取条目 id 重复，已弃")
+    return "".join(parts)
+
+
 def consolidate(
     session: Session,
     llm: LLM,
@@ -339,9 +469,10 @@ def consolidate(
         return "记忆固化：档案员输出无法解析（坏 JSON），未写入"
     if not raw:
         return "记忆固化：档案员明确表示无条目可沉淀，未写入"
+    tagged, dup_ids = _mint_ids(raw)   # ADR 064 ①：决定先有身份才谈得上对账
 
     review_prompt = REVIEW_TEMPLATE.format(
-        entries_json=json.dumps(raw, ensure_ascii=False),
+        entries_json=json.dumps(tagged, ensure_ascii=False),
         transcript=transcript,
     )
     kept, review_ok = _parse_json_array(
@@ -349,12 +480,16 @@ def consolidate(
     )
     if not review_ok:
         return "记忆固化：审查输出无法解析（坏 JSON），未写入"
-    entries, candidates, perishable = _harden(kept)
+    kept_items, edits, counts = _apply_verdicts(tagged, kept)   # ADR 064 ②
+    entries, candidates, perishable = _harden(kept_items)
+    _log_edits(learned_dir, edits, sid)   # ADR 064 ③：改写留痕落盘
 
-    # 两类拦截都报出原文（P0-7 缺背书候选 / ADR 045 易腐），原因分开说不混报
+    # 各类拦截都报出原文（P0-7 缺背书候选 / ADR 045 易腐 / 064 对账计数），
+    # 原因分开说不混报
     brief = (
         _brief(candidates, "教训缺客观背书降为候选（待确认）")
         + _brief(perishable, "含易腐事实（行号/计数/跟踪状态）已拦，要保留请剥掉易腐部分手工入库")
+        + _review_brief(edits, counts, dup_ids)
     )
 
     # 未配置用户级位置：user 条目丢弃（v1 行为），文案如实说——不算驳回

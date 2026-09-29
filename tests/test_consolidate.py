@@ -493,3 +493,185 @@ def test_no_sid_keeps_prior_line_shape(tmp_path):
     constraints = (learned / "constraints.md").read_text(encoding="utf-8")
     assert "[已验证] 测试全过的经验" in constraints
     assert ORIGIN_TAG_PREFIX not in constraints          # 没有空的 [固化:] 尾巴
+
+
+# ---------- ADR 064 枚举审查：id 物化 + keep/drop/edit + diff 留痕 ----------
+
+
+def _enum_script(extract: list[dict], review: list[dict]) -> list[Message]:
+    return [
+        Message(role="assistant", content=json.dumps(extract, ensure_ascii=False)),
+        Message(role="assistant", content=json.dumps(review, ensure_ascii=False)),
+    ]
+
+
+def test_enum_keep_takes_extract_original(tmp_path):
+    """keep 取萃取原文（不信审查回抄）：裁决里的 content 字段被无视——
+    回抄本身就是一次再生成，id 物化的意义正在于能回去取原文。"""
+    llm = ScriptedLLM(_enum_script(
+        [{"id": "e1", "category": "other", "content": "萃取原文版本", "verified": True}],
+        [{"id": "e1", "verdict": "keep", "content": "审查回抄的漂移版本"}],
+    ))
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    assert "新增 1 条" in report
+    other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
+    assert "萃取原文版本" in other
+    assert "漂移版本" not in other
+
+
+def test_enum_edit_stores_edited_and_logs_sidecar(tmp_path):
+    """edit（合法忠实化修正，假红守卫②）：改后全文入库、报告带 diff、
+    sidecar 落 {ts, sid, id, before, after}——「改了什么」从此可查。"""
+    llm = ScriptedLLM(_enum_script(
+        [{"id": "e1", "category": "other", "content": "原句有些冗长不太忠实", "verified": True}],
+        [{"id": "e1", "verdict": "edit", "content": "忠实化后的原句"}],
+    ))
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned", sid="0009")
+
+    other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
+    assert "忠实化后的原句" in other and "冗长" not in other
+    assert "1 条经审查修改已留痕" in report
+    assert "原句有些冗长" in report          # 报告里报出原文→改后
+    sidecar = (tmp_path / "learned" / ".review.jsonl").read_text(encoding="utf-8")
+    line = json.loads(sidecar.strip())
+    assert line["id"] == "e1" and line["sid"] == "0009"
+    assert line["before"] == "原句有些冗长不太忠实"
+    assert line["after"] == "忠实化后的原句"
+
+
+def test_enum_edit_sensitive_content_still_blocked(tmp_path):
+    """假红守卫①：审查 edit 后的内容含敏感凭证 → 照样被 _harden 拦
+    （edit 不能绕过代码闸）；sidecar 仍记这次改写（事件日志不因拦截而消失）。"""
+    llm = ScriptedLLM(_enum_script(
+        [{"id": "e1", "category": "other", "content": "用户配置了服务密钥", "verified": True}],
+        [{"id": "e1", "verdict": "edit",
+          "content": "用户的 key 是 sk-abc123def456ghi789jkl012"}],
+    ))
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    assert "未写入" in report                    # 敏感闸拦下，零入库
+    assert "经审查修改已留痕" in report           # 改写事件本身仍被记录
+    assert not (tmp_path / "learned" / "other.md").exists()
+    sidecar = (tmp_path / "learned" / ".review.jsonl").read_text(encoding="utf-8")
+    assert "sk-abc123" in sidecar                # 留痕的是审查的改写动作（落盘前被拦）
+
+
+def test_hallucinated_id_and_unruled_dropped(tmp_path):
+    """编造 id 的裁决整案弃并记「审查幻觉」（枚举化白送的幻觉探针）；
+    未获裁决的候选也弃——审查没说 keep 就不替它留。"""
+    llm = ScriptedLLM(_enum_script(
+        [
+            {"id": "e1", "category": "other", "content": "有裁决的条目", "verified": True},
+            {"id": "e2", "category": "other", "content": "没人理会的条目", "verified": True},
+        ],
+        [
+            {"id": "e99", "verdict": "keep"},   # 编造 id
+            {"id": "e1", "verdict": "keep"},
+        ],
+    ))
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
+    assert "有裁决的条目" in other
+    assert "没人理会" not in other
+    assert "1 条裁决引用了不存在的条目 id（审查幻觉）" in report
+    assert "1 条候选未获裁决" in report
+
+
+def test_illegal_verdict_drops(tmp_path):
+    """拍板 1 甲：verdict 不是 keep/drop/edit → 条目归 drop 并记原因——
+    记忆是不可逆用户资产，审查连裁决都表述不清时命运不交给猜测。"""
+    llm = ScriptedLLM(_enum_script(
+        [{"id": "e1", "category": "other", "content": "表述不清的裁决对象", "verified": True}],
+        [{"id": "e1", "verdict": "maybe"}],
+    ))
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    assert "1 条裁决非法（非 keep/drop/edit），按 drop 处置" in report
+    assert "未写入" in report
+
+
+def test_edit_without_content_drops(tmp_path):
+    """edit 缺改后正文＝表述不清，保守归 drop 并记原因。"""
+    llm = ScriptedLLM(_enum_script(
+        [{"id": "e1", "category": "other", "content": "想改但没给全文", "verified": True}],
+        [{"id": "e1", "verdict": "edit"}],
+    ))
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    assert "1 条 edit 缺改后正文" in report
+    assert "未写入" in report
+
+
+def test_old_format_review_widely_accepted(tmp_path):
+    """拍板 2 甲：审查输出缺 verdict 的旧自由格式照现行行为处理（按保留
+    清单、信任其回抄），报告标注「旧格式」——061 基线 695 条既有断言零改写。"""
+    llm = ScriptedLLM(_enum_script(
+        [{"category": "other", "content": "旧格式萃取条目", "verified": True}],
+        [{"category": "other", "content": "旧格式审查照抄条目", "verified": True}],
+    ))
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    assert "新增 1 条" in report
+    assert "审查输出为旧格式" in report
+    other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
+    assert "旧格式审查照抄条目" in other    # 旧格式信任回抄＝现行行为不变
+
+
+def test_missing_extract_ids_minted_positionally(tmp_path):
+    """萃取输出缺 id（旧格式）→ 程序按序补位 e1/e2/…，新格式裁决照常对账
+    ——宽进是双向的：旧萃取 + 新审查也能跑。"""
+    llm = ScriptedLLM(_enum_script(
+        [
+            {"category": "other", "content": "第一条", "verified": True},
+            {"category": "other", "content": "第二条", "verified": True},
+        ],
+        [{"id": "e1", "verdict": "keep"}, {"id": "e2", "verdict": "drop"}],
+    ))
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    assert "新增 1 条" in report
+    other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
+    assert "第一条" in other and "第二条" not in other
+
+
+def test_review_can_only_demote_verification(tmp_path):
+    """P0-7 语义保留：审查只能撤背书（"verified": false），不能补——
+    被撤背书的 constraints 教训走既有降级候选通道，不是直通入库。"""
+    llm = ScriptedLLM(_enum_script(
+        [{"id": "e1", "category": "constraints", "content": "背书存疑的教训", "verified": True}],
+        [{"id": "e1", "verdict": "keep", "verified": False}],
+    ))
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    assert "未写入" in report
+    assert "1 条教训缺客观背书降为候选（待确认）" in report
+    assert "背书存疑的教训" in report         # 候选内容列出供二次确认
+    assert not (tmp_path / "learned" / "constraints.md").exists()
+
+
+def test_duplicate_extract_id_dropped(tmp_path):
+    """萃取条目 id 重复：后到者弃（无法对账），报告记数。"""
+    llm = ScriptedLLM(_enum_script(
+        [
+            {"id": "e1", "category": "other", "content": "第一条（正身）", "verified": True},
+            {"id": "e1", "category": "other", "content": "撞 id 的第二条", "verified": True},
+        ],
+        [{"id": "e1", "verdict": "keep"}],
+    ))
+
+    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    assert "1 条萃取条目 id 重复，已弃" in report
+    other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
+    assert "正身" in other and "撞 id" not in other
