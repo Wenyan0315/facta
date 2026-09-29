@@ -15,6 +15,21 @@
 
 ---
 
+## 界面一览 / UI Tour
+
+以下为 Web 壳的四个面板，截自 mock 模式（`FACTA_PROVIDER=mock`），图中全部为演示数据：
+The four web panels below were captured in mock mode (`FACTA_PROVIDER=mock`); everything shown is demo data.
+
+| 对话 / Chat | 任务视图 / Tasks |
+|---|---|
+| ![对话面板 / Chat panel](docs/assets/screenshots/chat.png) | ![任务视图 / Tasks panel](docs/assets/screenshots/tasks.png) |
+
+| 记忆面板 / Memory | 知识图谱 / Knowledge graph |
+|---|---|
+| ![记忆面板 / Memory panel](docs/assets/screenshots/memory.png) | ![知识图谱 / Knowledge graph panel](docs/assets/screenshots/graph.png) |
+
+---
+
 ## 特性 / Features
 
 - **ReAct 主循环 / ReAct loop**：感知 → 决策 ⇄ 工具调用 → 观察；模型掌握决策权，程序掌握执行权。<br>
@@ -79,6 +94,15 @@ Any OpenAI-compatible provider plugs in via three environment variables — `{PR
 不在表里的中转商不必改代码：用 `{PREFIX}_BASE_URL` + `{PREFIX}_MODEL` 直接覆盖默认。embedding 通过 `FACTA_EMBED_PROVIDER`（默认 `siliconflow`）切换；缺 key 或未装 `[rag]` 时自动降级词袋嵌入，对话不报错（只是检索质量变差）。详见 [ADR 070](docs/decisions/070-multi-provider-compatibility.md)。
 
 Providers not listed need no code changes: override defaults directly with `{PREFIX}_BASE_URL` + `{PREFIX}_MODEL`. Embeddings switch via `FACTA_EMBED_PROVIDER` (default `siliconflow`); a missing key or uninstalled `[rag]` degrades to bag-of-words embeddings — chat keeps working (only retrieval quality drops). See [ADR 070](docs/decisions/070-multi-provider-compatibility.md).
+
+### 可选能力 / Optional capabilities
+
+这两件不配置也能跑，配了多两块能力（`.env.example` 里都有现成注释行）：
+
+- **联网搜索 / Web search**：填 `TAVILY_API_KEY`（或 `BOCHA_API_KEY`，博查优先）。不填则 `web_search`/`fetch_web` 自动不上工具菜单，其余功能不受影响。
+  Set `TAVILY_API_KEY` (or `BOCHA_API_KEY`, which takes precedence). Without it the `web_search`/`fetch_web` tools simply stay off the menu — everything else works.
+- **场景路由 / Scenario routing (M10)**：填 `JEV_API_KEY`（可选 `JEV_BASE_URL`）。轮首由 Jev 按 direct / single_tool / complex 决定工具菜单形状；不填走原生全菜单路径，mock 模式自动跳过。
+  Set `JEV_API_KEY` (optional `JEV_BASE_URL`) for per-turn direct / single_tool / complex routing; without it the agent uses the native full-menu path (skipped automatically in mock mode).
 
 ### CLI
 
