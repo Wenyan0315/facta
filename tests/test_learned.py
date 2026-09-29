@@ -87,7 +87,13 @@ def test_delete_line_keeps_rest(tmp_path):
 # ---------- API 端点 ----------
 
 def _client(monkeypatch, tmp_path):
-    """最小 AppContext + LEARNED_DIR 指向临时目录（与 test_app 同款隔离模式）。"""
+    """最小 AppContext + LEARNED_DIR 指向临时目录（与 test_app 同款隔离模式）。
+
+    user 桶也一并隔离（CORTEX_USER_MEMORY，041 的现成注入点）：面板端点把
+    user 当第四个伪 category，路径走 paths.user_memory_path()——不隔离就会
+    读真 home 的隐私文件，且断言「列出的条目集」会被开发机上的真实用户级
+    记忆污染（2026-09-29 实爆：首条真实用户记忆落盘后本测试翻红）。
+    """
     from fastapi.testclient import TestClient
 
     from agent.core.llm import ScriptedLLM
@@ -99,6 +105,7 @@ def _client(monkeypatch, tmp_path):
     from agent.tools.registry import ToolRegistry
 
     monkeypatch.setattr("agent.server.app.LEARNED_DIR", tmp_path)
+    monkeypatch.setenv("CORTEX_USER_MEMORY", str(tmp_path / "user.md"))
 
     ctx = AppContext(
         provider="mock",

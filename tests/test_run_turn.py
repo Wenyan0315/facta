@@ -5,6 +5,7 @@ user 消息留底片、返回 None。差别只在 cancelled 是 Run 级终态（
 error 已由内核发事件。
 """
 
+from agent.core.jev import RouteDecision
 from agent.core.llm import LLM, ScriptedLLM, StreamChunk
 from agent.core.types import Message
 from agent.memory.store import Session
@@ -12,6 +13,7 @@ from agent.orchestrator.agent import Agent
 from agent.orchestrator.loop import (
     RunResult,
     _is_dsml_leak,
+    _merge_with_leak_guard,
     _salvage_dsml_leak,
     run_turn,
 )
@@ -205,6 +207,116 @@ def test_dsml_leak_persists_degrades_honestly():
     assert any("输出格式故障" in t for t in texts)   # 流式侧同样被告知
     # user 之后直接是降级回答——泄漏轮的坏消息一条都不入史
     assert [m.role for m in session.messages] == ["system", "user", "assistant"]
+
+
+class _DirectRouter:
+    """route() 恒 direct：M10 把上下文依赖的单词跟话判成纯聊天的实机形状。
+
+    066 案发还原（2026-09-29 会话 20260929-095616）：「今天天气怎样」→
+    模型答完问「告诉我城市名」→「上海」被路由判 direct → tools=None。
+    """
+
+    def route(self, user_text: str) -> RouteDecision:
+        return RouteDecision(kind="direct")
+
+
+def test_dsml_leak_with_none_menu_escalates_retry_menu():
+    # 066：direct 路由（tools=None）下泄漏——重试必须升全量菜单，否则 hint
+    # 说的「通过标准 tool_calls 字段发起」结构上不存在（056 收尾段同款
+    # 死锁的第二位置）。升级后模型点菜 → 工具真执行，不是孤儿 tool_calls
+    llm = ScriptedLLM([
+        Message(role="assistant", content=_DSML_SAMPLE),
+        Message(role="assistant", content="", tool_calls=[
+            {"id": "c1", "name": "get_current_time", "arguments": "{}"},
+        ]),
+        Message(role="assistant", content="当前时间是 2026-09-24 12:00。"),
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+    agent = Agent(
+        name="test", system_prompt="sys",
+        registry=_leak_agent().registry, router=_DirectRouter(),
+    )
+
+    result, reply = run_turn(session, "上海", llm=llm, agent=agent)
+
+    assert result is RunResult.COMPLETED
+    assert reply is not None and "12:00" in reply.content
+    # 首调无菜单（路由 direct）；泄漏重试升到全量——模型这才点得了菜
+    assert llm.tool_menus[0] is None
+    assert [s["function"]["name"] for s in (llm.tool_menus[1] or [])] == ["get_current_time"]
+    assert [m.role for m in session.messages] == [
+        "system", "user", "assistant", "tool", "assistant",
+    ]
+
+
+def test_dsml_leak_with_menu_retries_same_menu():
+    # 066 只升 None：有菜单时（全量或窄）泄漏重试沿用同一份菜单——
+    # 已有 tools 字段承载点菜，056 的菜单收窄设计不被推翻
+    llm = ScriptedLLM([
+        Message(role="assistant", content=_DSML_SAMPLE),
+        Message(role="assistant", content="好的，任务已收官。"),
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+
+    run_turn(session, "收官", llm=llm, agent=_leak_agent())
+
+    assert llm.tool_menus[0] == llm.tool_menus[1]   # 同一份菜单重投，不升级
+
+
+def test_merge_with_leak_guard_without_fallback_keeps_none():
+    # fallback 缺省＝旧行为：tools=None 的重试仍是 None——收尾段 final
+    # 调用点依赖此语义（它的 tool_calls 无执行路径，升了会造孤儿）
+    llm = ScriptedLLM([
+        Message(role="assistant", content=_DSML_SAMPLE),
+        Message(role="assistant", content=_DSML_SAMPLE),
+        Message(role="assistant", content=_DSML_SAMPLE),
+    ])
+
+    out = _merge_with_leak_guard(
+        llm, [Message(role="system", content="sys")], None, None, None,
+    )
+
+    assert llm.tool_menus == [None, None, None]   # 1 + 2 次重试全程无菜单
+    assert not _is_dsml_leak(out)                 # 超限降级（047）
+
+
+def test_close_out_none_menu_leak_escalates_but_final_does_not():
+    # 收尾段两个调用点的 066 落点：无活跃计划时 closing=None → 泄漏升全量；
+    # 收官菜跑完后的 final 调用恒不给 fallback（孤儿风险）。max_rounds=1
+    # 逼出 _close_out 路径
+    llm = ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[          # 轮 1：点菜
+            {"id": "c1", "name": "get_current_time", "arguments": "{}"},
+        ]),
+        Message(role="assistant", content=_DSML_SAMPLE),           # 收尾调 1：泄漏
+        Message(role="assistant", content="", tool_calls=[         # 升级后重试：又点菜
+            {"id": "c2", "name": "get_current_time", "arguments": "{}"},
+        ]),
+        Message(role="assistant", content="收官总结。"),             # final：文字
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+    agent = Agent(
+        name="test", system_prompt="sys",
+        registry=_leak_agent().registry, max_tool_rounds=1,
+    )
+
+    result, reply = run_turn(session, "干个活", llm=llm, agent=agent)
+
+    assert result is RunResult.COMPLETED
+    assert reply is not None and reply.content == "收官总结。"
+    # 菜单序列：轮 1 全量 → 收尾调 1 无（closing=None，无计划）→
+    # 泄漏重试升全量 → final 无（撤菜单，刻意不升）
+    assert llm.tool_menus[0] is not None
+    assert llm.tool_menus[1] is None
+    assert llm.tool_menus[2] is not None
+    assert llm.tool_menus[3] is None
+    # 升级后点的菜真执行了：两次点菜两次工具结果，无孤儿 tool_calls
+    assert [m.role for m in session.messages] == [
+        "system", "user", "assistant", "tool", "assistant", "tool", "assistant",
+    ]
 
 
 # ---------- 降级改写本身（ADR 047，对着落盘的真实样本设计） ----------

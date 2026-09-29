@@ -55,9 +55,11 @@ _DSML_LEAK_MARKERS = ("<｜｜DSML｜｜",)
 # 被格式故障消耗——模型病了不该扣它的行动额度
 _DSML_LEAK_RETRIES = 2
 _DSML_LEAK_HINT = (
-    "检测到刚才的输出把内部函数调用格式当作正文文本吐出，该调用并未被执行、"
-    "意图已丢失。请重试：如需调用工具，通过标准 tool_calls 字段发起；"
-    "如需作答，直接输出自然语言。正文中不要出现 <｜｜DSML｜｜ 等任何调用格式。"
+    "检测到刚才的输出把内部函数调用格式（尖括号包裹的全角竖线标记）"
+    "当作正文文本吐出，该调用并未被执行、意图已丢失。"
+    "请重试：如需调用工具，通过标准 tool_calls 字段发起；"
+    "如需作答，直接输出自然语言。"
+    "正文中不要使用尖括号包裹的特殊标记格式。"
 )
 # 降级时只从 markup 里提工具名、不提参数（ADR 047 拍板 3）：参数里可能装着
 # 几百字未执行成功的正文（实机样本：write_note 的整篇笔记），复述进告知
@@ -199,6 +201,7 @@ def _merge_with_leak_guard(
     tools: list[dict] | None,
     should_cancel: Callable[[], bool] | None,
     on_text: Callable[[str], None] | None,
+    fallback: list[dict] | None = None,
 ) -> Message:
     """merge + DSML 泄漏检测/重试（工具循环与收尾段共用，方案 a 拍板）。
 
@@ -207,6 +210,15 @@ def _merge_with_leak_guard(
       同理由：坏消息进历史会被摘要吸收，毒害后续行为
     - 重试提示注入投影尾部——投影本轮作废，提示随轮蒸发，不进底片
     - 重试独立计数上限 _DSML_LEAK_RETRIES，不吃 rounds 预算
+
+    重试升菜单（ADR 066）：tools=None 时泄漏＝模型想调工具而请求里没有
+    tools 字段可承载——056 在收尾段立的案（「出路不存在时重试多少次都
+    不存在」）换了个位置复发：M10 路由把上下文依赖的跟话（实机样本：
+    「上海」）判成 direct。重投前把 None 换成调用方给的 fallback 全量
+    菜单，hint 指的「通过标准 tool_calls 字段发起」才结构上成为可能。
+    只升 None：窄菜单（single_tool 收窄／056 收官菜）已有字段承载点菜，
+    收窄设计不被推翻；fallback 缺省＝旧行为（收尾段 final 调用点依赖：
+    它的 tool_calls 无执行路径，升了会造孤儿）。
 
     超限后不再原样返回（ADR 047 甲案推翻 033 的「原样吐出」）：截掉泄漏
     markup、保住标记之前的正常正文、追加明确故障告知——诚实降级仍成立
@@ -229,6 +241,8 @@ def _merge_with_leak_guard(
             return _salvage_dsml_leak(reply, on_text)   # 超限：截断 + 告知（ADR 047）
         if on_text:
             on_text("\n【检测到输出格式故障，正在自动重试…】\n")
+        if tools is None and fallback is not None:
+            tools = fallback   # 066：出路不存在时重试多少次都不存在（056）
         payload.append(Message(role="system", content=_DSML_LEAK_HINT))
 
 
@@ -469,7 +483,11 @@ def _close_out(
             menu=_MENU_PLAN_ONLY if closing is not None else _MENU_GONE
         ),
     ))
-    reply = _merge_with_leak_guard(llm, payload, closing, should_cancel, on_text)
+    # fallback：无活跃计划时 closing=None——泄漏重试升全量菜单（066），
+    # 有计划时 closing 非空（窄菜单）不升，056 的收窄设计原样保留
+    reply = _merge_with_leak_guard(
+        llm, payload, closing, should_cancel, on_text, fallback=schemas or None
+    )
     if not reply.tool_calls:            # 没点收官菜 → 这就是最终回答
         session.messages.append(reply)
         return RunResult.COMPLETED, reply
@@ -483,6 +501,9 @@ def _close_out(
     # 收官跑完再撤菜单逼文字总结，并钉一条新告知盖掉上一条「仍可收官」
     # ——否则模型会再点一次，而这次没有 tools 字段可承载
     payload.append(Message(role="system", content=_CLOSING_HINT.format(menu=_MENU_GONE)))
+    # 066：此处刻意不给 fallback——final 的 tool_calls 没有执行路径（直接
+    # 入底片返回），升菜单会让「模型又点菜」变孤儿 tool_calls；撤菜单 +
+    # 告知是 056 的成套设计，泄漏残余走 047 降级
     final = _merge_with_leak_guard(llm, payload, None, should_cancel, on_text)
     session.messages.append(final)
     return RunResult.COMPLETED, final
@@ -599,8 +620,12 @@ def run_turn(
 
             # 流式消费：分片边收边喂 on_text，收完 merge 拼回完整回复。
             # 点菜轮 content 通常为空（不冒字），模型偶尔先冒半句再点菜。
-            # 泄漏守卫罩在外面：DSML 泄漏 → 不入史、提示重试（上限 2 次）
-            reply = _merge_with_leak_guard(llm, payload, tools, should_cancel, on_text)
+            # 泄漏守卫罩在外面：DSML 泄漏 → 不入史、提示重试（上限 2 次）；
+            # fallback 全量菜单：轮首被路由判 direct（tools=None）时泄漏
+            # 重试升菜单，否则模型想点的菜结构上无字段可承载（ADR 066）
+            reply = _merge_with_leak_guard(
+                llm, payload, tools, should_cancel, on_text, fallback=full_tools
+            )
 
             if not reply.tool_calls:   # 模型不点菜了 → 最终回答，退出循环
                 session.messages.append(reply)
