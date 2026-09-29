@@ -1,3 +1,0 @@
-- [2026-09-26] 对话主循环 run_turn 定义在 src/agent/orchestrator/loop.py。
-- [2026-09-18] 新增终端工具在 src/agent/tools/terminal.py，测试在 tests/test_terminal.py。
-- [2026-09-23] 架构分三层：模型层（LLM 负责理解与决策调工具）、工具层（时间、笔记读写与检索、历史检索、本地文件读写）、数据层（data/notes、会话历史、本地文件系统）。
