@@ -152,4 +152,4 @@
 2. `tests/test_plan.py`：改名 1 条断言、新增 1 条（悬空步骤同批收官），夹具补 `index`。
 3. 三门（ruff / mypy / pytest）。
 4. 实机：定向 r4/r6 → full 臂（甲案前）→ full 臂（甲案后），核对判定标准 5 条。
-5. 回写：本 ADR；[047](047-dsml-leak-degradation.md) 遗留小节 append 指向本案并更正反方第 3 条的归因；[architecture.md](../architecture.md) 版本 v0.86 → v0.87 + DSML 已知问题条改判 + 索引加 055/056 两行；[competitive-roadmap.md](../competitive-roadmap.md) P0-8/P0-9 与刺 #4 状态回写。
+5. 回写：本 ADR；[047](047-dsml-leak-degradation.md) 遗留小节 append 指向本案并更正反方第 3 条的归因；[architecture.md](../architecture.md) 版本 v0.86 → v0.87 + DSML 已知问题条改判 + 索引加 055/056 两行；competitive-roadmap.md（内部归档）P0-8/P0-9 与刺 #4 状态回写。

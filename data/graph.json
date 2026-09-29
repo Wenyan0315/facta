@@ -209,6 +209,53 @@
     {
       "id": "纳斯达克",
       "type": "概念"
+    },
+    {
+      "id": "CI",
+      "type": "技术"
+    },
+    {
+      "id": "评测集",
+      "type": "概念"
+    },
+    {
+      "id": "信息路径",
+      "type": "概念",
+      "aliases": [
+        "调用序列"
+      ]
+    },
+    {
+      "id": "JSON-schema",
+      "type": "技术"
+    },
+    {
+      "id": "capabilities.json",
+      "type": "概念"
+    },
+    {
+      "id": "policy scope",
+      "type": "概念"
+    },
+    {
+      "id": "web_search",
+      "type": "工具"
+    },
+    {
+      "id": "read_notes",
+      "type": "工具"
+    },
+    {
+      "id": "run_shell",
+      "type": "工具"
+    },
+    {
+      "id": "TOOL-ALLOWLIST_SYNC",
+      "type": "方法"
+    },
+    {
+      "id": "IO-BOUNDARY",
+      "type": "方法"
     }
   ],
   "edges": [
@@ -267,24 +314,6 @@
       "source_note": "Embedding.md"
     },
     {
-      "source": "一致性检查-第2_3层实操示例.md",
-      "target": "能力与政策一致性检查.md",
-      "relation": "引用",
-      "source_note": "一致性检查-第2_3层实操示例.md"
-    },
-    {
-      "source": "Agent",
-      "target": "工具",
-      "relation": "依赖",
-      "source_note": "一致性检查-第2_3层实操示例.md"
-    },
-    {
-      "source": "政策",
-      "target": "能力",
-      "relation": "包含",
-      "source_note": "一致性检查-第2_3层实操示例.md"
-    },
-    {
       "source": "模型",
       "target": "工具",
       "relation": "依赖",
@@ -301,18 +330,6 @@
       "target": "向量",
       "relation": "依赖",
       "source_note": "向量数据库.md"
-    },
-    {
-      "source": "政策自动复查落地手册.md",
-      "target": "能力与政策一致性检查.md",
-      "relation": "引用",
-      "source_note": "政策自动复查落地手册.md"
-    },
-    {
-      "source": "政策自动复查落地手册.md",
-      "target": "一致性检查-第2_3层实操示例.md",
-      "relation": "引用",
-      "source_note": "政策自动复查落地手册.md"
     },
     {
       "source": "知识图谱",
@@ -421,6 +438,138 @@
       "target": "大模型应用",
       "relation": "包含",
       "source_note": "Agent.md"
+    },
+    {
+      "source": "一致性检查-第2_3层实操示例.md",
+      "target": "能力与政策一致性检查.md",
+      "relation": "引用",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "一致性检查-第2_3层实操示例.md",
+      "target": "政策",
+      "relation": "引用",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "一致性检查-第2_3层实操示例.md",
+      "target": "Agent",
+      "relation": "包含",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "Agent",
+      "target": "工具",
+      "relation": "依赖",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "Agent",
+      "target": "能力",
+      "relation": "包含",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "golden set",
+      "target": "政策",
+      "relation": "依赖",
+      "source_note": "一致性检查-第2_3层实操示例.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "能力与政策一致性检查.md",
+      "relation": "引用",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "一致性检查-第2_3层实操示例.md",
+      "relation": "引用",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "政策",
+      "relation": "引用",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "能力",
+      "relation": "包含",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "工具",
+      "relation": "包含",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "golden set",
+      "relation": "包含",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "政策自动复查落地手册.md",
+      "target": "信息路径",
+      "relation": "包含",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "信息路径",
+      "target": "Agent",
+      "relation": "依赖",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "评测集",
+      "target": "golden set",
+      "relation": "包含",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "golden set",
+      "target": "政策",
+      "relation": "对比",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "TOOL-ALLOWLIST_SYNC",
+      "target": "工具",
+      "relation": "包含",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "TOOL-ALLOWLIST_SYNC",
+      "target": "能力",
+      "relation": "依赖",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "IO-BOUNDARY",
+      "target": "工具",
+      "relation": "依赖",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "IO-BOUNDARY",
+      "target": "政策",
+      "relation": "依赖",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "JSON-schema",
+      "target": "capabilities.json",
+      "relation": "依赖",
+      "source_note": "政策自动复查落地手册.md"
+    },
+    {
+      "source": "policy scope",
+      "target": "能力",
+      "relation": "对比",
+      "source_note": "政策自动复查落地手册.md"
     }
   ],
   "note_hashes": {
@@ -430,15 +579,15 @@
     "PHP简介.md": "6db4505e9b455c7c",
     "Python简介.md": "a3b67eb31ba0d3d0",
     "RAG.md": "49c2f3d30efbbee3",
-    "一致性检查-第2_3层实操示例.md": "36d5031b4694cdd1",
     "三级信息政策.md": "57aed4a5b42663f8",
     "上下文窗口.md": "a66f840a24b35d3d",
     "余弦相似度.md": "c447bf1132a81511",
     "向量数据库.md": "ab402cf2f4370624",
-    "政策自动复查落地手册.md": "39fee38ab8bce033",
     "知识图谱.md": "cc68257f585d470e",
     "能力与政策一致性检查.md": "7b80c105cacb1bc0",
     "阿里巴巴股价分析报告-2026年9月24日.md": "215f8728a2de4bce",
-    "Agent.md": "68269dc770dd5f7f"
+    "Agent.md": "68269dc770dd5f7f",
+    "一致性检查-第2_3层实操示例.md": "8fb6381612f203f0",
+    "政策自动复查落地手册.md": "a8bc6638302f04f7"
   }
 }

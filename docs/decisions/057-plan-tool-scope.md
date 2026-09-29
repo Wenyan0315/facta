@@ -2,7 +2,7 @@
 
 > 状态：**已落地（2026-09-27）**，用户裁定「甲：只声明并校验工具范围」（数据范围不做，理由见拍板 1）｜日期：2026-09-27
 > 授权出处：用户 2026-09-27 对「范围声明要强制到哪一层」的选择（AskUserQuestion：甲工具范围 / 乙工具+数据范围 / 丙越界改走 L2 确认）
-> 立项出处：[competitive-roadmap.md P0-8](../competitive-roadmap.md)「配套：记忆条目加 provenance 字段、**plan 结构化声明工具/数据范围并执行前校验**」——provenance 由 [053](053-memory-provenance.md) 落地、记忆落盘唯一入口由 [052](052-memory-write-fence.md) 落地，本案是这条配套的**最后一件**
+> 立项出处：competitive-roadmap.md P0-8（内部归档）「配套：记忆条目加 provenance 字段、**plan 结构化声明工具/数据范围并执行前校验**」——provenance 由 [053](053-memory-provenance.md) 落地、记忆落盘唯一入口由 [052](052-memory-write-fence.md) 落地，本案是这条配套的**最后一件**
 > 一句话结论：范围声明的价值不在「模型守规矩」，在**它是一个在读到毒内容之前就已落地、且改动必经人审的承诺装置**——注入发生在执行中途（step 2 读到毒 README），声明发生在 step 0，所以越界那一刻程序有依据拒绝，而升级范围的唯一出路（`make_plan` 修订）自己就带 `needs_confirmation=True`。
 
 ## 背景与动机

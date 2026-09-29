@@ -21,3 +21,4 @@ theme:
     red: "#E05252"
 pages:
   - pages/1_architecture.page
+  - pages/2_public-architecture.page

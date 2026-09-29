@@ -44,7 +44,7 @@
 
 **⑦ notes 侧拿不到 sid（本案的收窄依据）。** `Session` dataclass（store.py:59-74）的字段是 messages/summary/summarized_upto/title/plan/collapsed/consolidated_upto——**不带自己的 sid**（S8a 裁定「身份＝文件名」）。`write_note` 只能经 `ToolContext.session` 拿到 Session 对象，拿不到 sid。要拿到就得做 050:70 已否的「notes 家族 per-session 重注册」，或给 Session 加 sid 字段（牵动 039 会话模型与 spawn 搬运口径）。→ **notes sidecar 只记 `{origin, time}`，不记 sid**；sid 只在免费的 learned 侧记。
 
-顺带纠正 [competitive-roadmap.md:110](../competitive-roadmap.md) 的落点描述：「`memory/store.py` provenance 字段」——store.py 管的是**会话状态**，不是记忆条目。记忆条目的落盘在 `consolidate.py`（learned）与 `notes.py`（notes），本案改的是这两处。
+顺带纠正 competitive-roadmap.md:110（内部归档）的落点描述：「`memory/store.py` provenance 字段」——store.py 管的是**会话状态**，不是记忆条目。记忆条目的落盘在 `consolidate.py`（learned）与 `notes.py`（notes），本案改的是这两处。
 
 ## 裁定（用户三点）
 

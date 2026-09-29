@@ -1,7 +1,7 @@
 # 064 固化管线枚举审查：萃取条目 id 物化 + 通过/拒绝/修改附 diff（P0-7 配套）
 
 > 状态：**已批准并落地（2026-09-29，用户三拍板全甲：非法 verdict 归 drop／旧格式宽进／sidecar 落盘，见文末「拍板记录」与「实现」节）**｜日期：2026-09-28 草案，2026-09-29 落地
-> 立项出处：[competitive-roadmap.md P0-7](../competitive-roadmap.md) 改动段末句「配套（承诺漂移，第 9 节⑦）：萃取条目带 id 物化，审查只许 通过/拒绝/修改并附 diff，禁止自由重写」+ 第 455 行落地状态注记「**不含** id 物化与枚举审查……尚未动工；排在 P0-7 既有验收之下，不新开条目」+ 9.3 行动差量 #6（半天级）
+> 立项出处：competitive-roadmap.md P0-7（内部归档） 改动段末句「配套（承诺漂移，第 9 节⑦）：萃取条目带 id 物化，审查只许 通过/拒绝/修改并附 diff，禁止自由重写」+ 第 455 行落地状态注记「**不含** id 物化与枚举审查……尚未动工；排在 P0-7 既有验收之下，不新开条目」+ 9.3 行动差量 #6（半天级）
 > 编号说明：058–063 已占用（058 外部锚点／059 spawn 事件透传／060–062 P0-5 三刀／063 harness 隔离补洞），本草案取下一个空号 064。
 > 一句话结论：固化管线的「萃取→审查」是两次独立生成，审查当前被允许**自由改写**候选且改写无痕——这是 Confidence Routing 点名的「自评→入库」缝（PSDR 20.4% 的同款形状）；[062](062-plan-delivery-verification.md) 把「决定→执行」焊缝焊在了 finish_plan，本案焊同一篇论文点名的另一条缝：**决定物化（id）+ 裁决枚举化（keep/drop/edit）+ 改写留痕（diff 落盘可查）**。这是 P0 清单唯一剩下的尾巴，半天级。
 
@@ -84,7 +84,7 @@ P0-7 已落地的部分（`c57ef76`：verified 字段 + 背书硬校验 + 无背
 
 - `consolidate.py` 三新函数＋主流程接线：`_mint_ids`（① id 物化）、`_apply_verdicts`（② 枚举对账）、`_log_edits`（③ sidecar，与 `_append` 同持 `LEARNED_LOCK`）；`_review_brief` 抽出 064 报告段（ruff PLR0912，054/056「抽函数不提阈值」同款处置）；`EXTRACT_TEMPLATE`/`REVIEW_TEMPLATE` 改写（edit 必须显式声明并给改后全文）；模块 docstring ② 段同步。
 - `.gitignore` 加 `data/learned/.review.jsonl`（053 同款理由）。
-- [competitive-roadmap.md](../competitive-roadmap.md) ⑦ 落地状态注记与 9.3 #6 更新（顺带修正 062 已落地却仍标「未落地」的陈旧口径）。
+- competitive-roadmap.md（内部归档）⑦ 落地状态注记与 9.3 #6 更新（顺带修正 062 已落地却仍标「未落地」的陈旧口径）。
 
 ### 实现期偏移（以实现为准）
 

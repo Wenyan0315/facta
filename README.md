@@ -101,7 +101,7 @@ src/facta/
 evals/              # 离线评估：冻结题库、注入题库、judge
 servers/            # MCP 演示服务器
 tests/              # pytest 测试
-docs/               # 架构文档、产品文档、70 份 ADR
+docs/               # 架构文档与 ADR（71 份）
 data/               # 语料与运行时数据（notes/learned.example 入库，其余 gitignore）
 ```
 
