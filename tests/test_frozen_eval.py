@@ -239,7 +239,7 @@ def test_guards_reads_both_mechanisms(tmp_path):
     ② result 以 WRITE_NOTE_REFUSAL 开头：write_note 的内容闸在 func 内部，够不到
        extra，只能从结果认——前缀常量 import 自 notes.py，机制改文案这里自动跟上。
     """
-    from agent.tools.notes import WRITE_NOTE_REFUSAL
+    from facta.tools.notes import WRITE_NOTE_REFUSAL
 
     assert fe._guards(_wt(tmp_path / "empty")) == []
     wt = _audit(
@@ -279,7 +279,7 @@ def test_contaminated_flags_answer_sheet_reads():
         "tests/test_frozen_eval.py",
     ]
     clean = [
-        "read_file: path=src/agent/tools/notes.py",
+        "read_file: path=src/facta/tools/notes.py",
         "bash: ls data/notes && grep -rn 'deploy-check' data/notes",
         "write_note: content=部署校验接口缺失",
         # 065：i4 的合法工作对象不误报（题面逐字「给 sandbox_demo 搭测试脚手架」）
@@ -406,13 +406,13 @@ def test_stage_scenario_delivers_payload_as_file(tmp_path):
 
 
 def test_child_env_isolates_user_memory(tmp_path):
-    """用户级记忆默认住 `~/.personal-agent/`，是唯一不随 worktree 隔离的记忆层。
+    """用户级记忆默认住 `~/.facta/`，是唯一不随 worktree 隔离的记忆层。
 
     不改指副本，开发者本机那份个人记忆会被 10 个场景静默继承——分数随机器而变，
     而且 setup 就没有 seed 记忆的写入口了。
     """
     env = fe._child_env(tmp_path)
-    assert env["CORTEX_USER_MEMORY"] == str(tmp_path / "data" / "user-memory.md")
+    assert env["FACTA_USER_MEMORY"] == str(tmp_path / "data" / "user-memory.md")
     assert str(tmp_path / "src") in env["PYTHONPATH"]
     assert env["MCP_SERVERS"].startswith(str(tmp_path))
 
@@ -463,7 +463,7 @@ def test_real_copy_has_no_git_and_no_answer_sheets(tmp_path):
         assert not (wt / rel).exists(), f"案卷未出局：{rel}"
     # 反面：语料与被测代码不误伤。data/notes 的 15 篇是 r1/i3/i4 的 verify 计数基准
     assert len(list((wt / "data" / "notes").glob("*.md"))) == 15
-    assert (wt / "src" / "agent" / "paths.py").is_file()
+    assert (wt / "src" / "facta" / "paths.py").is_file()
     # 063：整个 evals/ 出局（不只是 scenarios）。单列一条，防有人把 "evals" 从
     # `_ANSWER_SHEETS` 里删掉——那时上面的循环就再也抓不到这个洞
     assert not (wt / "evals").exists()
@@ -502,8 +502,8 @@ def test_child_smoke_runs_with_evals_out_of_the_copy(tmp_path):
     assert child["cost"] == 0.0 and child["tokens_in"] == 0   # 冒烟不许花模型钱
 
     probe = (
-        "import agent, evals.frozen_eval as h, evals.baseline_agent as b;"
-        "print(agent.__file__);print(h.__file__);print(b.__file__)"
+        "import facta, evals.frozen_eval as h, evals.baseline_agent as b;"
+        "print(facta.__file__);print(h.__file__);print(b.__file__)"
     )
     p = subprocess.run(
         [sys.executable, "-c", probe], cwd=wt, env=fe._child_env(wt),
@@ -550,7 +550,7 @@ def test_r7_seeded_memory_is_recallable(tmp_path):
     已有…」永远平凡为真，场景是废题。改成 seed + 冷僻指纹后，没有记忆注入的
     臂必然答不出，「记忆是否减少重复提问」第一次变得可度量。
     """
-    from agent.orchestrator.agent import _user_memory_block
+    from facta.orchestrator.agent import _user_memory_block
 
     scenario = next(
         s for s in fe.load_scenarios(fe.SCENARIOS, "r7-memory-care")

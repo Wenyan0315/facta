@@ -1,18 +1,18 @@
 """个人 AI Agent 助手 —— 命令行入口。
 
 用法：
-    python -m agent          # 默认用 deepseek 真模型
-    python -m agent mock     # 用 mock 假模型（不花钱、不联网）
-    python -m agent echo     # 其他测试模型（只读第一个参数）
+    python -m facta          # 默认用 deepseek 真模型
+    python -m facta mock     # 用 mock 假模型（不花钱、不联网）
+    python -m facta echo     # 其他测试模型（只读第一个参数）
 """
 
 import logging
 import sys
 
-from agent.cli import EXIT_NEW, run_chat
-from agent.memory.store import Session
-from agent.orchestrator.assemble import assemble, settle_session
-from agent.orchestrator.checkpoint import heal, ledger_path, read_ledger
+from facta.cli import EXIT_NEW, run_chat
+from facta.memory.store import Session
+from facta.orchestrator.assemble import assemble, settle_session
+from facta.orchestrator.checkpoint import heal, ledger_path, read_ledger
 
 VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
 
@@ -20,11 +20,11 @@ VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号�
 def main() -> None:
     # CLI 入口：配置 logging——内核库的 logger.info 在此可见（Web 由 server/app.py 配）
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    print(f"Personal Agent v{VERSION}")
+    print(f"Facta v{VERSION}")
 
     # 命令行第一个参数 = 用哪个模型，不传默认 deepseek-flash
     # （M10 主力切换：bench 题库轨道综合 86% 第一 + ECE 0.042 最佳；
-    #  python -m agent deepseek 可切回 chat 档，供应商表另有 siliconflow）
+    #  python -m facta deepseek 可切回 chat 档，供应商表另有 siliconflow）
     provider = sys.argv[1] if len(sys.argv) > 1 else "deepseek-flash"
 
     # 组装依赖（单一真值源 S2a）：账本/embedder/双链/知识库/会话仓库/工具/MCP

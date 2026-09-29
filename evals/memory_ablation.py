@@ -28,13 +28,13 @@ import sys
 
 from dotenv import load_dotenv
 
-from agent.core.llm import get_llm
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
-from agent.orchestrator.agent import build_default_agent
-from agent.paths import LEARNED_DIR
-from agent.tools.registry import ToolRegistry
 from evals.memory_cases import CASES
+from facta.core.llm import get_llm
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
+from facta.orchestrator.agent import build_default_agent
+from facta.paths import LEARNED_DIR
+from facta.tools.registry import ToolRegistry
 
 # 闭卷指令（追加在问题后，不改 system prompt——改 prompt 就不止消融记忆了）
 CLOSED_BOOK = (

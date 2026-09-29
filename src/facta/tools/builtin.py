@@ -9,11 +9,11 @@ register_builtin 签名不变（P1-2 的承诺继续成立）：assemble 调用�
 
 from __future__ import annotations
 
-from agent.tools.context import ToolContext
-from agent.tools.history import register_history_tools
-from agent.tools.notes import register_note_tools
-from agent.tools.registry import ToolRegistry
-from agent.tools.time import register_time_tools
+from facta.tools.context import ToolContext
+from facta.tools.history import register_history_tools
+from facta.tools.notes import register_note_tools
+from facta.tools.registry import ToolRegistry
+from facta.tools.time import register_time_tools
 
 
 def register_builtin(registry: ToolRegistry, ctx: ToolContext) -> None:

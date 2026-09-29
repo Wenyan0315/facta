@@ -41,15 +41,15 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 
-from agent.core.llm import LLM
-from agent.core.types import Message
-from agent.evalkit.judge import parse_judge_json
-from agent.memory.consolidate import CATEGORIES
-from agent.memory.learned import read_learned, render, visible_text
-from agent.memory.plan import Plan, PlanBoard, StepStatus
-from agent.paths import DATA_ROOT, LEARNED_DIR
-from agent.tools.context import ToolContext
-from agent.tools.registry import Tool, ToolRegistry
+from facta.core.llm import LLM
+from facta.core.types import Message
+from facta.evalkit.judge import parse_judge_json
+from facta.memory.consolidate import CATEGORIES
+from facta.memory.learned import read_learned, render, visible_text
+from facta.memory.plan import Plan, PlanBoard, StepStatus
+from facta.paths import DATA_ROOT, LEARNED_DIR
+from facta.tools.context import ToolContext
+from facta.tools.registry import Tool, ToolRegistry
 
 _MARKS = {   # 视图渲染记号：pending 空、in_progress 半、done 满、skipped/failed 各式否决
     "pending": "○",

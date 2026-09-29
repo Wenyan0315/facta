@@ -24,8 +24,8 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent.knowledge.knowledge_base import KnowledgeBase, chunk_text
-from agent.knowledge.loader import scan_notes
+from facta.knowledge.knowledge_base import KnowledgeBase, chunk_text
+from facta.knowledge.loader import scan_notes
 
 # 删除安全阀：消失的文件 ≥ GUARD_MIN_FILES 篇 **且** 占比 > GUARD_RATIO 才拦。
 # 纯比例阈值在小库里是噪声（删 1/2 篇就 50%/100%），必须带绝对下限（同「SQLite

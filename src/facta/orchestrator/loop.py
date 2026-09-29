@@ -24,13 +24,13 @@ from dataclasses import replace
 from datetime import datetime
 from enum import Enum
 
-from agent.core.llm import LLM, LLMUnavailableError, merge_stream_chunks
-from agent.core.types import Message
-from agent.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
-from agent.memory.plan import PlanBoard
-from agent.memory.store import Session
-from agent.orchestrator.agent import Agent
-from agent.tools.plan import format_view
+from facta.core.llm import LLM, LLMUnavailableError, merge_stream_chunks
+from facta.core.types import Message
+from facta.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
+from facta.memory.plan import PlanBoard
+from facta.memory.store import Session
+from facta.orchestrator.agent import Agent
+from facta.tools.plan import format_view
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ _MENU_PLAN_ONLY = (
 # 步的形态）：连续完全相同的点菜批次达上限即熔断工具循环、事件升人审。
 # rounds 保险丝管「点太多」，这里管「原地踏步」——每次执行都「成功」、
 # 状态零变化、token 白烧。下限 2（=重复 1 次即熔断无意义，留给误报空间）
-_STUCK_LIMIT = max(2, int(os.environ.get("CORTEX_STUCK_LIMIT", "3")))
+_STUCK_LIMIT = max(2, int(os.environ.get("FACTA_STUCK_LIMIT", "3")))
 
 
 def _stuck_check(

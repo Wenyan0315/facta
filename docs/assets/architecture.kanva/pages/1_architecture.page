@@ -1,0 +1,973 @@
+pageType: content
+background:
+  type: solid
+  color: "$bg"
+elements:
+  # ===== Header =====
+  - elementId: header-tag
+    elementType: text
+    bounds: [60, 42, 760, 18]
+    content:
+      fontSize: 12
+      fontFamily: JetBrains Mono
+      color: "$accent"
+      letterSpacing: 3
+      wrap: false
+      text: FACTA — SYSTEM ARCHITECTURE
+  - elementId: header-title
+    elementType: text
+    bounds: [60, 68, 820, 52]
+    content:
+      fontSize: 38
+      bold: true
+      color: "$text"
+      wrap: false
+      text: Facta · 个人 AI Agent 系统架构
+  - elementId: header-sub
+    elementType: text
+    bounds: [60, 126, 1200, 18]
+    content:
+      fontSize: 13
+      color: "$sub"
+      wrap: false
+      text: 接口与实现分离 · 逐层可替换 · 全部手写、无 Agent 框架
+  # legend
+  - elementId: legend-l1
+    elementType: line
+    bounds: [1380, 58, 28, 4]
+    viewBox: [28, 4]
+    points: "0,2 28,2"
+    border: {style: solid, width: 2, color: "$accent"}
+  - elementId: legend-t1
+    elementType: text
+    bounds: [1416, 52, 150, 16]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 主调用链 / 执行闭环}
+  - elementId: legend-l2
+    elementType: line
+    bounds: [1574, 58, 28, 4]
+    viewBox: [28, 4]
+    points: "0,2 28,2"
+    border: {style: dash, width: 1, color: "$faint"}
+  - elementId: legend-t2
+    elementType: text
+    bounds: [1610, 52, 150, 16]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 旁路承载 / 离线度量}
+  - elementId: legend-r3
+    elementType: shape
+    bounds: [1766, 54, 10, 10]
+    shapeName: rect
+    fill: {type: solid, color: "$green"}
+  - elementId: legend-t3
+    elementType: text
+    bounds: [1782, 52, 80, 16]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 数据落盘}
+  - elementId: legend-r4
+    elementType: shape
+    bounds: [1380, 82, 10, 10]
+    shapeName: rect
+    fill: {type: solid, color: "$red"}
+  - elementId: legend-t4
+    elementType: text
+    bounds: [1396, 78, 80, 16]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 安全收口}
+  - elementId: legend-r5
+    elementType: shape
+    bounds: [1500, 82, 10, 10]
+    shapeName: rect
+    fill: {type: solid, color: "$accent"}
+  - elementId: legend-t5
+    elementType: text
+    bounds: [1516, 78, 190, 16]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 已建成 ✅ ｜ ◌ 触发信号在案}
+  - elementId: legend-l6
+    elementType: line
+    bounds: [1730, 86, 28, 4]
+    viewBox: [28, 4]
+    points: "0,2 28,2"
+    border: {style: dash, width: 1.5, color: "$accent"}
+  - elementId: legend-t6
+    elementType: text
+    bounds: [1764, 78, 70, 16]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 依赖注入}
+  - elementId: header-divider
+    elementType: line
+    bounds: [60, 158, 1800, 2]
+    viewBox: [1800, 2]
+    points: "0,1 1800,1"
+    border: {style: solid, width: 1, color: "$line"}
+
+  # ===== Band A: 交互层 =====
+  - elementId: band-a
+    elementType: shape
+    bounds: [60, 180, 1240, 90]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: rail-a1
+    elementType: text
+    bounds: [76, 194, 110, 20]
+    content: {fontSize: 14, bold: true, fontFamily: JetBrains Mono, color: "$accent", wrap: false, text: "01"}
+  - elementId: rail-a2
+    elementType: text
+    bounds: [76, 216, 110, 14]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 交互层}
+  - elementId: band-a-title
+    elementType: text
+    bounds: [200, 194, 820, 22]
+    content:
+      fontSize: 16
+      bold: true
+      color: "$text"
+      wrap: false
+      text: 用户交互层 —— CLI · Web 四视图
+  - elementId: band-a-body
+    elementType: text
+    bounds: [200, 222, 1080, 20]
+    content:
+      fontSize: 12
+      color: "$sub"
+      wrap: false
+      text: |
+        <p>CLI 壳（__main__.py · REPL）　｜　Web 壳（server/__main__.py）：对话视图 · 任务视图（计划面板）· 记忆面板 · 知识图谱面板</p>
+  - elementId: band-a-future
+    elementType: text
+    bounds: [200, 246, 700, 15]
+    content: {fontSize: 10, color: "$faint", wrap: false, text: "◌ 以后：IM 渠道（触发信号在案）"}
+  - elementId: arrow-a-b
+    elementType: line
+    bounds: [678, 270, 4, 16]
+    viewBox: [4, 16]
+    points: "2,0 2,16"
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 1.5, color: "$accent"}
+
+  # ===== Band B: 装配 =====
+  - elementId: band-b
+    elementType: shape
+    bounds: [60, 286, 1240, 70]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: rail-b1
+    elementType: text
+    bounds: [76, 300, 110, 20]
+    content: {fontSize: 14, bold: true, fontFamily: JetBrains Mono, color: "$accent", wrap: false, text: "02"}
+  - elementId: rail-b2
+    elementType: text
+    bounds: [76, 320, 110, 14]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 装配}
+  - elementId: band-b-title
+    elementType: text
+    bounds: [200, 300, 900, 20]
+    content:
+      fontSize: 15
+      bold: true
+      color: "$text"
+      wrap: false
+      text: |
+        <p>装配唯一真值源 —— <span style="font-family:JetBrains Mono; color:$accent">orchestrator/assemble.py</span></p>
+  - elementId: band-b-body
+    elementType: text
+    bounds: [200, 326, 1080, 16]
+    content:
+      fontSize: 12
+      color: "$sub"
+      wrap: false
+      text: 依赖注入 · 条件装配（无 key → 假模型不挂路由 · 缺 kb / llm → 不注册）· per-session Agent 工厂 build_agent
+  # 依赖注入 caption（置于 B/C 间隙）
+  - elementId: inject-caption
+    elementType: text
+    bounds: [200, 358, 1060, 13]
+    content: {fontSize: 10, color: "$faint", wrap: false, text: "╌╌ assemble.py 依赖注入（琥珀虚线）：knowledge · core · memory · tools —— 作为 Agent 依赖面并列装配，非依次经过的流水线"}
+
+  # ===== Band C: orchestrator 主循环 =====
+  - elementId: band-c
+    elementType: shape
+    bounds: [60, 372, 1240, 400]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: rail-c1
+    elementType: text
+    bounds: [76, 388, 110, 20]
+    content: {fontSize: 14, bold: true, fontFamily: JetBrains Mono, color: "$accent", wrap: false, text: "03"}
+  - elementId: rail-c2
+    elementType: text
+    bounds: [76, 410, 110, 14]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 编排 ★}
+  - elementId: band-c-title
+    elementType: text
+    bounds: [200, 388, 620, 22]
+    content:
+      fontSize: 16
+      bold: true
+      color: "$text"
+      wrap: false
+      text: |
+        <p><span style="font-family:JetBrains Mono">orchestrator/</span> —— Agent 对象 × ReAct 主循环</p>
+  - elementId: band-c-right
+    elementType: text
+    bounds: [840, 392, 440, 16]
+    content: {fontSize: 10, fontFamily: JetBrains Mono, color: "$faint", align: [right, top], wrap: false, text: "run_turn · I/O 四缝 · 内核/外设分离"}
+  # Agent 对象 box
+  - elementId: agent-box
+    elementType: shape
+    bounds: [200, 424, 340, 300]
+    shapeName: rect
+    fill: {type: solid, color: "$inner"}
+    border: {style: solid, width: 1, color: "$innerline"}
+  - elementId: agent-header
+    elementType: text
+    bounds: [216, 436, 308, 20]
+    content:
+      fontSize: 13
+      bold: true
+      color: "$accent"
+      wrap: false
+      text: |
+        <p>Agent 对象</p>
+  - elementId: agent-sub
+    elementType: text
+    bounds: [216, 458, 308, 14]
+    content: {fontSize: 10, fontFamily: JetBrains Mono, color: "$faint", wrap: false, text: "frozen dataclass · 行为定义与引擎分离"}
+  - elementId: agent-rows
+    elementType: text
+    bounds: [216, 482, 308, 152]
+    content:
+      fontSize: 11
+      lineHeight: 2.05
+      color: "$sub"
+      text: |
+        <p><span style="font-family:JetBrains Mono; color:$text">system_prompt</span> — learned 三桶快照注入</p>
+        <p><span style="font-family:JetBrains Mono; color:$text">tools</span> — 工具子集（菜单点菜制）</p>
+        <p><span style="font-family:JetBrains Mono; color:$text">budget</span> — 本轮预算</p>
+        <p><span style="font-family:JetBrains Mono; color:$text">router</span> — 场景路由（None = 原生）</p>
+        <p><span style="font-family:JetBrains Mono; color:$text">spawn_subagent</span> — 子 agent · 只回传结论</p>
+        <p><span style="font-family:JetBrains Mono; color:$text">spawn_step</span> — 计划步骤派发</p>
+  - elementId: agent-note
+    elementType: text
+    bounds: [216, 668, 308, 44]
+    content:
+      fontSize: 10
+      lineHeight: 1.5
+      color: "$faint"
+      text: spawn = 噪声隔离 · 空菜单折叠回 None · 幻觉点菜 assert 炸 → 错误串回灌
+  # ReAct loop nodes
+  - elementId: node-perceive
+    elementType: shape
+    bounds: [740, 436, 140, 40]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: node-perceive-t
+    elementType: text
+    bounds: [740, 436, 140, 40]
+    content: {fontSize: 12.5, bold: true, color: "$text", align: [center, middle], wrap: false, text: 感知}
+  - elementId: node-decide
+    elementType: shape
+    bounds: [740, 524, 140, 40]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: node-decide-t
+    elementType: text
+    bounds: [740, 524, 140, 40]
+    content: {fontSize: 12.5, bold: true, color: "$accent", align: [center, middle], wrap: false, text: 决策 · 点菜}
+  - elementId: node-act
+    elementType: shape
+    bounds: [740, 612, 140, 40]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: node-act-t
+    elementType: text
+    bounds: [740, 612, 140, 40]
+    content: {fontSize: 12.5, bold: true, color: "$text", align: [center, middle], wrap: false, text: 行动 · 工具}
+  - elementId: node-observe
+    elementType: shape
+    bounds: [560, 524, 120, 40]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: node-observe-t
+    elementType: text
+    bounds: [560, 524, 120, 40]
+    content: {fontSize: 12.5, bold: true, color: "$text", align: [center, middle], wrap: false, text: 观察 · 回灌}
+  # ReAct loop arrows
+  - elementId: react-a1
+    elementType: line
+    bounds: [804, 476, 4, 48]
+    viewBox: [4, 48]
+    points: "2,0 2,48"
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: react-a2
+    elementType: line
+    bounds: [788, 564, 4, 48]
+    viewBox: [4, 48]
+    points: "2,0 2,48"
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: react-a3
+    elementType: line
+    bounds: [828, 564, 4, 48]
+    viewBox: [4, 48]
+    points: "2,48 2,0"
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: react-a4
+    elementType: line
+    bounds: [682, 570, 56, 60]
+    viewBox: [56, 60]
+    points: "56,60 0,0"
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: react-a5
+    elementType: line
+    bounds: [624, 522, 114, 16]
+    viewBox: [114, 16]
+    points: "0,2 114,14"
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: react-caption
+    elementType: text
+    bounds: [570, 668, 310, 18]
+    content: {fontSize: 10.5, fontFamily: JetBrains Mono, color: "$faint", align: [center, top], wrap: false, text: "ReAct · 5 轮保险丝 · RunResult 三态"}
+  # 机制 annotations
+  - elementId: mech-header
+    elementType: text
+    bounds: [940, 436, 340, 16]
+    content: {fontSize: 11, fontFamily: JetBrains Mono, color: "$faint", letterSpacing: 1, wrap: false, text: 主循环机制}
+  - elementId: mech-b1
+    elementType: shape
+    bounds: [940, 467, 6, 6]
+    shapeName: rect
+    fill: {type: solid, color: "$accent"}
+  - elementId: mech-t1
+    elementType: text
+    bounds: [954, 462, 332, 18]
+    content: {fontSize: 11.5, color: "$sub", wrap: false, text: "轮首路由一针：direct / single_tool / complex"}
+  - elementId: mech-b2
+    elementType: shape
+    bounds: [940, 494, 6, 6]
+    shapeName: rect
+    fill: {type: solid, color: "$accent"}
+  - elementId: mech-t2
+    elementType: text
+    bounds: [954, 489, 332, 18]
+    content: {fontSize: 11.5, color: "$sub", wrap: false, text: "plan-then-act：make_plan 人审 → 回写 → finish"}
+  - elementId: mech-b3
+    elementType: shape
+    bounds: [940, 521, 6, 6]
+    shapeName: rect
+    fill: {type: solid, color: "$accent"}
+  - elementId: mech-t3
+    elementType: text
+    bounds: [954, 516, 332, 18]
+    content: {fontSize: 11.5, color: "$sub", wrap: false, text: "并行 spawn：线程池 · 按点菜顺序回填"}
+  - elementId: mech-b4
+    elementType: shape
+    bounds: [940, 548, 6, 6]
+    shapeName: rect
+    fill: {type: solid, color: "$accent"}
+  - elementId: mech-t4
+    elementType: text
+    bounds: [954, 543, 332, 18]
+    content: {fontSize: 11.5, color: "$sub", wrap: false, text: "spawn_step：计划步骤派发 · 自动回写 done/failed"}
+  - elementId: mech-b5
+    elementType: shape
+    bounds: [940, 575, 6, 6]
+    shapeName: rect
+    fill: {type: solid, color: "$accent"}
+  - elementId: mech-t5
+    elementType: text
+    bounds: [954, 570, 332, 18]
+    content: {fontSize: 11.5, color: "$sub", wrap: false, text: "checkpoint：工具边界落盘 · heal 自愈续跑"}
+  - elementId: mech-b6
+    elementType: shape
+    bounds: [940, 602, 6, 6]
+    shapeName: rect
+    fill: {type: solid, color: "$accent"}
+  - elementId: mech-t6
+    elementType: text
+    bounds: [954, 597, 332, 18]
+    content: {fontSize: 11.5, color: "$sub", wrap: false, text: "运行时校验：L0/L1 白名单 + L2 确认缝"}
+  - elementId: band-c-bottom
+    elementType: text
+    bounds: [200, 744, 1090, 16]
+    content: {fontSize: 10.5, color: "$faint", wrap: false, text: "◇ 跨进程隔离 · 步骤级并行 —— 触发信号在案，未排期"}
+
+  # ===== 左缘：依赖注入扇出（assemble → D/E/F，琥珀虚线） =====
+  - elementId: inject-j1
+    elementType: line
+    bounds: [48, 328, 12, 4]
+    viewBox: [12, 4]
+    points: "12,2 0,2"
+    border: {style: dash, width: 1.5, color: "$accent"}
+  - elementId: inject-j2
+    elementType: line
+    bounds: [46, 330, 4, 895]
+    viewBox: [4, 895]
+    points: "2,0 2,895"
+    border: {style: dash, width: 1.5, color: "$accent"}
+  - elementId: inject-j3
+    elementType: line
+    bounds: [48, 876, 12, 4]
+    viewBox: [12, 4]
+    points: "0,2 12,2"
+    arrow: [null, "arrow"]
+    border: {style: dash, width: 1.5, color: "$accent"}
+  - elementId: inject-j4
+    elementType: line
+    bounds: [48, 1062, 12, 4]
+    viewBox: [12, 4]
+    points: "0,2 12,2"
+    arrow: [null, "arrow"]
+    border: {style: dash, width: 1.5, color: "$accent"}
+  - elementId: inject-j5
+    elementType: line
+    bounds: [48, 1223, 12, 4]
+    viewBox: [12, 4]
+    points: "0,2 12,2"
+    arrow: [null, "arrow"]
+    border: {style: dash, width: 1.5, color: "$accent"}
+
+  # ===== 左缘：执行闭环前腿（Agent loop → ToolRegistry，琥珀实线） =====
+  - elementId: call-c1
+    elementType: line
+    bounds: [32, 698, 28, 4]
+    viewBox: [28, 4]
+    points: "28,2 0,2"
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: call-c2
+    elementType: line
+    bounds: [32, 700, 4, 488]
+    viewBox: [4, 488]
+    points: "2,0 2,488"
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: call-c3
+    elementType: line
+    bounds: [32, 1186, 28, 4]
+    viewBox: [28, 4]
+    points: "0,2 28,2"
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: call-label
+    elementType: text
+    bounds: [12, 850, 14, 280]
+    content: {fontSize: 10, color: "$accent", textDirection: vertical, wrap: false, text: Agent loop ⇢ ToolRegistry 调用}
+
+  # ===== Band D: knowledge / core =====
+  - elementId: kd-box
+    elementType: shape
+    bounds: [60, 788, 610, 180]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: kd-title
+    elementType: text
+    bounds: [84, 802, 560, 22]
+    content:
+      fontSize: 15
+      bold: true
+      color: "$text"
+      wrap: false
+      text: |
+        <p><span style="font-family:JetBrains Mono; color:$accent">04a</span> · <span style="font-family:JetBrains Mono">knowledge/</span> 知识层</p>
+  - elementId: kd-bullets
+    elementType: text
+    bounds: [84, 834, 556, 96]
+    content:
+      fontSize: 12
+      lineHeight: 1.9
+      color: "$sub"
+      text: |
+        <p>· <span style="font-family:JetBrains Mono; color:$text">BGE-M3</span> 向量检索 · Embedder 接口（词袋 / 工业双实现）</p>
+        <p>· <span style="font-family:JetBrains Mono; color:$text">Chroma</span> 向量库落盘 · 内容指纹增量同步</p>
+        <p>· 知识图谱：封闭抽取 · 指纹增量 · 查询原语</p>
+        <p>· 命中带溯源 SearchHit = 块 + 相似度 + 来源面单</p>
+  - elementId: kd-caption
+    elementType: text
+    bounds: [84, 936, 556, 16]
+    content: {fontSize: 10.5, color: "$green", wrap: false, text: "数据源：data/notes/*.md —— 经受控 write_note 写入（write_file / 终端直写被记忆写围栏拒绝）"}
+  - elementId: core-box
+    elementType: shape
+    bounds: [690, 788, 610, 180]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: core-title
+    elementType: text
+    bounds: [714, 802, 560, 22]
+    content:
+      fontSize: 15
+      bold: true
+      color: "$text"
+      wrap: false
+      text: |
+        <p><span style="font-family:JetBrains Mono; color:$accent">04b</span> · <span style="font-family:JetBrains Mono">core/</span> 地基 —— LLM 接入 · 容错 · 决策</p>
+  - elementId: core-bullets
+    elementType: text
+    bounds: [714, 834, 556, 112]
+    content:
+      fontSize: 12
+      lineHeight: 1.82
+      color: "$sub"
+      text: |
+        <p>· LLM 接口 + OpenAI 兼容（deepseek / flash / siliconflow）</p>
+        <p>· <span style="font-family:JetBrains Mono; color:$text">RobustLLM</span> 网关四件套：记账 · 重试超时 · 缓存 · 熔断</p>
+        <p>· <span style="font-family:JetBrains Mono; color:$text">FallbackLLM</span> 降级链 + 优雅兜底</p>
+        <p>· Jev 决策模型：JevClient + ScenarioRouter 三态</p>
+        <p>· evalkit 纯函数内核：judge · 归因 · 指纹判定</p>
+
+  # ===== Band E: memory =====
+  - elementId: band-e
+    elementType: shape
+    bounds: [60, 984, 1240, 160]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: rail-e1
+    elementType: text
+    bounds: [76, 998, 110, 20]
+    content: {fontSize: 14, bold: true, fontFamily: JetBrains Mono, color: "$accent", wrap: false, text: "05"}
+  - elementId: rail-e2
+    elementType: text
+    bounds: [76, 1020, 110, 14]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 记忆层}
+  - elementId: band-e-title
+    elementType: text
+    bounds: [200, 998, 980, 22]
+    content:
+      fontSize: 15
+      bold: true
+      color: "$text"
+      wrap: false
+      text: |
+        <p><span style="font-family:JetBrains Mono">memory/</span> 记忆层 —— 短期 → 跨会话 → 固化 → 用户级</p>
+  - elementId: mem-c1
+    elementType: shape
+    bounds: [200, 1030, 170, 68]
+    shapeName: rect
+    fill: {type: solid, color: "$inner"}
+    border: {style: solid, width: 1, color: "$innerline"}
+  - elementId: mem-t1
+    elementType: text
+    bounds: [210, 1038, 150, 54]
+    content:
+      lineHeight: 1.3
+      text: |
+        <p><span style="font-size:11.5px; color:$text"><strong>短期 · messages</strong></span></p>
+        <p style="margin-top:4px"><span style="font-size:9.5px; color:$faint">会话内上下文窗口</span></p>
+  - elementId: mem-c2
+    elementType: shape
+    bounds: [380, 1030, 170, 68]
+    shapeName: rect
+    fill: {type: solid, color: "$inner"}
+    border: {style: solid, width: 1, color: "$innerline"}
+  - elementId: mem-t2
+    elementType: text
+    bounds: [390, 1038, 150, 54]
+    content:
+      lineHeight: 1.3
+      text: |
+        <p><span style="font-size:11.5px; color:$text"><strong>跨会话 · sessions/</strong></span></p>
+        <p style="margin-top:4px"><span style="font-size:9.5px; color:$faint">身份 = 文件名（多会话）</span></p>
+  - elementId: mem-c3
+    elementType: shape
+    bounds: [560, 1030, 170, 68]
+    shapeName: rect
+    fill: {type: solid, color: "$inner"}
+    border: {style: solid, width: 1, color: "$innerline"}
+  - elementId: mem-t3
+    elementType: text
+    bounds: [570, 1038, 150, 54]
+    content:
+      lineHeight: 1.3
+      text: |
+        <p><span style="font-size:11.5px; color:$text"><strong>压缩</strong></span></p>
+        <p style="margin-top:4px"><span style="font-size:9.5px; color:$faint">滚动摘要 + 原文窗口，底片不动</span></p>
+  - elementId: mem-c4
+    elementType: shape
+    bounds: [740, 1030, 170, 68]
+    shapeName: rect
+    fill: {type: solid, color: "$inner"}
+    border: {style: solid, width: 1, color: "$innerline"}
+  - elementId: mem-t4
+    elementType: text
+    bounds: [750, 1038, 150, 54]
+    content:
+      lineHeight: 1.3
+      text: |
+        <p><span style="font-size:11.5px; color:$text"><strong>固化 · learned 三桶</strong></span></p>
+        <p style="margin-top:4px"><span style="font-size:9.5px; color:$faint">萃取→审查→硬校验</span></p>
+  - elementId: mem-c5
+    elementType: shape
+    bounds: [920, 1030, 170, 68]
+    shapeName: rect
+    fill: {type: solid, color: "$inner"}
+    border: {style: solid, width: 1, color: "$innerline"}
+  - elementId: mem-t5
+    elementType: text
+    bounds: [930, 1038, 150, 54]
+    content:
+      lineHeight: 1.3
+      text: |
+        <p><span style="font-size:11.5px; color:$text"><strong>用户级 · user.md</strong></span></p>
+        <p style="margin-top:4px"><span style="font-size:9.5px; color:$faint">~/.facta 仓库外</span></p>
+  - elementId: mem-c6
+    elementType: shape
+    bounds: [1100, 1030, 170, 68]
+    shapeName: rect
+    fill: {type: solid, color: "$inner"}
+    border: {style: solid, width: 1, color: "$innerline"}
+  - elementId: mem-t6
+    elementType: text
+    bounds: [1110, 1038, 150, 54]
+    content:
+      lineHeight: 1.3
+      text: |
+        <p><span style="font-size:11.5px; color:$text"><strong>plan 域 · PlanBoard</strong></span></p>
+        <p style="margin-top:4px"><span style="font-size:9.5px; color:$faint">事件史 · 随会话落盘</span></p>
+  - elementId: band-e-caption
+    elementType: text
+    bounds: [200, 1112, 1080, 16]
+    content: {fontSize: 10.5, color: "$green", wrap: false, text: "落盘：data/memory/sessions/*.json（运行时 · gitignore）· data/learned/*.md（进 git · Agent prompt 注入源）· 底片 tmp + os.replace 原子写"}
+
+  # ===== Band F: tools =====
+  - elementId: band-f
+    elementType: shape
+    bounds: [60, 1160, 1240, 130]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: rail-f1
+    elementType: text
+    bounds: [76, 1172, 110, 20]
+    content: {fontSize: 14, bold: true, fontFamily: JetBrains Mono, color: "$accent", wrap: false, text: "06"}
+  - elementId: rail-f2
+    elementType: text
+    bounds: [76, 1194, 110, 14]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: 工具层}
+  - elementId: band-f-title
+    elementType: text
+    bounds: [200, 1172, 1090, 22]
+    content:
+      fontSize: 15
+      bold: true
+      color: "$text"
+      wrap: false
+      text: |
+        <p><span style="font-family:JetBrains Mono">tools/</span> 工具层 —— ToolRegistry（审计收口 · L2 确认缝 · receives_confirm）</p>
+  - elementId: chip-1
+    elementType: shape
+    bounds: [200, 1208, 84, 32]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: chip-1t
+    elementType: text
+    bounds: [200, 1208, 84, 32]
+    content: {fontSize: 11.5, fontFamily: JetBrains Mono, color: "$sub", align: [center, middle], wrap: false, text: time}
+  - elementId: chip-2
+    elementType: shape
+    bounds: [294, 1208, 96, 32]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: chip-2t
+    elementType: text
+    bounds: [294, 1208, 96, 32]
+    content: {fontSize: 11.5, fontFamily: JetBrains Mono, color: "$sub", align: [center, middle], wrap: false, text: history}
+  - elementId: chip-3
+    elementType: shape
+    bounds: [400, 1208, 92, 32]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: chip-3t
+    elementType: text
+    bounds: [400, 1208, 92, 32]
+    content: {fontSize: 11.5, fontFamily: JetBrains Mono, color: "$sub", align: [center, middle], wrap: false, text: notes}
+  - elementId: chip-4
+    elementType: shape
+    bounds: [502, 1208, 88, 32]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: chip-4t
+    elementType: text
+    bounds: [502, 1208, 88, 32]
+    content: {fontSize: 11.5, fontFamily: JetBrains Mono, color: "$sub", align: [center, middle], wrap: false, text: files}
+  - elementId: chip-5
+    elementType: shape
+    bounds: [600, 1208, 108, 32]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: chip-5t
+    elementType: text
+    bounds: [600, 1208, 108, 32]
+    content: {fontSize: 11.5, fontFamily: JetBrains Mono, color: "$sub", align: [center, middle], wrap: false, text: terminal}
+  - elementId: chip-6
+    elementType: shape
+    bounds: [718, 1208, 76, 32]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: chip-6t
+    elementType: text
+    bounds: [718, 1208, 76, 32]
+    content: {fontSize: 11.5, fontFamily: JetBrains Mono, color: "$sub", align: [center, middle], wrap: false, text: web}
+  - elementId: chip-7
+    elementType: shape
+    bounds: [804, 1208, 88, 32]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: chip-7t
+    elementType: text
+    bounds: [804, 1208, 88, 32]
+    content: {fontSize: 11.5, fontFamily: JetBrains Mono, color: "$sub", align: [center, middle], wrap: false, text: todo}
+  - elementId: chip-8
+    elementType: shape
+    bounds: [902, 1208, 140, 32]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: chip-8t
+    elementType: text
+    bounds: [902, 1208, 140, 32]
+    content: {fontSize: 11.5, fontFamily: JetBrains Mono, color: "$sub", align: [center, middle], wrap: false, text: plan + spawn}
+  - elementId: chip-9
+    elementType: shape
+    bounds: [1052, 1208, 92, 32]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: solid, width: 1, color: "$chipborder"}
+  - elementId: chip-9t
+    elementType: text
+    bounds: [1052, 1208, 92, 32]
+    content: {fontSize: 11.5, fontFamily: JetBrains Mono, color: "$sub", align: [center, middle], wrap: false, text: graph}
+  - elementId: chip-mcp
+    elementType: shape
+    bounds: [200, 1252, 340, 32]
+    shapeName: rect
+    fill: {type: solid, color: "$chip"}
+    border: {style: dash, width: 1, color: "$accent"}
+  - elementId: chip-mcp-t
+    elementType: text
+    bounds: [200, 1252, 340, 32]
+    content: {fontSize: 11.5, fontFamily: JetBrains Mono, color: "$accent", align: [center, middle], wrap: false, text: MCP 客户端 · stdio + HTTP 双传输}
+  - elementId: band-f-security
+    elementType: text
+    bounds: [560, 1258, 724, 20]
+    content: {fontSize: 11.5, color: "$red", wrap: false, text: "安全收口：workspace 围栏 · 只读白名单 · 参数级拦截 · seatbelt 沙箱 · 记忆写围栏 · 审计 append-only"}
+  # 工具结果回灌 return line（右侧）
+  - elementId: return-line
+    elementType: line
+    bounds: [1316, 570, 4, 655]
+    viewBox: [4, 655]
+    points: "2,655 2,0"
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 1.5, color: "$accent"}
+  - elementId: return-label
+    elementType: text
+    bounds: [1326, 780, 14, 240]
+    content: {fontSize: 10.5, color: "$faint", textDirection: vertical, wrap: false, text: tool result / audit 回灌}
+
+  # ===== Right panel =====
+  # Block A: server
+  - elementId: ra-box
+    elementType: shape
+    bounds: [1340, 180, 520, 246]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: ra-strip
+    elementType: shape
+    bounds: [1340, 180, 3, 246]
+    shapeName: rect
+    fill: {type: solid, color: "$faint"}
+  - elementId: ra-header
+    elementType: text
+    bounds: [1360, 196, 480, 22]
+    content:
+      fontSize: 15
+      bold: true
+      color: "$text"
+      wrap: false
+      text: |
+        <p><span style="font-family:JetBrains Mono">server/</span> Web 壳（可选组）</p>
+  - elementId: ra-sub
+    elementType: text
+    bounds: [1360, 220, 480, 30]
+    content:
+      fontSize: 10
+      fontFamily: JetBrains Mono
+      lineHeight: 1.4
+      color: "$faint"
+      text: |
+        <p>FastAPI · SSE · 零构建链前端 · 只绑 127.0.0.1</p>
+        <p>主聊天为静态页 · 任务/记忆/图谱/语料面板是 Preact 子站（/fw/）</p>
+  - elementId: ra-bullets
+    elementType: text
+    bounds: [1360, 258, 480, 150]
+    content:
+      fontSize: 12
+      lineHeight: 1.75
+      color: "$sub"
+      text: |
+        <p>· Run 三接口：创建 202 / 事件订阅 / 取消</p>
+        <p>· 广播模型：订阅者独立队列 · 终态补发哨兵</p>
+        <p>· SSE 断线重放：Last-Event-ID · 切回重挂</p>
+        <p>· 准入：create_if_idle 单锁原子 · 全局并发上限</p>
+        <p>· waiting_approval 挂起 · confirm 裁决 · 取消视拒</p>
+        <p>· 多会话并发：per-session 工厂 · worker 整轮独占</p>
+  - elementId: ra-arrow
+    elementType: line
+    bounds: [1300, 180, 300, 36]
+    viewBox: [300, 36]
+    points: "300,0 0,36"
+    arrow: [null, "arrow"]
+    border: {style: dash, width: 1, color: "$faint"}
+  - elementId: ra-arrow-label
+    elementType: text
+    bounds: [1480, 158, 220, 15]
+    content: {fontSize: 10, color: "$faint", align: [right, top], wrap: false, text: 承载 Web 四视图}
+  # Block B: evals
+  - elementId: rb-box
+    elementType: shape
+    bounds: [1340, 458, 520, 246]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: rb-strip
+    elementType: shape
+    bounds: [1340, 458, 3, 246]
+    shapeName: rect
+    fill: {type: solid, color: "$accent"}
+  - elementId: rb-header
+    elementType: text
+    bounds: [1360, 474, 480, 22]
+    content:
+      fontSize: 15
+      bold: true
+      color: "$text"
+      wrap: false
+      text: |
+        <p><span style="font-family:JetBrains Mono">evals/</span> 离线评估 —— evalkit</p>
+  - elementId: rb-sub
+    elementType: text
+    bounds: [1360, 500, 480, 14]
+    content: {fontSize: 10, color: "$faint", wrap: false, text: "硬断言管安全与交付 · judge 只管质量分，互不掩盖"}
+  - elementId: rb-bullets
+    elementType: text
+    bounds: [1360, 524, 480, 152]
+    content:
+      fontSize: 12
+      lineHeight: 1.75
+      color: "$sub"
+      text: |
+        <p>· 冻结真任务集：git archive 副本隔离 · 双臂同尺</p>
+        <p>· 硬断言五件套：verify / canary / web 取证 / confirms / tools</p>
+        <p>· LLM-as-judge：拿工具轨迹当地面真值</p>
+        <p>· kill-resume：真 SIGKILL 三段式 · heal 续跑</p>
+        <p>· 消融：记忆注入 · 图谱 · 检索三路并评</p>
+        <p>· 外部锚点：LongMemEval 36 题子集</p>
+  - elementId: rb-note
+    elementType: text
+    bounds: [1360, 680, 480, 14]
+    content: {fontSize: 10, color: "$faint", wrap: false, text: "答案卷隔离至 data/evals（gitignore）· 评测器与仓库同源可审查"}
+  - elementId: rb-arrow
+    elementType: line
+    bounds: [1300, 579, 40, 4]
+    viewBox: [40, 4]
+    points: "40,2 0,2"
+    arrow: [null, "arrow"]
+    border: {style: dash, width: 1, color: "$faint"}
+  # Block C: data
+  - elementId: rc-box
+    elementType: shape
+    bounds: [1340, 736, 520, 246]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: rc-strip
+    elementType: shape
+    bounds: [1340, 736, 3, 246]
+    shapeName: rect
+    fill: {type: solid, color: "$green"}
+  - elementId: rc-header
+    elementType: text
+    bounds: [1360, 752, 480, 22]
+    content:
+      fontSize: 15
+      bold: true
+      color: "$text"
+      wrap: false
+      text: |
+        <p><span style="font-family:JetBrains Mono">data/</span> 数据资产</p>
+  - elementId: rc-bullets
+    elementType: text
+    bounds: [1360, 782, 480, 142]
+    content:
+      fontSize: 11.5
+      lineHeight: 1.72
+      color: "$sub"
+      text: |
+        <p>· <span style="font-family:JetBrains Mono; color:$green">data/notes/</span> — 知识语料库 · 经受控 write_note 写入</p>
+        <p>· <span style="font-family:JetBrains Mono; color:$green">data/memory/sessions/</span> — 多会话仓库</p>
+        <p>· <span style="font-family:JetBrains Mono; color:$green">data/learned/</span> — 经验固化三桶（进 git · 计划召回源）</p>
+        <p>· <span style="font-family:JetBrains Mono; color:$green">data/graph.json</span> — 知识图谱（进 git · 可 diff）</p>
+        <p>· <span style="font-family:JetBrains Mono; color:$green">data/checkpoints/</span> — 崩溃恢复账本（append-only）</p>
+        <p>· <span style="font-family:JetBrains Mono; color:$green">data/audit/</span> — 审计日志 jsonl（按天滚动）</p>
+        <p>· <span style="font-family:JetBrains Mono; color:$green">data/plan_failures.jsonl</span> — 计划失败索引（可重建 · data/ 根目录）</p>
+  - elementId: rc-note
+    elementType: text
+    bounds: [1360, 944, 480, 14]
+    content: {fontSize: 10, color: "$faint", wrap: false, text: "运行时数据 gitignore · 知识资产进 git 可审查"}
+  # Block D: security
+  - elementId: rd-box
+    elementType: shape
+    bounds: [1340, 1014, 520, 150]
+    shapeName: rect
+    fill: {type: solid, color: "$band"}
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: rd-strip
+    elementType: shape
+    bounds: [1340, 1014, 3, 150]
+    shapeName: rect
+    fill: {type: solid, color: "$red"}
+  - elementId: rd-header
+    elementType: text
+    bounds: [1360, 1030, 480, 22]
+    content: {fontSize: 15, bold: true, color: "$red", wrap: false, text: 安全收口}
+  - elementId: rd-bullets
+    elementType: text
+    bounds: [1360, 1060, 480, 92]
+    content:
+      fontSize: 11.5
+      lineHeight: 1.8
+      color: "$sub"
+      text: |
+        <p>· 工具分级：L0 只读 / L1 写 / L2 确认缝留人审</p>
+        <p>· 注入界碑：外部内容包裹声明 + 免疫条款</p>
+        <p>· 进程沙箱：macOS seatbelt 写围栏（诚实降级）</p>
+        <p>· 记忆写围栏 + 审计 append-only 分级截断</p>
+
+  # ===== Footer =====
+  - elementId: footer-line
+    elementType: line
+    bounds: [60, 1298, 1800, 2]
+    viewBox: [1800, 2]
+    points: "0,1 1800,1"
+    border: {style: solid, width: 1, color: "$line"}
+  - elementId: footer-left
+    elementType: text
+    bounds: [60, 1302, 1000, 14]
+    content: {fontSize: 11, color: "$faint", wrap: false, text: "架构版本 v0.95 · 2026-09-29 · 真值源：docs/architecture.md · 68 份 ADR 已落地"}
+  - elementId: footer-right
+    elementType: text
+    bounds: [1160, 1302, 700, 14]
+    content: {fontSize: 11, fontFamily: JetBrains Mono, color: "$faint", align: [right, top], wrap: false, text: "facta v0.9.0 · Python ≥ 3.11 · openai / fastapi / chromadb / mcp"}

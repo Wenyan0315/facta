@@ -20,10 +20,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent.core.jev import ScenarioRouter
-from agent.memory.consolidate import CATEGORIES
-from agent.memory.learned import read_learned, render
-from agent.tools.registry import ToolRegistry
+from facta.core.jev import ScenarioRouter
+from facta.memory.consolidate import CATEGORIES
+from facta.memory.learned import read_learned, render
+from facta.tools.registry import ToolRegistry
 
 # 主 agent 的行为定义素材（S5a 从 loop.py 搬家，一字未动——等价锁见
 # tests/test_agent.py 的 sha256 断言，013 决策记录拆分的同款手法）。

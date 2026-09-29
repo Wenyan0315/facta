@@ -7,13 +7,13 @@
 
 import json
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.knowledge.extract import extract_note, sync_graph
-from agent.knowledge.graph import GraphStore
-from agent.tools.context import ToolContext
-from agent.tools.graph import register_graph_tools
-from agent.tools.registry import ToolRegistry
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.knowledge.extract import extract_note, sync_graph
+from facta.knowledge.graph import GraphStore
+from facta.tools.context import ToolContext
+from facta.tools.graph import register_graph_tools
+from facta.tools.registry import ToolRegistry
 
 
 def _extract_llm(payload) -> ScriptedLLM:
@@ -250,7 +250,7 @@ def _sync_env(tmp_path, monkeypatch):
     patch 就撤了，工具落盘会打到真项目 data/graph.json（S6a「patch 消费方
     模块」血案的变体——patch 的生命周期与使用窗口必须对齐）。
     """
-    import agent.tools.graph as graph_tools_mod
+    import facta.tools.graph as graph_tools_mod
     monkeypatch.setattr(graph_tools_mod, "GRAPH_PATH", tmp_path / "graph.json")
     notes = tmp_path / "notes"
     notes.mkdir()
@@ -305,13 +305,13 @@ def test_sync_graph_not_registered_without_llm(tmp_path):
 
 
 def test_sync_graph_forbidden_to_subagent():
-    from agent.tools.spawn import _FORBIDDEN
+    from facta.tools.spawn import _FORBIDDEN
     assert "sync_graph" in _FORBIDDEN   # 子 agent 不动共享图谱
 
 
 def test_write_note_hints_sync_graph(tmp_path):
     # 闭环引导：写完笔记提示图谱更新入口（make_plan 回灌同款）
-    from agent.tools.builtin import register_builtin
+    from facta.tools.builtin import register_builtin
     registry = ToolRegistry()
     ctx = ToolContext(notes_dir=tmp_path)
     register_builtin(registry, ctx)

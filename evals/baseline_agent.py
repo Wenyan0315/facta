@@ -29,9 +29,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from agent.core.llm import LLM, get_llm
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
+from facta.core.llm import LLM, get_llm
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
 
 MAX_STEPS = 15          # 步数熔断：基线卡死不允许白烧（出分记 fail 即可）
 MAX_OUTPUT_CHARS = 4000

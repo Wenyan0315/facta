@@ -52,19 +52,19 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from agent.core.llm import get_llm
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
-from agent.evalkit import parse_judge_json
-from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
-from agent.knowledge.sync import sync_notes
-from agent.memory.store import Session
-from agent.orchestrator.agent import build_default_agent
-from agent.orchestrator.assemble import ensure_persona
-from agent.orchestrator.loop import run_turn
-from agent.tools.builtin import register_builtin
-from agent.tools.context import ToolContext
-from agent.tools.registry import ToolRegistry
+from facta.core.llm import get_llm
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
+from facta.evalkit import parse_judge_json
+from facta.knowledge.knowledge_base import KnowledgeBase, get_embedder
+from facta.knowledge.sync import sync_notes
+from facta.memory.store import Session
+from facta.orchestrator.agent import build_default_agent
+from facta.orchestrator.assemble import ensure_persona
+from facta.orchestrator.loop import run_turn
+from facta.tools.builtin import register_builtin
+from facta.tools.context import ToolContext
+from facta.tools.registry import ToolRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BENCH_DIR = REPO_ROOT / "data" / "bench"          # gitignored（数百 MB，可一键重下）

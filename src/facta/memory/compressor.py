@@ -15,8 +15,8 @@
 
 import logging
 
-from agent.core.llm import LLM
-from agent.core.types import Message
+from facta.core.llm import LLM
+from facta.core.types import Message
 
 logger = logging.getLogger(__name__)
 

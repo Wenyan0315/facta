@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from agent.tools.context import ToolContext
-from agent.tools.registry import Tool, ToolRegistry
+from facta.tools.context import ToolContext
+from facta.tools.registry import Tool, ToolRegistry
 
 _SEARCH_HISTORY_PARAMS = {
     "type": "object",

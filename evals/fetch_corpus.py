@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from agent.tools.mcp_http import HttpMcpClient
+from facta.tools.mcp_http import HttpMcpClient
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 CTX7_URL = "https://mcp.context7.com/mcp"

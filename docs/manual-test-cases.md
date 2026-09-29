@@ -1,7 +1,7 @@
 # 手动测试用例清单（dogfooding 验收用）
 
 > 用途：日常手动验收的操作清单，与 `tests/`（695+ 自动化）互补——自动化守单元与集成契约，这份清单守**真实使用路径**。
-> 入口：CLI＝`python -m agent`（`quit`/`exit`/`退出` 结束，`/new` 开新会话）；Web＝`python -m agent.server` 后开 `http://127.0.0.1:8000`（四面板：对话 `/`、任务 `/fw/tasks.html`、记忆 `/fw/memory.html`、图谱 `/fw/graph.html`，另有语料 `/fw/notes.html`）。
+> 入口：CLI＝`python -m facta`（`quit`/`exit`/`退出` 结束，`/new` 开新会话）；Web＝`python -m facta.server` 后开 `http://127.0.0.1:8000`（四面板：对话 `/`、任务 `/fw/tasks.html`、记忆 `/fw/memory.html`、图谱 `/fw/graph.html`，另有语料 `/fw/notes.html`）。
 > 约定：🔥＝冒烟级（每次改动后必过）；⚠️ 栏位关联「已知问题（活清单）」，遇到时不要当新 bug 报。
 
 ## A. 启动与地基
@@ -49,7 +49,7 @@
 | E1 🔥 | 聊够 20 条消息（或退出/`/new` 触发 flush） | CLI 打印固化报告：新增 N 条（已验证 M 条）→ 落桶 | `data/learned/*.md` 长出新行 |
 | E2 | 检查新落的行 | 行格式 `- [日期] 内容`；verified 的带 `[已验证]`；含敏感凭证/行号/「共 N 篇」的**不该入库**（在报告里被拦） | 045 易腐闸 + 敏感闸 |
 | E3 | 记忆面板编辑一条 → 再聊一句相关话题 | 编辑生效；下轮注入含 `[手改]` 标记 | 053 provenance |
-| E4 | 记忆面板删一条用户级（user 栏）条目 | UI 明确提示「不进 git，删除不可撤销」；删除后注入消失 | 仓库外 `~/.personal-agent/user.md` |
+| E4 | 记忆面板删一条用户级（user 栏）条目 | UI 明确提示「不进 git，删除不可撤销」；删除后注入消失 | 仓库外 `~/.facta/user.md` |
 | E5 | 聊一个涉及个人偏好的话题（如「我不吃辣」）→ 触发固化 | 进 user.md 而非项目桶；子 agent（spawn）的回答里**不**出现该偏好 | M6.5 分流 + 子 agent 不注入 |
 
 ## F. 知识库与图谱

@@ -26,17 +26,17 @@ from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-from agent.knowledge.extract import sync_graph
-from agent.knowledge.graph import GRAPH_LOCK
-from agent.knowledge.sync import file_hash, sync_notes
-from agent.memory.consolidate import CATEGORIES
-from agent.memory.learned import delete_line, read_learned, update_line, visible_text
-from agent.memory.store import Session
-from agent.orchestrator.assemble import AppContext, settle_session
-from agent.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
-from agent.orchestrator.loop import RunResult, run_turn
-from agent.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, user_memory_path
-from agent.server.run_store import (
+from facta.knowledge.extract import sync_graph
+from facta.knowledge.graph import GRAPH_LOCK
+from facta.knowledge.sync import file_hash, sync_notes
+from facta.memory.consolidate import CATEGORIES
+from facta.memory.learned import delete_line, read_learned, update_line, visible_text
+from facta.memory.store import Session
+from facta.orchestrator.assemble import AppContext, settle_session
+from facta.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
+from facta.orchestrator.loop import RunResult, run_turn
+from facta.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, user_memory_path
+from facta.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -44,8 +44,8 @@ from agent.server.run_store import (
     Run,
     RunStore,
 )
-from agent.server.sse import encode_heartbeat, encode_sse
-from agent.tools.notes import record_provenance, resolve_note_path
+from facta.server.sse import encode_heartbeat, encode_sse
+from facta.tools.notes import record_provenance, resolve_note_path
 
 # run_turn 的 on_event 类型 → Run 事件类型（统一用点分层命名，前端按 type 路由）
 _EVENT_MAP = {
@@ -78,7 +78,7 @@ PANEL_CATEGORIES = CATEGORIES + ("user",)
 def _learned_path(category: str) -> Path:
     """category → 记忆文件（调用方保证 category 已在 PANEL_CATEGORIES 内）。
 
-    user 走 paths.user_memory_path()：它是函数不是常量（CORTEX_USER_MEMORY
+    user 走 paths.user_memory_path()：它是函数不是常量（FACTA_USER_MEMORY
     覆写点），面板必须与 agent 注入侧（assemble.py）同源——存常量的事故形态
     很具体：测试覆写了环境变量，面板却仍盯着真 home 里的 user.md，等于拿
     测试操作生产隐私文件。user.md 与项目桶是同款落盘物（同行格式、同一把
@@ -237,8 +237,8 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
 def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     # 并发上限（S8a）：默认 3——「长任务在跑，我另开一段对话问点别的」是真实
     # 需求，而不是要上多进程（architecture.md 待讨论区「多进程演进」的关键修正）。
-    store = store or RunStore(max_in_flight=int(os.environ.get("CORTEX_MAX_CONCURRENT_RUNS", "3")))
-    app = FastAPI(title="Personal Agent")
+    store = store or RunStore(max_in_flight=int(os.environ.get("FACTA_MAX_CONCURRENT_RUNS", "3")))
+    app = FastAPI(title="Facta")
     static_dir = Path(__file__).parent / "static"
 
     def _require_session(sid: str) -> None:

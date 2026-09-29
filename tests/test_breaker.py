@@ -2,15 +2,15 @@
 
 import pytest
 
-from agent.core.gateway import (
+from facta.core.gateway import (
     CircuitOpenError,
     FallbackLLM,
     GatewayConfig,
     RobustLLM,
 )
-from agent.core.llm import LLM, LLMUnavailableError
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
+from facta.core.llm import LLM, LLMUnavailableError
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
 
 
 class SwitchableLLM(LLM):
@@ -74,7 +74,7 @@ def test_breaker_half_open_recovers():
 def test_breaker_half_open_failure_reopens(monkeypatch):
     # 假时钟：熔断冷却依赖 time.monotonic，测试里由它控制时间前进
     clock = [100.0]
-    monkeypatch.setattr("agent.core.gateway.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("facta.core.gateway.time.monotonic", lambda: clock[0])
 
     inner = SwitchableLLM(fail=True)
     llm = RobustLLM(
@@ -123,7 +123,7 @@ def test_fallback_exhaustion_raises_llm_unavailable():
 
 def test_run_chat_survives_llm_unavailable(monkeypatch, capsys):
     """F 契约第 2 条：模型全挂时主循环不崩——用户消息留底片、无假回复。"""
-    from agent.cli import run_chat
+    from facta.cli import run_chat
 
     inputs = iter(["测试问题", "退出"])
     monkeypatch.setattr("builtins.input", lambda _="": next(inputs))
@@ -140,7 +140,7 @@ def test_run_chat_survives_llm_unavailable(monkeypatch, capsys):
 
 
 def test_get_llm_builds_fallback_chain(monkeypatch):
-    from agent.core.llm import get_llm
+    from facta.core.llm import get_llm
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("SILICONFLOW_API_KEY", "sk-test")

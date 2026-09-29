@@ -25,16 +25,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agent.core.llm import LLM
-from agent.core.types import Message
-from agent.knowledge.knowledge_base import KnowledgeBase
-from agent.memory.store import Session
-from agent.paths import WORKSPACE_ROOT
+from facta.core.llm import LLM
+from facta.core.types import Message
+from facta.knowledge.knowledge_base import KnowledgeBase
+from facta.memory.store import Session
+from facta.paths import WORKSPACE_ROOT
 
 if TYPE_CHECKING:
-    from agent.knowledge.graph import GraphStore  # 仅类型标注（S7a）
-    from agent.memory.todos import TodoStore
-    from agent.tools.web import WebSearchClient  # 仅类型标注用，运行时不导入（防循环）
+    from facta.knowledge.graph import GraphStore  # 仅类型标注（S7a）
+    from facta.memory.todos import TodoStore
+    from facta.tools.web import WebSearchClient  # 仅类型标注用，运行时不导入（防循环）
 
 
 @dataclass

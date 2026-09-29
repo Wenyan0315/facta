@@ -7,22 +7,22 @@
 
 import pytest
 
-from agent.core.gateway import (
+from facta.core.gateway import (
     CircuitOpenError,
     FallbackLLM,
     GatewayConfig,
     RobustLLM,
     SemanticCacheLLM,
 )
-from agent.core.llm import (
+from facta.core.llm import (
     LLM,
     MockLLM,
     ScriptedLLM,
     StreamChunk,
     merge_stream_chunks,
 )
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
 
 # ---------- 假组件 ----------
 

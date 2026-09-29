@@ -1,7 +1,7 @@
 """LLM-as-judge 评测链验收：无 mock 兜底纪律（解析件已内核化至 test_evalkit.py）。"""
 
-from agent.core.gateway import FallbackLLM, RobustLLM
-from agent.core.llm import get_llm
+from facta.core.gateway import FallbackLLM, RobustLLM
+from facta.core.llm import get_llm
 
 
 def test_get_llm_without_mock_fallback_single_candidate(monkeypatch):

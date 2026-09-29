@@ -16,24 +16,24 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.memory.store import Session, SessionStore
-from agent.memory.todos import TodoStore
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.assemble import AppContext, ensure_persona
-from agent.server.app import create_app
-from agent.tools.context import ToolContext
-from agent.tools.plan import register_plan_tools
-from agent.tools.registry import Tool, ToolRegistry
-from agent.tools.spawn import register_spawn_tools
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.memory.store import Session, SessionStore
+from facta.memory.todos import TodoStore
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.assemble import AppContext, ensure_persona
+from facta.server.app import create_app
+from facta.tools.context import ToolContext
+from facta.tools.plan import register_plan_tools
+from facta.tools.registry import Tool, ToolRegistry
+from facta.tools.spawn import register_spawn_tools
 
 
 @pytest.fixture(autouse=True)
 def _isolate_disk_state(tmp_path, monkeypatch):
     """隔离真实磁盘状态（与 test_app.py 同款 fixture）：worker 收官会真落盘。"""
-    monkeypatch.setattr("agent.server.app.LEARNED_DIR", tmp_path / "learned")
-    monkeypatch.setattr("agent.orchestrator.assemble.LEARNED_DIR", tmp_path / "learned")
+    monkeypatch.setattr("facta.server.app.LEARNED_DIR", tmp_path / "learned")
+    monkeypatch.setattr("facta.orchestrator.assemble.LEARNED_DIR", tmp_path / "learned")
 
 
 def _call(name: str, args: dict) -> dict:

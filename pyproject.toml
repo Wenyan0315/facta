@@ -1,16 +1,27 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]   # 77+ 才支持 PEP 639 的 license = "MIT" SPDX 写法
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "personal-agent"
-version = "0.9.0"   # 与 src/agent/__main__.py 的 VERSION 保持一致（版本号单一语义）
-description = "个人 AI Agent 助手（学习项目，后续升级为个人 coding agent）"
+name = "facta"
+version = "0.9.0"   # 与 src/facta/__main__.py 的 VERSION 保持一致（版本号单一语义）
+description = "从零自研的个人 AI Agent：ReAct 执行主轴 + 多层记忆 + 工具/MCP 外延"
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Wenyan0315" },
+]
 dependencies = [
     "openai>=1.0",
     "python-dotenv>=1.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Wenyan0315/facta"
+Repository = "https://github.com/Wenyan0315/facta"
+Issues = "https://github.com/Wenyan0315/facta/issues"
+Changelog = "https://github.com/Wenyan0315/facta/commits/main"
 
 [project.optional-dependencies]
 dev = [
@@ -41,7 +52,7 @@ testpaths = ["tests"]
 # 标注严格度随代码库成熟逐步拧紧（方向提前定，细节临期定）。
 [tool.mypy]
 # 不钉 python_version：跟随运行解释器（numpy 等新 stub 用 3.12+ 语法，钉旧版会误报）
-files = ["src/agent"]
+files = ["src/facta"]
 
 [tool.ruff]
 line-length = 100
@@ -66,7 +77,7 @@ ignore = [
     "TRY004",                    # 配置解析的类型不符用 ValueError：数据内容错，不是 Python 类型系统错
     "SIM103",                    # needs_confirm 等安全函数逐条展开返回值：可读性优先于高尔夫
     "E501",                      # 行长：中文注释/文档串天然宽，靠 review 把关不靠硬折行
-    "E402",                      # 模块内 import 不在顶部：app.py 刻意先 basicConfig 再 import agent（日志先于内核加载）
+    "E402",                      # 模块内 import 不在顶部：app.py 刻意先 basicConfig 再 import facta（日志先于内核加载）
     "PLC0415",                   # 函数内 import：项目惯例——可选依赖延迟导入（chromadb/openai）+ 破循环依赖
     "PLR2004",                   # 魔法值比较：测试断言与校准阈值（min_score 0.85 等）用字面量是常态
     "TRY003",                    # raise 带长消息字符串：项目错误消息风格（中文自述式），不引入错误类层级

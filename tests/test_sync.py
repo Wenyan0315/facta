@@ -6,12 +6,12 @@
 
 import pytest
 
-from agent.knowledge.knowledge_base import (
+from facta.knowledge.knowledge_base import (
     BagOfWordsEmbedder,
     Embedder,
     KnowledgeBase,
 )
-from agent.knowledge.sync import sync_notes
+from facta.knowledge.sync import sync_notes
 
 
 def _write(tmp_path, name: str, text: str):
@@ -124,7 +124,7 @@ def test_small_deletion_passes_guard(tmp_path):
 
 def test_restart_no_reembed(tmp_path):
     pytest.importorskip("chromadb")
-    from agent.knowledge.vector_store import ChromaVectorStore
+    from facta.knowledge.vector_store import ChromaVectorStore
 
     _write(tmp_path, "php.md", "AAAA")
     db_dir = tmp_path / "db"

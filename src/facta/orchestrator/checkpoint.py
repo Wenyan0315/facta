@@ -39,10 +39,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agent.core.types import Message
-from agent.memory.store import Session
-from agent.paths import CHECKPOINT_DIR
-from agent.tools.registry import ToolRegistry
+from facta.core.types import Message
+from facta.memory.store import Session
+from facta.paths import CHECKPOINT_DIR
+from facta.tools.registry import ToolRegistry
 
 
 def _now() -> str:

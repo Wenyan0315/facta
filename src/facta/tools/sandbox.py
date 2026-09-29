@@ -28,9 +28,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from agent.paths import MEMORY_WRITE_FENCE
+from facta.paths import MEMORY_WRITE_FENCE
 
-ENV_SWITCH = "CORTEX_SANDBOX"   # =off 强制关闭（其余值/缺省 = auto）
+ENV_SWITCH = "FACTA_SANDBOX"   # =off 强制关闭（其余值/缺省 = auto）
 
 # 与 files.py 黑名单交叉同源的目录项（root 相对）——tests/test_sandbox.py
 # 断言 files.py 的每一项在这里都有对应 deny，漂移即红。
@@ -44,7 +44,7 @@ def detect_backend() -> str | None:
     """探测可用沙箱后端；无 → None（诚实降级）。
 
     不做模块级缓存：which 是毫秒级，run_command 频率低；缓存会让
-    CORTEX_SANDBOX=off 在同进程内不生效。
+    FACTA_SANDBOX=off 在同进程内不生效。
     """
     if os.environ.get(ENV_SWITCH) == "off":
         return None

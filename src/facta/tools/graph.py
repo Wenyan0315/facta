@@ -20,11 +20,11 @@ sync_graph（界面可操作拍板，2026-09-23）：图谱更新不能只是启
 
 from __future__ import annotations
 
-from agent.knowledge.extract import sync_graph as _run_sync
-from agent.knowledge.graph import GRAPH_LOCK, RELATIONS, GraphStore
-from agent.paths import GRAPH_PATH
-from agent.tools.context import ToolContext
-from agent.tools.registry import Tool, ToolRegistry
+from facta.knowledge.extract import sync_graph as _run_sync
+from facta.knowledge.graph import GRAPH_LOCK, RELATIONS, GraphStore
+from facta.paths import GRAPH_PATH
+from facta.tools.context import ToolContext
+from facta.tools.registry import Tool, ToolRegistry
 
 
 def _render_edge(edge) -> str:

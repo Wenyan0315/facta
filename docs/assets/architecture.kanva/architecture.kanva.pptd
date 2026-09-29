@@ -1,0 +1,23 @@
+version: v2
+title: Facta 系统架构图
+size: [1920, 1320]
+customFonts:
+  - family: JetBrains Mono
+    src: "https://fonts.googleapis.com/css2?family=JetBrains+Mono"
+theme:
+  colors:
+    bg: "#0B0F14"
+    band: "#11161D"
+    inner: "#0D131A"
+    chip: "#161D26"
+    line: "#232C38"
+    innerline: "#2B3542"
+    chipborder: "#3A4552"
+    text: "#E6EDF3"
+    sub: "#A9B4C0"
+    faint: "#6E7681"
+    accent: "#E8B44C"
+    green: "#3FB950"
+    red: "#E05252"
+pages:
+  - pages/1_architecture.page

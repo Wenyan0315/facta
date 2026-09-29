@@ -21,23 +21,28 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from agent.core.audit import AuditLog
-from agent.core.gateway import SemanticCacheLLM
-from agent.core.jev import JevClient, ScenarioRouter
-from agent.core.llm import LLM, get_llm
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
-from agent.knowledge.extract import sync_graph
-from agent.knowledge.graph import GraphStore
-from agent.knowledge.knowledge_base import KnowledgeBase, get_embedder
-from agent.knowledge.sync import sync_notes
-from agent.knowledge.vector_store import ChromaVectorStore
-from agent.memory.consolidate import consolidate
-from agent.memory.store import Session, SessionStore, derive_title
-from agent.memory.title import summarize_title
-from agent.memory.todos import TodoStore
-from agent.orchestrator.agent import DEFAULT_SYSTEM_PROMPT, Agent, build_default_agent
-from agent.paths import (
+from facta.core.audit import AuditLog
+from facta.core.gateway import SemanticCacheLLM
+from facta.core.jev import JevClient, ScenarioRouter
+from facta.core.llm import LLM, get_llm
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
+from facta.knowledge.extract import sync_graph
+from facta.knowledge.graph import GraphStore
+from facta.knowledge.knowledge_base import (
+    EMBED_PROVIDERS,
+    KnowledgeBase,
+    configured_embed_provider,
+    get_embedder,
+)
+from facta.knowledge.sync import sync_notes
+from facta.knowledge.vector_store import ChromaVectorStore
+from facta.memory.consolidate import consolidate
+from facta.memory.store import Session, SessionStore, derive_title
+from facta.memory.title import summarize_title
+from facta.memory.todos import TodoStore
+from facta.orchestrator.agent import DEFAULT_SYSTEM_PROMPT, Agent, build_default_agent
+from facta.paths import (
     GRAPH_PATH,
     LEARNED_DIR,
     NOTES_DIR,
@@ -45,22 +50,22 @@ from agent.paths import (
     WORKSPACE_ROOT,
     user_memory_path,
 )
-from agent.tools.builtin import register_builtin
-from agent.tools.context import ToolContext
-from agent.tools.graph import register_graph_tools
+from facta.tools.builtin import register_builtin
+from facta.tools.context import ToolContext
+from facta.tools.graph import register_graph_tools
 
 logger = logging.getLogger(__name__)
 
-from agent.tools.files import register_file_tools  # noqa: E402  # 历史结构：logger 居中，保持原样
-from agent.tools.history import register_history_tools  # noqa: E402
-from agent.tools.mcp_config import assemble_servers, load_server_specs
-from agent.tools.plan import register_plan_tools
-from agent.tools.registry import ToolRegistry
-from agent.tools.spawn import register_spawn_tools
-from agent.tools.terminal import register_terminal_tools
-from agent.tools.todo import register_todo_tools
-from agent.tools.web import get_web_search, register_web_tools
-from agent.tools.worktree import cleanup_stale_worktrees
+from facta.tools.files import register_file_tools  # noqa: E402  # 历史结构：logger 居中，保持原样
+from facta.tools.history import register_history_tools  # noqa: E402
+from facta.tools.mcp_config import assemble_servers, load_server_specs
+from facta.tools.plan import register_plan_tools
+from facta.tools.registry import ToolRegistry
+from facta.tools.spawn import register_spawn_tools
+from facta.tools.terminal import register_terminal_tools
+from facta.tools.todo import register_todo_tools
+from facta.tools.web import get_web_search, register_web_tools
+from facta.tools.worktree import cleanup_stale_worktrees
 
 # 组装层唯一真值源：CLI / Web 都从这里拿路径，不在各自入口重定义
 # 四个都锚 WORKSPACE_ROOT（S8a 边界①收口同款）：换 cwd 启动时相对路径会静默
@@ -73,7 +78,31 @@ AUDIT_DIR = WORKSPACE_ROOT / "data/audit"                   # S3 审计日志（
 # 增量固化阈值（S8a）：距上次固化攒够这么多条消息才跑一次复盘。
 # 老口径是「归档/退出时全量固化一次」——S8a 没有归档动作了，触发点必须换成
 # 「攒够就固化」，否则一段长对话的记忆永远不落 learned/。
-CONSOLIDATE_THRESHOLD = max(1, int(os.environ.get("CORTEX_CONSOLIDATE_THRESHOLD", "20")))
+CONSOLIDATE_THRESHOLD = max(1, int(os.environ.get("FACTA_CONSOLIDATE_THRESHOLD", "20")))
+
+
+def _rag_missing_reason(provider: str) -> str | None:
+    """语义 RAG 是否需要降级及原因（P1-1 评审修复）：None=不降级。
+
+    教学组合（mock/echo/repeat）本来就词袋，不算「降级」——返回 None，
+    走不走 Chroma 由调用方按 provider 另判。真模型只查两件事：
+    所选 embedding 供应商的 key 在不在、chromadb 装没装（[rag] extra）。
+    ADR 070：供应商不再写死硅基——FACTA_EMBED_PROVIDER 选谁，就查谁的 key。
+    """
+    if provider in ("mock", "echo", "repeat"):
+        return None
+    embed_name = configured_embed_provider()
+    cfg = EMBED_PROVIDERS.get(embed_name)
+    if cfg is None:
+        return f"未知的 FACTA_EMBED_PROVIDER: {embed_name}（可选：{', '.join(EMBED_PROVIDERS)}）"
+    key_name = f"{cfg['prefix']}_API_KEY"
+    if not os.environ.get(key_name):
+        return f"缺 {key_name}"
+    try:
+        import chromadb  # noqa: F401  # 探依赖：缺了降级，别让用户崩在 ChromaVectorStore.__init__
+    except ImportError:
+        return "未安装 [rag] 依赖（chromadb）"
+    return None
 
 
 @dataclass
@@ -106,10 +135,17 @@ def ensure_persona(session: Session, agent: Agent) -> None:
     """人设保证（装配不变量，S2 验收修复轮）：会话必须带着 agent 的 system_prompt 开工。
 
     「空会话种人设」原本只住在 CLI 壳——Web 入口曾跑过无人设会话（真实使用
-    踩中：语言漂移、信息政策失效、自我认知靠模型编）。两分支：
+    踩中：语言漂移、信息政策失效、自我认知靠模型编）。三分支：
     - 空会话：种人设（与 cli.py 的守卫幂等——双方都判 messages 是否为空）
     - 历史遗留的无 system 会话（早期 Web 保存的文件）：头部补插；
       摘要游标随位移 +1 对齐（summarized_upto 数的是消息位置）
+    - 有 system 但内容过期（P1-4 评审修复）：就地刷新为 agent.system_prompt。
+      messages[0] 的 system 是【人设 + learned/用户记忆快照】的冻结副本，
+      不是历史存档真值——记忆面板新增/编辑/删除后，旧快照若不刷新，旧会话
+      仍把被删的记忆发给模型（评审实测：删了照样进 payload）。Web 每轮
+      build_agent 重读盘，刷新后下一轮即生效；CLI 固化发生在收尾，下次
+      进程自然拿新快照。替换只动 content 不动位置：summarized_upto（位置
+      计数）与压缩器/账本（都只碰尾部）不受影响。
 
     调用时机（S8a 收口）：只有一个——build_agent 工厂内部。
     S8a 之前有三个调用点（服务启动 / 归档清空后 / 切回换血后），漏一个就是
@@ -139,6 +175,9 @@ def ensure_persona(session: Session, agent: Agent) -> None:
         session.messages.insert(0, Message(role="system", content=agent.system_prompt))
         if session.summarized_upto:
             session.summarized_upto += 1
+    elif session.messages[0].content != agent.system_prompt:
+        # P1-4：快照过期 → 刷新。不把历史存档里的 system 当当前记忆真值。
+        session.messages[0].content = agent.system_prompt
 
 
 def settle_session(
@@ -151,39 +190,53 @@ def settle_session(
 ) -> str:
     """收尾一段对话：补标题 → 增量固化 → 落盘。返回固化报告（CLI 打印，Web 忽略）。
 
-    两个壳共用一份（与 ensure_persona 同一纪律）：这三步的**顺序**是正确性约束，
-    复制两份必然漂移。顺序有讲究——固化推进的是 consolidated_upto 游标，
-    必须在 save 之前：游标只活在磁盘上，不落盘就丢，下一轮把同一段对话
-    重烧一遍 LLM（learned/ 长出重复条目）。
+    两个壳共用一份（与 ensure_persona 同一纪律）：顺序是正确性约束，复制两份
+    必然漂移。P1-5 评审修复后的顺序：**对话本体先保底落盘**，可失败的标题/
+    固化各自容错，终态再落一次——原顺序里固化抛异常会把 store.save 一起拖死，
+    已回答给用户的文本在刷新后消失（评审故障注入实测复现）。
+
+    游标语义（P2-7）：consolidate 返回 (report, ok)，ok=False（坏 JSON 等
+    可重试失败）不推进 consolidated_upto，下轮重烧同一批——宁可重复萃取，
+    不可静默丢记忆。游标只活在磁盘上：推进后必须再 save（终态落盘兜住）。
 
     调用时机：Web 在 worker 的准入窗口内（run.finish 之前），因此与「同会话的
     下一轮」天然串行；CLI 在退出 / `/new` 换新之前。
     flush=True → 阈值降到 1：没有「下一轮」了，把剩下的全冲掉。
     """
+    store.save(sid, session)   # ① 保底：后面任何一步失败，对话本体不丢
+
     # 标题（每段对话只提炼一次）：手工名优先——title 非空说明用户 rename 过，
     # 不用 LLM 顶掉（「自动生成用于填空，不覆盖用户主动编辑」，计划名/记忆标签同此原则）
     if session.title is None and any(m.role == "user" for m in session.messages):
-        session.title = summarize_title(session, internal_llm) or derive_title(session)
+        try:
+            session.title = summarize_title(session, internal_llm) or derive_title(session)
+        except Exception:
+            logger.warning("标题提炼失败，退回首句", exc_info=True)
+            session.title = derive_title(session)
 
     since = session.consolidated_upto
     report = "记忆固化：未达阈值，跳过复盘"
     if len(session.messages) - since >= (1 if flush else CONSOLIDATE_THRESHOLD):
-        report = consolidate(
-            session,
-            internal_llm,
-            LEARNED_DIR,
-            since=since,
-            user_memory_path=user_memory_path(),
-            # ADR 045：基础 prompt 当冗余对照物（memory 层不能反向 import
-            # orchestrator——agent.py 已 import consolidate，会循环）
-            base_prompt=DEFAULT_SYSTEM_PROMPT,
-            # ADR 053：sid 本来就在作用域里，往下传一行 → 落盘行带 [固化:{sid}]
-            sid=sid,
-        )
-        # 游标只在固化没抛异常时推进：失败就下轮重来，宁可重复萃取也不丢记忆
-        session.consolidated_upto = len(session.messages)
+        try:
+            report, ok = consolidate(
+                session,
+                internal_llm,
+                LEARNED_DIR,
+                since=since,
+                user_memory_path=user_memory_path(),
+                # ADR 045：基础 prompt 当冗余对照物（memory 层不能反向 import
+                # orchestrator——agent.py 已 import consolidate，会循环）
+                base_prompt=DEFAULT_SYSTEM_PROMPT,
+                # ADR 053：sid 本来就在作用域里，往下传一行 → 落盘行带 [固化:{sid}]
+                sid=sid,
+            )
+        except Exception as exc:
+            ok, report = False, f"记忆固化：异常中断（{exc}），游标未推进，下轮重试"
+        # ok=False（含异常）不推进：失败就下轮重来，宁可重复萃取也不丢记忆
+        if ok:
+            session.consolidated_upto = len(session.messages)
 
-    store.save(sid, session)
+    store.save(sid, session)   # ② 终态：标题与游标的更新也要落盘
     return report
 
 
@@ -206,13 +259,21 @@ def assemble(provider: str) -> AppContext:
     ledger = UsageLedger()
 
     # 1) embedder：语义缓存与知识库共用一个（记账只注入这一处）
-    #    练习模式（假模型）走词袋（离线不花一分钱）；真模型走 BGE-M3。
+    #    练习模式（假模型）走词袋（离线不花一分钱）；真模型走所选 embedding
+    #    供应商（ADR 070 前写死硅基 BGE-M3，现由 FACTA_EMBED_PROVIDER 决定）。
     #    注意两种 embedder 向量维度不同（词袋=词表长度、BGE=1024），绝不能混用
     #    同一个 Chroma 集合——所以教学组合根本不碰 Chroma，各自住各自的店
-    if provider in ("mock", "echo", "repeat"):
-        embedder = get_embedder("bow", ledger)
-    else:
-        embedder = get_embedder("siliconflow", ledger)
+    #    P1-1 评审修复：真模型不再无条件要求 embedding key——缺 key 或缺
+    #    chromadb 时降级词袋 + 内存库（教学组合同款路径）。语义 RAG 是检索
+    #    增益，不该挡住主聊天；README「最低只要一个 LLM key」由此兑现。
+    rag_missing = _rag_missing_reason(provider)
+    embedder = (
+        get_embedder("bow", ledger)
+        if provider in ("mock", "echo", "repeat") or rag_missing
+        else get_embedder(configured_embed_provider(), ledger)
+    )
+    if rag_missing:
+        logger.info("语义 RAG 降级词袋（%s）：仅影响检索质量，不影响对话", rag_missing)
 
     # 2) 模型链（M7.5 网关 + 三方评审第 2 条拆链）：组装出两条链——
     #    内部链（internal_llm）：防护壳全套（记账/重试/精确缓存/熔断/降级），
@@ -226,17 +287,19 @@ def assemble(provider: str) -> AppContext:
     # 跨上下文串味；M10 direct 路由把纯聊天送进 tools=None 命中区后风险
     # 被进一步放大。先保证「回答的是当前任务」，再谈省调用。
     # 精确缓存（完整输入哈希）不受影响仍在 RobustLLM 内生效。
-    # CORTEX_SEMANTIC_CACHE=1 显式开启（无状态 FAQ 场景）
+    # FACTA_SEMANTIC_CACHE=1 显式开启（无状态 FAQ 场景）
     llm: LLM = internal_llm   # 标注基类：if/else 两分支类型不同，mypy 不自动合并
-    if os.environ.get("CORTEX_SEMANTIC_CACHE"):
+    if os.environ.get("FACTA_SEMANTIC_CACHE"):
         llm = SemanticCacheLLM(internal_llm, embedder, ledger)
         logger.info("语义缓存：已开启（实验性，注意跨上下文串味风险）")
     logger.info("当前模型：%s", provider)
 
     # 3) 知识库（M7）：组装 embedder + store，索引走增量同步——
     #    只为真正新增/修改的笔记花 embedding 的钱；改过的自动删旧块重建
-    if provider in ("mock", "echo", "repeat"):
-        kb = KnowledgeBase(embedder)
+    #    P1-1 同款：降级路径用内存库（词袋维度与既有 Chroma 的 BGE 集合不兼容，
+    #    降级时绝不打开磁盘库——补齐 key/依赖后自动回到增量路径，旧向量仍在）
+    if rag_missing or provider in ("mock", "echo", "repeat"):
+        kb = KnowledgeBase(embedder)   # 教学组合 / 降级路径：内存库，不碰 Chroma
     else:
         kb = KnowledgeBase(embedder, ChromaVectorStore(VECTOR_DB_DIR))
     report = sync_notes(kb, NOTES_DIR)

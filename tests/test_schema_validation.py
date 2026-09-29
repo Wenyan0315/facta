@@ -1,6 +1,6 @@
 """参数结构层校验验收：语法合法但缺必填/类型错 → 错误字符串（自纠反馈环）。"""
 
-from agent.tools.registry import Tool, ToolRegistry
+from facta.tools.registry import Tool, ToolRegistry
 
 
 def _registry(**overrides) -> ToolRegistry:

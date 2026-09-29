@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from agent.tools.mcp_config import assemble_servers, load_server_specs
-from agent.tools.registry import ToolRegistry
+from facta.tools.mcp_config import assemble_servers, load_server_specs
+from facta.tools.registry import ToolRegistry
 
 DEMO = Path(__file__).resolve().parents[1] / "servers" / "http_demo_server.py"
 

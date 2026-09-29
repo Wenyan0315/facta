@@ -13,7 +13,7 @@
   ⑤ 进程级沙箱（048）：macOS seatbelt 写围栏——批准语义从「全机权限」
      变为「围栏内跑」（写限项目根+TMPDIR；.env*、.git/hooks、.git/config、
      记忆/审计/venv 等黑名单不可写）。确认弹窗不再是唯一防线；无后端
-     环境诚实降级原样跑 + 审计打标 off（CORTEX_SANDBOX=off 可强制关）
+     环境诚实降级原样跑 + 审计打标 off（FACTA_SANDBOX=off 可强制关）
   ⑥ 凭证双层围栏（049）：沙箱 deny read 围死 .env 一族（进程级硬挡，
      cat/open 都拿不到内容）；home 凭证（~/.ssh/id_rsa、.pem、.aws 等）
      不进沙箱 deny（会打断沙箱内 git 的 SSH 认证），改由 needs_confirm
@@ -27,13 +27,14 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
-from agent.paths import WORKSPACE_ROOT
-from agent.tools.context import ToolContext
-from agent.tools.registry import Tool, ToolRegistry
-from agent.tools.sandbox import wrap_command
+from facta.paths import WORKSPACE_ROOT
+from facta.tools.context import ToolContext
+from facta.tools.registry import Tool, ToolRegistry
+from facta.tools.sandbox import wrap_command
 
 TIMEOUT_SECONDS = 60
 MAX_OUTPUT_CHARS = 6000          # stdout+stderr 合并截断（与 read_file 同纪律）
@@ -48,12 +49,35 @@ _GIT_READONLY = frozenset({"status", "log", "diff", "show"})
 # shell 元字符：出现一个即弹窗（防 cat x; rm y / git status && evil / $(…) 绕过）
 _SHELL_META = frozenset(";&|><`$()\n")
 
+# ADR 071：白名单 basename 的真实路径必须落在公认系统目录里才算「PATH 里那个
+# 公认只读的程序」。挡 ~/.local/bin/echo 之类的 PATH 注入（同 basename、不同
+# 真实路径）。这是「白名单是系统程序的指针」语义的最后一道闸门——前道闸门是
+# P1-3 已修的「带路径程序一律确认」（./tools/echo 已挡），本道挡 PATH 注入。
+# 不挡真实写入：seatbelt 沙箱（048）才是写操作的硬隔离，本层只过滤 basename 一致
+# 但 PATH 里被劫持的程序；触发 seatbelt 缺位时本层是单层防线。
+# `.venv/bin` 同样放行——开发者对自己虚拟环境有控制力，且这是 `python -m pytest`
+# 之外 pytest 命令的常驻路径（测试用例的典型调用）。
+_SAFE_SYSTEM_DIRS = frozenset({
+    "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+    "/usr/local/bin", "/opt/homebrew/bin",      # Homebrew
+    str(WORKSPACE_ROOT / ".venv" / "bin"),       # 开发虚拟环境
+})
+
 # 参数级危险参数（S4 评审 #17）：只读命令名 + 危险参数仍可执行任意代码
 # 或覆盖文件。只收有真实危险面的参数——grep -x 是整行匹配（纯只读），
 # 评审提及但不成立，误报确认正是白名单要防的疲劳源。
+# P1-3 评审修复补全：git 只读子命令也带写文件参数（git diff --output=x）；
+# find 的 -fprint 家族同 -o 一样把输出写进任意路径。
 _DANGEROUS_ARGS: dict[str, frozenset[str]] = {
-    "find": frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete"}),
+    "find": frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete",
+                       "-fprint", "-fprint0", "-fprintf", "-fls"}),
     "sort": frozenset({"-o", "--output"}),  # -o/--output 可覆盖任意文件
+    "git": frozenset({"--output"}),          # diff/log/show 的 --output= 写文件
+}
+# 短选项粘连形态（P1-3）：`sort -o/tmp/x` 是单个 token，精确匹配抓不到——
+# 按前缀补刀。误报方向安全（sort 没有其他 -o 开头的选项，多弹一次确认可接受）。
+_DANGEROUS_PREFIXES: dict[str, frozenset[str]] = {
+    "sort": frozenset({"-o"}),
 }
 
 # 凭证路径模式（049）：命中即要确认，优先级高于白名单——`cat` 免确认对
@@ -95,14 +119,24 @@ def _confirm_rule(command: str) -> str | None:
     tokens = command.split()
     if not tokens:
         return "empty"
+    # P1-3 评审修复①：程序带路径（./tools/echo、bin/evil、/usr/local/bin/evil）
+    # 不再享受 basename 免确认——白名单的语义是「PATH 里那个公认只读的程序」，
+    # 仓库内同名程序证明不了自己是它（评审实测 ./tools/echo 因 basename=echo
+    # 被放行）。裸命令名才走 PATH 解析。误报方向安全：绝对路径调用只读命令
+    # 多弹一次确认，不值得为省这次点击赌程序来源。
+    if "/" in tokens[0]:
+        return "not-whitelisted"
     head = tokens[0].rsplit("/", 1)[-1]      # /usr/bin/git → git
     if "=" in head:                          # FOO=1 cmd 环境变量前缀 → 保守确认
         return "env-prefix"
     # 参数级拦截：白名单命令带危险参数 → 确认（S4 评审 #17）
-    # split("=") 兼容长选项等号形式（sort --output=file）
+    # split("=") 兼容长选项等号形式（sort --output=file）；
+    # 前缀刀（P1-3 修复②）抓短选项粘连 `sort -o/tmp/x`（单个 token）
     dangerous = _DANGEROUS_ARGS.get(head)
     if dangerous is not None and any(
-        arg.split("=", 1)[0] in dangerous for arg in tokens[1:]
+        arg.split("=", 1)[0] in dangerous
+        or any(arg.startswith(p) for p in _DANGEROUS_PREFIXES.get(head, frozenset()))
+        for arg in tokens[1:]
     ):
         return "dangerous-arg"
     # 凭证路径拦截（049）：优先级高于白名单——cat/head 等免确认命令读 .env
@@ -110,12 +144,41 @@ def _confirm_rule(command: str) -> str | None:
     if _has_credential_path(command):
         return "credential-path"
     if head in _WHITELIST_SIMPLE:
+        # ADR 071：白名单 basename 还要查真实路径——挡 PATH 注入的同名程序
+        # （~/.local/bin/echo 之类）。解析后不在 _SAFE_SYSTEM_DIRS 内 = 确认。
+        # 注意：这是 P1-3 评审修复①（带路径一律确认）的延伸——前者挡的是
+        # 「用户在仓库里写了 ./tools/echo 冒充系统 echo」，本层挡的是「用户在
+        # PATH 里放了 ~/.local/bin/echo 抢在 /bin/echo 前面」。两层补完 PATH
+        # 注入的两个入口；未解决的是「真改 /bin/echo 本身」——seatbelt 才是
+        # 那种情形的硬隔离（048）。
+        if not _basename_resolves_to_system(head):
+            return "not-whitelisted"
         return None
     if head == "git" and len(tokens) > 1 and tokens[1] in _GIT_READONLY:
+        if not _basename_resolves_to_system("git"):
+            return "not-whitelisted"
         return None
     if head in ("python", "python3") and tokens[1:3] == ["-m", "pytest"]:
         return None
     return "not-whitelisted"
+
+
+def _basename_resolves_to_system(head: str) -> bool:
+    """白名单 basename 的真实路径解析后是否落在公认系统目录里（ADR 071）。
+
+    `shutil.which` 按当前 PATH 顺序查找；realpath 解析 symlink 拿到最终落点。
+    shim/包装库（mise/asdf 的 ~/.local/share/.../bin/ls）→ realpath 跳到系统目录，
+    仍算安全；纯前端用户脚本（~/.local/bin/echo 不是 symlink）→ 落在用户目录，
+    直接挡。PATH 里压根找不到 → False（保守确认，宁多弹不错）。
+    """
+    real = shutil.which(head)
+    if real is None:
+        return False
+    try:
+        resolved = str(Path(real).resolve())
+    except OSError:
+        return False
+    return any(resolved.startswith(d + "/") for d in _SAFE_SYSTEM_DIRS)
 
 
 def needs_confirm(command: str) -> bool:

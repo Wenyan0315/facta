@@ -29,11 +29,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent.core.llm import LLM
-from agent.core.types import Message
-from agent.knowledge.graph import RELATIONS, GraphStore
-from agent.knowledge.loader import scan_notes
-from agent.knowledge.sync import DELETE_GUARD_RATIO, GUARD_MIN_FILES, file_hash
+from facta.core.llm import LLM
+from facta.core.types import Message
+from facta.knowledge.graph import RELATIONS, GraphStore
+from facta.knowledge.loader import scan_notes
+from facta.knowledge.sync import DELETE_GUARD_RATIO, GUARD_MIN_FILES, file_hash
 
 logger = logging.getLogger(__name__)
 

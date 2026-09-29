@@ -20,9 +20,9 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
-from agent.paths import MEMORY_WRITE_FENCE, WORKSPACE_ROOT
-from agent.tools.context import ToolContext
-from agent.tools.registry import Tool, ToolRegistry
+from facta.paths import MEMORY_WRITE_FENCE, WORKSPACE_ROOT
+from facta.tools.context import ToolContext
+from facta.tools.registry import Tool, ToolRegistry
 
 MAX_FILE_BYTES = 1024 * 1024      # 1MB：超限拒读拒写（防灌爆上下文/内存）
 DEFAULT_READ_LIMIT = 100          # read_file 默认窗口（037 P1：~100 行，配上下方余量指示）
@@ -246,7 +246,7 @@ def register_file_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         parameters={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "项目内相对路径，如 src/agent/loop.py 或 docs/architecture.md"},
+                "path": {"type": "string", "description": "项目内相对路径，如 src/facta/loop.py 或 docs/architecture.md"},
                 "offset": {"type": "integer", "description": "起始行号（从 1 起），默认 1"},
                 "limit": {"type": "integer", "description": "读取行数，默认 100"},
             },

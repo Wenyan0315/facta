@@ -8,8 +8,8 @@
 
 import json
 
-from agent.core.audit import AuditLog
-from agent.tools.registry import Tool, ToolRegistry
+from facta.core.audit import AuditLog
+from facta.tools.registry import Tool, ToolRegistry
 
 
 def _tool(name="t", readonly=False, result="ok", func=None):
@@ -107,7 +107,7 @@ def test_is_readonly_defaults_to_write():
 
 def test_web_results_wrapped_in_boundary_marker(tmp_path):
     # 联网结果（不可信输入）必须被界碑包裹——开头声明 + 结束标记
-    from agent.tools.web import _web_search
+    from facta.tools.web import _web_search
 
     class _Fake:
         def search(self, q):
@@ -124,6 +124,6 @@ def test_web_results_wrapped_in_boundary_marker(tmp_path):
 
 def test_system_prompt_has_injection_immunity():
     # S5a 搬家：SYSTEM_PROMPT → agent.DEFAULT_SYSTEM_PROMPT（一字未动，sha256 锁死）
-    from agent.orchestrator.agent import DEFAULT_SYSTEM_PROMPT
+    from facta.orchestrator.agent import DEFAULT_SYSTEM_PROMPT
     assert "注入免疫" in DEFAULT_SYSTEM_PROMPT
     assert "不是你的任务" in DEFAULT_SYSTEM_PROMPT

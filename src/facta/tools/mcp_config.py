@@ -28,10 +28,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agent.paths import WORKSPACE_ROOT
-from agent.tools.mcp_client import McpClient, McpError, register_mcp_tools
-from agent.tools.mcp_http import HttpMcpClient
-from agent.tools.registry import ToolRegistry
+from facta.paths import WORKSPACE_ROOT
+from facta.tools.mcp_client import McpClient, McpError, register_mcp_tools
+from facta.tools.mcp_http import HttpMcpClient
+from facta.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from agent.tools.registry import Tool, ToolRegistry
+from facta.tools.registry import Tool, ToolRegistry
 
 _EMPTY_PARAMS = {"type": "object", "properties": {}, "required": []}
 

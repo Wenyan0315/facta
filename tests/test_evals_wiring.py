@@ -5,7 +5,7 @@
 人工调用 build_kb 才炸。把「evals 可运行」钉成断言，这类断链当场暴露。
 """
 
-from agent.knowledge.knowledge_base import BagOfWordsEmbedder
+from facta.knowledge.knowledge_base import BagOfWordsEmbedder
 
 
 def test_evals_build_kb_runs():

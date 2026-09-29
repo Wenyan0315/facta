@@ -11,14 +11,14 @@
 
 import json
 
-from agent.core.llm import LLM, LLMUnavailableError, ScriptedLLM
-from agent.core.types import Message
-from agent.memory.store import Session
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.loop import RunResult, run_turn
-from agent.tools.context import ToolContext
-from agent.tools.registry import Tool, ToolRegistry
-from agent.tools.spawn import register_spawn_tools, spawn_subagent
+from facta.core.llm import LLM, LLMUnavailableError, ScriptedLLM
+from facta.core.types import Message
+from facta.memory.store import Session
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.loop import RunResult, run_turn
+from facta.tools.context import ToolContext
+from facta.tools.registry import Tool, ToolRegistry
+from facta.tools.spawn import register_spawn_tools, spawn_subagent
 
 
 def _call(name: str, args: dict) -> dict:

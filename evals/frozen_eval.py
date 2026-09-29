@@ -10,7 +10,7 @@
 隔离（P1-6 workspace-write 档的穷人版答案，零生产代码改动）：
   每个场景在**仓库外的干净导出**里跑：`git archive HEAD` 解包到 mkdtemp
   （见 `_export_head`）。子进程 `PYTHONPATH=<副本>/src` 压倒 editable 安装的
-  .pth —— 副本里 `import agent` 解析到副本，`WORKSPACE_ROOT` 随之指向副本，
+  .pth —— 副本里 `import facta` 解析到副本，`WORKSPACE_ROOT` 随之指向副本，
   notes/audit/sessions/todos/graph/vector_db 全族自动隔离。
   agent 真跑 `rm -rf` 炸的是副本，跑完 rmtree 零残留。
   为什么不是 `git worktree`（051 换掉）：worktree 副本住在主仓库内（`..` 可达），
@@ -89,17 +89,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from agent.core.audit import AuditLog
-from agent.core.llm import get_llm
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
-from agent.evalkit import parse_judge_json
-from agent.memory.store import Session
-from agent.orchestrator.assemble import assemble
-from agent.orchestrator.loop import _DSML_LEAK_MARKERS, run_turn
-from agent.tools.notes import WRITE_NOTE_REFUSAL
 from evals.baseline_agent import MAX_STEPS
 from evals.baseline_agent import run_scenario as run_baseline
+from facta.core.audit import AuditLog
+from facta.core.llm import get_llm
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
+from facta.evalkit import parse_judge_json
+from facta.memory.store import Session
+from facta.orchestrator.assemble import assemble
+from facta.orchestrator.loop import _DSML_LEAK_MARKERS, run_turn
+from facta.tools.notes import WRITE_NOTE_REFUSAL
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = Path(__file__).parent / "scenarios" / "frozen_real.jsonl"
@@ -506,7 +506,7 @@ def _prepare_copy(wt: Path) -> None:
 def _child_env(wt: Path) -> dict[str, str]:
     """子进程环境：PYTHONPATH 换被测代码，两个记忆/工具入口锚进副本。
 
-    `CORTEX_USER_MEMORY` 必须显式改指副本：用户级记忆默认住 `~/.personal-agent/`，
+    `FACTA_USER_MEMORY` 必须显式改指副本：用户级记忆默认住 `~/.facta/`，
     是唯一不随副本隔离的记忆层。不管它，开发者本机那份个人记忆会被 10 个
     场景静默继承，分数随机器而变（同时它也是场景 seed 记忆的唯一写入口）。
     """
@@ -514,7 +514,7 @@ def _child_env(wt: Path) -> dict[str, str]:
         **os.environ,
         "PYTHONPATH": f"{wt / 'src'}{os.pathsep}{REPO_ROOT}",
         "MCP_SERVERS": str(wt / "data" / "mcp-disabled.json"),
-        "CORTEX_USER_MEMORY": str(wt / "data" / "user-memory.md"),
+        "FACTA_USER_MEMORY": str(wt / "data" / "user-memory.md"),
     }
 
 

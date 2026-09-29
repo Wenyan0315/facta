@@ -4,10 +4,10 @@
 list_metas 组——那是 SessionStore 的职责，不再是归档清单的。）
 """
 
-from agent.core.llm import LLM, LLMUnavailableError, ScriptedLLM
-from agent.core.types import Message
-from agent.memory.store import Session
-from agent.memory.title import summarize_title
+from facta.core.llm import LLM, LLMUnavailableError, ScriptedLLM
+from facta.core.types import Message
+from facta.memory.store import Session
+from facta.memory.title import summarize_title
 
 
 class _UnavailableLLM(LLM):

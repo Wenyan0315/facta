@@ -17,13 +17,13 @@ from pathlib import Path
 
 import pytest
 
-from agent import paths as paths_mod
-from agent.core.audit import AuditLog
-from agent.tools import files as files_mod
-from agent.tools import sandbox
-from agent.tools.registry import Tool, ToolRegistry
-from agent.tools.sandbox import build_seatbelt_profile, detect_backend, wrap_command
-from agent.tools.terminal import _run_command
+from facta import paths as paths_mod
+from facta.core.audit import AuditLog
+from facta.tools import files as files_mod
+from facta.tools import sandbox
+from facta.tools.registry import Tool, ToolRegistry
+from facta.tools.sandbox import build_seatbelt_profile, detect_backend, wrap_command
+from facta.tools.terminal import _run_command
 
 HAS_SEATBELT = sys.platform == "darwin" and shutil.which("sandbox-exec") is not None
 seatbelt_only = pytest.mark.skipif(not HAS_SEATBELT, reason="需要 macOS sandbox-exec")
@@ -46,7 +46,7 @@ def _init_repo_outside_sandbox(root: Path) -> None:
 # ── 1. 后端检测 ──────────────────────────────────────────────
 
 def test_detect_backend_env_off(monkeypatch):
-    monkeypatch.setenv("CORTEX_SANDBOX", "off")
+    monkeypatch.setenv("FACTA_SANDBOX", "off")
     assert detect_backend() is None
 
 

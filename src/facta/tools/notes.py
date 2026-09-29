@@ -11,10 +11,10 @@ import re
 from datetime import date
 from pathlib import Path
 
-from agent.core.types import Message
-from agent.knowledge.knowledge_base import chunk_text, tokenize
-from agent.tools.context import ToolContext
-from agent.tools.registry import Tool, ToolRegistry
+from facta.core.types import Message
+from facta.knowledge.knowledge_base import chunk_text, tokenize
+from facta.tools.context import ToolContext
+from facta.tools.registry import Tool, ToolRegistry
 
 _EMPTY_PARAMS = {"type": "object", "properties": {}, "required": []}
 

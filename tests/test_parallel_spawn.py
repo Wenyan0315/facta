@@ -11,15 +11,15 @@ import json
 import threading
 import time
 
-from agent.core.llm import LLM
-from agent.core.types import Message
-from agent.memory.store import Session
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.loop import _split_tool_batches, run_turn
-from agent.server.run_store import STATUS_RUNNING, Run
-from agent.tools.context import ToolContext
-from agent.tools.registry import ToolRegistry
-from agent.tools.spawn import register_spawn_tools
+from facta.core.llm import LLM
+from facta.core.types import Message
+from facta.memory.store import Session
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.loop import _split_tool_batches, run_turn
+from facta.server.run_store import STATUS_RUNNING, Run
+from facta.tools.context import ToolContext
+from facta.tools.registry import ToolRegistry
+from facta.tools.spawn import register_spawn_tools
 
 
 class SlowLLM(LLM):
@@ -56,7 +56,7 @@ def _call(name: str, args: dict, idx: int = 0) -> dict:
 
 def _setup(sub_llm: LLM, main_script: list[Message]):
     """装配：registry（spawn）+ ctx（子链=sub_llm）+ 主链 ScriptedLLM。"""
-    from agent.core.llm import ScriptedLLM
+    from facta.core.llm import ScriptedLLM
 
     registry = ToolRegistry()
     ctx = ToolContext(notes_dir=None, llm=sub_llm)   # type: ignore[arg-type]

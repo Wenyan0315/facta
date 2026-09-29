@@ -7,7 +7,7 @@
 
 import pytest
 
-from agent.evalkit import (
+from facta.evalkit import (
     attribute_miss,
     is_relevant,
     parse_judge_json,

@@ -8,14 +8,14 @@
 FakeJev 注入，不依赖真实 API；pytest 全套在无 key 形态跑（CI 硬要求）。
 """
 
-from agent.core.jev import JevClient, RouteDecision, ScenarioRouter
-from agent.core.llm import LLM, StreamChunk
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
-from agent.memory.store import Session
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.loop import run_turn
-from agent.tools.registry import Tool, ToolRegistry
+from facta.core.jev import JevClient, RouteDecision, ScenarioRouter
+from facta.core.llm import LLM, StreamChunk
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
+from facta.memory.store import Session
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.loop import run_turn
+from facta.tools.registry import Tool, ToolRegistry
 
 
 class FakeJev:
@@ -224,10 +224,27 @@ def test_ledger_bill_includes_jev_lines():
 
 
 def test_deepseek_flash_in_providers():
-    from agent.core.llm import PROVIDERS
+    from facta.core.llm import PROVIDERS
     cfg = PROVIDERS["deepseek-flash"]
     assert cfg["model"] == "deepseek-flash"
     assert cfg["prefix"] == "DEEPSEEK"   # 与 deepseek 共 key：备用链按 prefix 去重
+
+
+def test_providers_table_lists_open_source_compat_set():
+    # ADR 070：开源分发时 PROVIDERS 表至少覆盖「+ OpenAI + 通义 + 智谱 + Moonshot」
+    # 四家——任一行缺失即视为「外部用户被逼改代码」的回归。
+    from facta.core.llm import PROVIDERS
+    expected = {"openai", "qwen", "zhipu", "moonshot"}
+    assert expected.issubset(PROVIDERS.keys()), (
+        f"缺失兼容供应商：{expected - PROVIDERS.keys()}"
+    )
+    # 每行必带 prefix/base_url/model 三个键（M7.5 价目允许缺）
+    for name in expected:
+        cfg = PROVIDERS[name]
+        assert "prefix" in cfg and "base_url" in cfg and "model" in cfg
+    # OpenAI / 通义 / 智谱 / Moonshot 都用独立 prefix（不与 siliconflow 共用）
+    prefixes = {PROVIDERS[n]["prefix"] for n in expected}
+    assert "SILICONFLOW" not in prefixes
 
 
 def test_jev_client_payload_shape(monkeypatch):

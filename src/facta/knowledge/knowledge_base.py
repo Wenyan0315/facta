@@ -15,7 +15,7 @@ import re
 from abc import ABC, abstractmethod
 from collections import Counter
 
-from agent.knowledge.vector_store import InMemoryVectorStore, SearchHit, VectorStore
+from facta.knowledge.vector_store import InMemoryVectorStore, SearchHit, VectorStore
 
 
 def tokenize(text: str) -> list[str]:
@@ -160,7 +160,25 @@ EMBED_PROVIDERS: dict[str, dict[str, str | float]] = {
         "min_score": 0.55,
         "price": 0.0,
     },
+    # ADR 070 开源兼容：OpenAI 官方 embedding。text-embedding-3-small 分数量纲
+    # 与 BGE-M3 不同，0.5 为保守起步值——换模型请重跑校准探针再调 min_score。
+    "openai": {
+        "prefix": "OPENAI",
+        "base_url": "https://api.openai.com/v1",
+        "model": "text-embedding-3-small",
+        "min_score": 0.5,
+        "price": 0.14,   # $0.02/百万，占位示例值
+    },
 }
+
+# 默认 embedding 供应商（ADR 070 前是写死的 "siliconflow"——作者偏好，不是架构
+# 约束）。FACTA_EMBED_PROVIDER 环境变量可覆盖；不配置时保持硅基默认，老行为不变。
+EMBED_PROVIDER_DEFAULT = "siliconflow"
+
+
+def configured_embed_provider() -> str:
+    """当前选用的 embedding 供应商名（assemble 与降级探测共用这一个真值源）。"""
+    return os.environ.get("FACTA_EMBED_PROVIDER", EMBED_PROVIDER_DEFAULT)
 
 
 def get_embedder(name: str = "bow", ledger=None) -> Embedder:
@@ -219,8 +237,8 @@ class KnowledgeBase:
 
 
 def demo() -> None:
-    from agent.knowledge.sync import sync_notes  # 函数内导入：sync 依赖本模块，避免循环
-    from agent.paths import (
+    from facta.knowledge.sync import sync_notes  # 函数内导入：sync 依赖本模块，避免循环
+    from facta.paths import (
         NOTES_DIR,  # P1-3 血案同款修复：demo 入口跑起来才炸的 NameError
     )
 

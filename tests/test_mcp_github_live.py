@@ -14,7 +14,7 @@ import subprocess
 
 import pytest
 
-from agent.tools.mcp_http import HttpMcpClient
+from facta.tools.mcp_http import HttpMcpClient
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PYTEST_LIVE_NETWORK") != "1",

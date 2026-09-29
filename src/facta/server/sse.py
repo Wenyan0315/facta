@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 
-from agent.server.run_store import SCHEMA_VERSION, RunEvent
+from facta.server.run_store import SCHEMA_VERSION, RunEvent
 
 
 def encode_sse(run_id: str, event: RunEvent) -> str:

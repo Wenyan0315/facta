@@ -22,10 +22,10 @@ from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
-from agent.core.llm import LLM, LLMUnavailableError, StreamChunk, merge_stream_chunks
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
-from agent.core.vector_math import cosine_similarity
+from facta.core.llm import LLM, LLMUnavailableError, StreamChunk, merge_stream_chunks
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
+from facta.core.vector_math import cosine_similarity
 
 logger = logging.getLogger(__name__)
 

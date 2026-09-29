@@ -1,4 +1,4 @@
-// Personal Agent Web 壳（S2b v1）——对话视图前端，零构建链
+// Facta Web 壳（S2b v1）——对话视图前端，零构建链
 
 const messagesEl = document.getElementById("messages");
 const inputEl = document.getElementById("input");

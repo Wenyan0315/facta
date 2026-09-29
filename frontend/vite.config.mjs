@@ -1,6 +1,6 @@
 // FW 站构建配置（021 裁定：Preact + Vite，任务视图试点）
 // - 多入口：tasks（后续页面渐进迁入 inputs）
-// - 产物落 src/agent/server/static/fw/（子目录隔离，不碰 vanilla 三件）
+// - 产物落 src/facta/server/static/fw/（子目录隔离，不碰 vanilla 三件）
 // - 无 hash 文件名：NoCacheStatic 已禁缓存，hash 只增 diff 噪声（产物进 git）
 // - dev proxy：/api 与共享静态资源转发到 FastAPI（8000），HMR 开发
 import { resolve } from "node:path";
@@ -11,7 +11,7 @@ export default defineConfig({
   plugins: [preact()],
   base: "/fw/", // 部署子路径：产物经 /fw/ 伺服，资源 URL 前缀必须一致
   build: {
-    outDir: "../src/agent/server/static/fw",
+    outDir: "../src/facta/server/static/fw",
     emptyOutDir: true,
     rollupOptions: {
       input: {

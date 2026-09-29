@@ -10,13 +10,13 @@ meta 三件豁免、空声明与无活跃计划放行、修订沉默继承/显�
 
 import json
 
-from agent.core.audit import AuditLog
-from agent.memory.plan import PlanBoard
-from agent.memory.store import Session
-from agent.tools.context import ToolContext
-from agent.tools.plan import format_view, plan_scope_check, register_plan_tools
-from agent.tools.registry import Tool, ToolRegistry
-from agent.tools.spawn import _worktree_registry
+from facta.core.audit import AuditLog
+from facta.memory.plan import PlanBoard
+from facta.memory.store import Session
+from facta.tools.context import ToolContext
+from facta.tools.plan import format_view, plan_scope_check, register_plan_tools
+from facta.tools.registry import Tool, ToolRegistry
+from facta.tools.spawn import _worktree_registry
 
 _P = {
     "type": "object",

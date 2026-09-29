@@ -12,11 +12,11 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
 
 if TYPE_CHECKING:  # 仅类型检查期导入：运行期由 get_llm 函数内导入（避免循环依赖）
-    from agent.core.gateway import GatewayConfig
+    from facta.core.gateway import GatewayConfig
 
 
 class LLMUnavailableError(RuntimeError):
@@ -430,6 +430,37 @@ PROVIDERS: dict[str, dict[str, str | float]] = {
         "price_in": 2.0,
         "price_out": 8.0,
     },
+    # —— 开源兼容轮（ADR 070）：主流 OpenAI 兼容供应商，加一行即用 ——
+    # 价目均为占位示例值，以各官网实时价为准；模型名为各自当前主力对话模型。
+    # 用别家中转商不必加行：{PREFIX}_BASE_URL / _MODEL 环境变量直接覆盖。
+    "openai": {
+        "prefix": "OPENAI",
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+        "price_in": 1.1,     # $0.15/百万，按 7.2 汇率折 ¥ 占位
+        "price_out": 4.3,    # $0.60/百万
+    },
+    "qwen": {
+        "prefix": "DASHSCOPE",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+        "price_in": 0.8,
+        "price_out": 2.0,
+    },
+    "zhipu": {
+        "prefix": "ZHIPU",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4-flash",
+        "price_in": 0.0,     # glm-4-flash 当前免费档
+        "price_out": 0.0,
+    },
+    "moonshot": {
+        "prefix": "MOONSHOT",
+        "base_url": "https://api.moonshot.cn/v1",
+        "model": "moonshot-v1-8k",
+        "price_in": 2.0,
+        "price_out": 10.0,
+    },
 }
 
 
@@ -448,7 +479,7 @@ def get_llm(
     with_mock_fallback=False（评测用）：不挂 mock 兜底——评估时主模型
     失败就大声抛异常，而不是被 mock 顶替静默污染分数。
     """
-    from agent.core.gateway import (  # 函数内导入：gateway 依赖本模块，避免循环
+    from facta.core.gateway import (  # 函数内导入：gateway 依赖本模块，避免循环
         FallbackLLM,
         GatewayConfig,
         RobustLLM,

@@ -12,13 +12,13 @@
 
 import json
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.memory.store import Session
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.checkpoint import CheckpointWriter, Ledger, heal, read_ledger
-from agent.orchestrator.loop import RunResult, run_turn
-from agent.tools.registry import Tool, ToolRegistry
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.memory.store import Session
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.checkpoint import CheckpointWriter, Ledger, heal, read_ledger
+from facta.orchestrator.loop import RunResult, run_turn
+from facta.tools.registry import Tool, ToolRegistry
 
 _NO_ARGS = {"type": "object", "properties": {}}
 

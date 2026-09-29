@@ -10,8 +10,8 @@
 
 from __future__ import annotations
 
-from agent.memory.todos import TodoStore
-from agent.tools.registry import Tool, ToolRegistry
+from facta.memory.todos import TodoStore
+from facta.tools.registry import Tool, ToolRegistry
 
 
 def _fmt(todos: list) -> str:

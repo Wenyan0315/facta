@@ -17,8 +17,8 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from agent.core.audit import AuditLog
-from agent.tools.sandbox import detect_backend
+from facta.core.audit import AuditLog
+from facta.tools.sandbox import detect_backend
 
 
 def _validate_args(args: dict, parameters: dict) -> str | None:

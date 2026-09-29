@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from agent.memory.consolidate import CATEGORIES, SCOPES
-from agent.memory.learned import read_learned
-from agent.paths import WORKSPACE_ROOT
-from agent.tools.mcp_client import McpCallError, McpClient, register_mcp_tools
-from agent.tools.mcp_config import load_server_specs
-from agent.tools.registry import ToolRegistry
+from facta.memory.consolidate import CATEGORIES, SCOPES
+from facta.memory.learned import read_learned
+from facta.paths import WORKSPACE_ROOT
+from facta.tools.mcp_client import McpCallError, McpClient, register_mcp_tools
+from facta.tools.mcp_config import load_server_specs
+from facta.tools.registry import ToolRegistry
 
 SERVER = Path(__file__).resolve().parents[1] / "servers" / "memory_server.py"
 
@@ -44,7 +44,7 @@ def client(memory_dirs):
         [sys.executable, str(SERVER)],
         env={
             "MCP_LEARNED_DIR": str(learned),        # 服务器侧的测试注入点
-            "CORTEX_USER_MEMORY": str(user),        # paths.user_memory_path() 的现成覆写点
+            "FACTA_USER_MEMORY": str(user),        # paths.user_memory_path() 的现成覆写点
         },
     )
     yield c

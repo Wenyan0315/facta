@@ -8,14 +8,14 @@
 
 import pytest
 
-from agent.tools.files import (
+from facta.tools.files import (
     _list_dir,
     _read_file,
     _search_code,
     _write_file,
     register_file_tools,
 )
-from agent.tools.registry import ToolRegistry
+from facta.tools.registry import ToolRegistry
 
 # ---------- workspace 围栏 ----------
 
@@ -44,7 +44,7 @@ def test_fence_rejects_sensitive_paths(path):
 
 
 def test_fence_allows_normal_project_files():
-    out = _read_file("src/agent/paths.py", offset=17)   # 常量定义区
+    out = _read_file("src/facta/paths.py", offset=17)   # 常量定义区
     assert "WORKSPACE_ROOT" in out
     assert "拒绝" not in out
 
@@ -166,7 +166,7 @@ def test_memory_write_fence_blocks_write_but_not_read(tmp_path):
 def test_file_tools_registered_with_levels():
     from pathlib import Path
 
-    from agent.tools.context import ToolContext
+    from facta.tools.context import ToolContext
 
     registry = ToolRegistry()
     register_file_tools(registry, ToolContext(notes_dir=Path("data/notes")))
@@ -179,8 +179,8 @@ def test_builtin_split_menu_unchanged():
     # time 1 件 + notes 3 件（条件注册的两对缺席）= 4 件，与拆分前语义一致
     from pathlib import Path as P
 
-    from agent.tools.builtin import register_builtin
-    from agent.tools.context import ToolContext
+    from facta.tools.builtin import register_builtin
+    from facta.tools.context import ToolContext
 
     registry = ToolRegistry()
     register_builtin(registry, ToolContext(notes_dir=P("data/notes")))

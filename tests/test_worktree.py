@@ -15,17 +15,17 @@ import subprocess
 
 import pytest
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.memory.store import Session
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.loop import run_turn
-from agent.tools.context import ToolContext
-from agent.tools.files import register_file_tools
-from agent.tools.registry import ToolRegistry
-from agent.tools.spawn import register_spawn_tools
-from agent.tools.terminal import register_terminal_tools
-from agent.tools.worktree import (
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.memory.store import Session
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.loop import run_turn
+from facta.tools.context import ToolContext
+from facta.tools.files import register_file_tools
+from facta.tools.registry import ToolRegistry
+from facta.tools.spawn import register_spawn_tools
+from facta.tools.terminal import register_terminal_tools
+from facta.tools.worktree import (
     cleanup_stale_worktrees,
     commit_and_merge_back,
     create_worktree,
@@ -42,7 +42,7 @@ def git_repo(tmp_path, monkeypatch):
     只 patch paths 不生效——S6a 开发实踩：测试的 worktree 建到了真项目里，
     垃圾 commit 混进 main）。files/terminal 的锚点走 ctx 注入不受影响。
     """
-    from agent.tools import worktree as wt_mod
+    from facta.tools import worktree as wt_mod
 
     monkeypatch.setattr(wt_mod, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(wt_mod, "WORKTREES_DIR", tmp_path / "data" / "worktrees")
@@ -166,7 +166,7 @@ def test_spawn_worktree_isolation_and_merge(git_repo):
     # 主分支拿到改动
     assert (git_repo / "feat.py").exists()
     # 沙箱清干净（读 patch 后的 WORKTREES_DIR；目录可能整个不存在=更干净）
-    from agent.tools.worktree import WORKTREES_DIR
+    from facta.tools.worktree import WORKTREES_DIR
     assert not WORKTREES_DIR.exists() or not any(WORKTREES_DIR.iterdir())
     # 主底片只有 spawn 结论一条 tool 消息（噪声隔离保持）
     tool_msgs = [m for m in session.messages if m.role == "tool"]
@@ -197,7 +197,7 @@ def test_spawn_worktree_reject_discards(git_repo):
 
     assert not (git_repo / "pwn.py").exists()
     assert _git_status(git_repo) == ""
-    from agent.tools.worktree import WORKTREES_DIR
+    from facta.tools.worktree import WORKTREES_DIR
     assert not WORKTREES_DIR.exists() or not any(WORKTREES_DIR.iterdir())
 
 
@@ -219,7 +219,7 @@ def test_spawn_worktree_no_changes_cleans_up(git_repo):
     run_turn(session, "看", agent=agent, llm=main_llm,
              on_confirm=lambda name, args: True)
 
-    from agent.tools.worktree import WORKTREES_DIR
+    from facta.tools.worktree import WORKTREES_DIR
     assert not WORKTREES_DIR.exists() or not any(WORKTREES_DIR.iterdir())
     tool_msgs = [m for m in session.messages if m.role == "tool"]
     assert "无文件改动" in tool_msgs[0].content

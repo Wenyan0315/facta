@@ -41,12 +41,25 @@ import json
 import os
 import re
 import shutil
+import threading
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from agent.core.types import Message
-from agent.memory.plan import PlanBoard
+from facta.core.types import Message
+from facta.memory.plan import PlanBoard
+
+# 跨进程文件锁（ADR 071）：macOS/Linux 可用 fcntl.flock，Windows 没这接口；
+# 缺平台降级到线程锁——进程内仍安全，但跨进程 create 同 sid 撞车不挡。
+# 评审已知 macOS 是沙箱目标平台，跨进程需求（CLI + Web 并发启动）真实存在，
+# 因此 flock 是程序性而非挂信号。
+try:
+    import fcntl
+
+    _HAS_FCNTL = True
+except ImportError:  # Windows
+    _HAS_FCNTL = False
 
 SESSION_VERSION = 1
 
@@ -99,9 +112,14 @@ def save_session(session: Session, path: Path) -> None:
     }
     # 临时文件与目标同目录（同文件系统）才能用 os.replace 原子换名。
     # 后缀 .tmp 不匹配 list_metas 的 `*.json` glob，半截临时文件不会混进会话清单。
+    # tmp 名带 uuid（P1-6 评审修复）：同 sid 的并发 save 会互踩同一个
+    # `<sid>.json.tmp`（后写的先 replace，先写的再 replace 旧内容——内容倒退；
+    # 更糟的是一个线程正在写时另一个已把它 replace 走，Windows 上还会句柄冲突）。
+    # 独占 tmp 后 os.replace 仍可能交错，但那是准入层该挡的（见 SessionStore 锁注记）；
+    # 本层至少保证「写半截的文件永远不会以正式名字出现」。
     # 不做 fsync：038 的威胁模型是「进程被杀」，内核 page cache 仍在；
     # 掉电持久化是另一档需求，等真踩到再加。
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)   # ensure_ascii=False：中文原样存，不变 \u 天书
     os.replace(tmp, path)
@@ -175,14 +193,34 @@ class SessionStore:
     五个操作 create/load/save/delete/list_metas 全是单文件级别的，
     没有跨文件的原子性要求——因为「一段对话只有一个物理副本」由位置唯一保证，
     不再由「先复制成功再删源」的顺序保证。
-    并发锁不在这一层：本类是无状态的门面（只持一个目录路径）。同一段对话的
-    并发写由上层的【准入】挡住——Web 是 RunStore 的会话内单锁 + 写操作对
-    in-flight 会话返 409（server/run_store.py、server/app.py），CLI 恒一个
-    会话且单线程。用策略代替锁：临界区是一整轮对话（几十秒），排队没有意义。
+    并发：同一段对话的并发写由上层的【准入】挡住——Web 是 RunStore 的会话内
+    单锁 + 写操作对 in-flight 会话返 409（server/run_store.py、server/app.py），
+    CLI 恒一个会话且单线程；用策略代替锁是因为临界区是一整轮对话（几十秒），
+    排队没有意义。**但 create 是例外（P1-6 评审修复）**：创建时还没有会话可让
+    RunStore 锁，Web 线程池里两个同秒请求会同时通过 _alloc_id 的「不存在」
+    检查、拿到同一个 id、互踩 tmp（评审实测只落一个文件 + FileNotFoundError）。
+    所以 create 全程持一把进程内 threading.Lock（锁域毫秒级，无排队压力）。
+    **ADR 071**：跨进程（CLI 与 Web 同时跑，或多 worker）会绕开线程锁——补一把
+    fcntl.flock 文件锁。Windows 没 fcntl → 跨进程仍撞车，挂信号记录（评审边界
+    一直说「沙箱仅 macOS」，跨平台本来是已知未铺）。lockfile 是临时文件，与
+    会话同目录（同一文件系统 flock 才有意义）。
     """
 
     def __init__(self, dir: Path) -> None:
         self._dir = dir
+        self._create_lock = threading.Lock()
+        self._create_lockfile = self._dir / ".create.lock"
+        # lockfile 不存在则创建——首次启动 _dir 可能尚未存在
+        self._create_lockfile.parent.mkdir(parents=True, exist_ok=True)
+        self._create_lockfile.touch(exist_ok=True)
+        # 永久持有 fd：POSIX 上 flock 在 fd 关闭时自动释放，必须跨临界区
+        # 持同一个 fd 才能让 LOCK_EX 真正生效。失败兜底= None
+        try:
+            self._lock_fd: int | None = os.open(
+                str(self._create_lockfile), os.O_RDWR | os.O_CREAT, 0o644
+            )
+        except OSError:
+            self._lock_fd = None
 
     @property
     def dir(self) -> Path:
@@ -241,11 +279,23 @@ class SessionStore:
         立即落盘（而非等第一次说话）是 S8a 的选择：id 一旦返回给前端就是身份，
         身份必须已经存在——否则「新建后刷新页面」会看到一个不存在的会话。
         代价是清单里可能留空壳，而空壳本来就该显示（见 list_metas）。
+        P1-6：分配 + 落盘整体持锁（同秒并发 create 曾拿到同一个 id——
+        「检查不存在」与写盘之间存在窗口，见类 docstring 的锁注记）。
+        ADR 071：再加一把 fcntl.flock 跨进程锁（macOS/Linux）。Windows 缺 fcntl
+        降级回线程锁——跨进程仍可能撞车（评审已知边界）。
         now 参数留给测试注入固定时刻。
         """
-        sid = self._alloc_id(now or datetime.now())
-        save_session(session, self._dir / f"{sid}.json")
-        return sid
+        with self._create_lock:
+            if _HAS_FCNTL and self._lock_fd is not None:
+                # flock 阻塞直到拿到；进程被杀 OS 自动释放
+                fcntl.flock(self._lock_fd, fcntl.LOCK_EX)
+            try:
+                sid = self._alloc_id(now or datetime.now())
+                save_session(session, self._dir / f"{sid}.json")
+                return sid
+            finally:
+                if _HAS_FCNTL and self._lock_fd is not None:
+                    fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
 
     def delete(self, sid: str) -> bool:
         path = self.path(sid)

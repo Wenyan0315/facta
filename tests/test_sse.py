@@ -2,8 +2,8 @@
 
 import json
 
-from agent.server.run_store import SCHEMA_VERSION, RunEvent
-from agent.server.sse import encode_heartbeat, encode_sse
+from facta.server.run_store import SCHEMA_VERSION, RunEvent
+from facta.server.sse import encode_heartbeat, encode_sse
 
 
 def _decode_data_line(sse_text: str) -> dict:

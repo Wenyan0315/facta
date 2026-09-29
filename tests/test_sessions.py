@@ -13,10 +13,10 @@ from datetime import datetime
 
 import pytest
 
-from agent.cli import EXIT_NEW, EXIT_QUIT, run_chat
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.memory.store import Session, SessionStore, derive_title, save_session
+from facta.cli import EXIT_NEW, EXIT_QUIT, run_chat
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.memory.store import Session, SessionStore, derive_title, save_session
 
 
 def _talked(first_user: str = "第一句话") -> Session:

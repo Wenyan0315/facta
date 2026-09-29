@@ -9,9 +9,9 @@ import os
 
 import pytest
 
-from agent.tools.mcp_client import register_mcp_tools
-from agent.tools.mcp_http import HttpMcpClient
-from agent.tools.registry import ToolRegistry
+from facta.tools.mcp_client import register_mcp_tools
+from facta.tools.mcp_http import HttpMcpClient
+from facta.tools.registry import ToolRegistry
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PYTEST_LIVE_NETWORK") != "1",

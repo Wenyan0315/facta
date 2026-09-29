@@ -20,13 +20,13 @@ SILICONFLOW API key；账单在结尾打印——评测本身的花费也入账�
 
 from dotenv import load_dotenv
 
-from agent.core.llm import get_llm
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
-from agent.evalkit import parse_judge_json  # 裁判输出解析自 evalkit 内核化（024）
-from agent.knowledge.knowledge_base import get_embedder
 from evals.dataset import CASES
 from evals.retrieval_eval import build_kb
+from facta.core.llm import get_llm
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
+from facta.evalkit import parse_judge_json  # 裁判输出解析自 evalkit 内核化（024）
+from facta.knowledge.knowledge_base import get_embedder
 
 CANDIDATE_MODEL = "deepseek"    # 被评 = 线上主模型
 JUDGE_MODEL = "siliconflow"     # 裁判 = 不同供应商（同家自评有自我偏好偏差）

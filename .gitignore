@@ -11,9 +11,10 @@ build/
 .venv/
 venv/
 
-# 环境与密钥
+# 环境与密钥（.env.example 是发布材料模板，必须入库）
 .env
 .env.*
+!.env.example
 
 # 运行时数据（对话记忆与向量库；data/notes 是语料资产，仍进库）
 data/memory/
@@ -40,11 +41,22 @@ data/notes/.provenance.json
 # 审查改写留痕 sidecar（064）：append-only 事件日志，同 053 的不入库理由
 data/learned/.review.jsonl
 
+# learned 记忆（ADR 070）：助手跑出来的个人记忆，属运行时数据非代码资产——
+# 开源分发不该自带「作者的偏好」。目录仍由代码自动创建，模板见
+# data/learned/constraints.example.md（示例文件入库）
+data/learned/*.md
+!data/learned/constraints.example.md
+
+# 内部文档（开源前脱敏与下沉，2026-09-29）：战略定位 / 私人使用台账 / 旧时代叙
+事评审快照 / 开源行动项诊断。文件留在本地但不进 git——避免公开护城河/产品判断
+/私人任务台账/外部专家对原作者的评价。文档如有重构后版本，再单独加入。
+docs/internal/
+
 # IDE / agent 工作区规则
 .trae/
 
 # 系统文件
 .DS_Store
 
-# Node（FW 站）：源码在 frontend/，构建产物落 src/agent/server/static/fw/（进 git）
+# Node（FW 站）：源码在 frontend/，构建产物落 src/facta/server/static/fw/（进 git）
 frontend/node_modules/

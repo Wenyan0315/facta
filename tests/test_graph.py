@@ -10,7 +10,7 @@
 
 import pytest
 
-from agent.knowledge.graph import GraphStore
+from facta.knowledge.graph import GraphStore
 
 
 def _demo_graph() -> GraphStore:

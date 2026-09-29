@@ -7,7 +7,7 @@ Chroma 内部是「距离」（= 1 - 相似度），换算封装在实现里—�
 
 import pytest
 
-from agent.knowledge.vector_store import (
+from facta.knowledge.vector_store import (
     ChromaVectorStore,
     InMemoryVectorStore,
     SearchHit,

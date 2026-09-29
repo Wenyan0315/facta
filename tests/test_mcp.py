@@ -16,13 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from agent.tools.mcp_client import (
+from facta.tools.mcp_client import (
     McpCallError,
     McpClient,
     McpError,
     register_mcp_tools,
 )
-from agent.tools.registry import Tool, ToolRegistry
+from facta.tools.registry import Tool, ToolRegistry
 
 SERVER = Path(__file__).resolve().parents[1] / "servers" / "notes_server.py"
 SDK_SERVER = Path(__file__).resolve().parents[1] / "servers" / "sdk_server.py"

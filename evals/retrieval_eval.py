@@ -26,14 +26,15 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from agent.evalkit import (
+from evals.dataset import CASES
+from facta.evalkit import (
     attribute_miss,
     is_relevant,
     precision_at_k,
     recall_at_k,
     reciprocal_rank,
 )
-from agent.knowledge.knowledge_base import (
+from facta.knowledge.knowledge_base import (
     BagOfWordsEmbedder,
     Embedder,
     KnowledgeBase,
@@ -41,9 +42,8 @@ from agent.knowledge.knowledge_base import (
     get_embedder,
     tokenize,
 )
-from agent.knowledge.sync import sync_notes
-from agent.paths import NOTES_DIR
-from evals.dataset import CASES
+from facta.knowledge.sync import sync_notes
+from facta.paths import NOTES_DIR
 
 TOP_K = 5        # 检索深度（评估参数）
 PROD_TOP_K = 3   # 与生产 search_notes 同参

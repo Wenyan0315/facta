@@ -8,10 +8,10 @@
 
 import pytest
 
-from agent.core.gateway import GatewayConfig, RobustLLM
-from agent.core.llm import LLM, get_llm
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
+from facta.core.gateway import GatewayConfig, RobustLLM
+from facta.core.llm import LLM, get_llm
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
 
 
 class UsageFakeLLM(LLM):

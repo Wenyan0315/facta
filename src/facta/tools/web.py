@@ -27,8 +27,8 @@ from urllib.parse import urlparse
 
 import httpx
 
-from agent.tools.context import ToolContext
-from agent.tools.registry import Tool, ToolRegistry
+from facta.tools.context import ToolContext
+from facta.tools.registry import Tool, ToolRegistry
 
 SEARCH_TIMEOUT = 10.0
 FETCH_TIMEOUT = 15.0

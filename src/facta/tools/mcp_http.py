@@ -26,7 +26,7 @@ import json
 
 import httpx
 
-from agent.tools.mcp_client import McpCallError, McpError, join_text_content
+from facta.tools.mcp_client import McpCallError, McpError, join_text_content
 
 
 class HttpMcpClient:
@@ -56,7 +56,7 @@ class HttpMcpClient:
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "personal-agent", "version": "0.9"},
+                "clientInfo": {"name": "facta", "version": "0.9"},
             },
         )
         self._notify("notifications/initialized", {})

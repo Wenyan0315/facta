@@ -36,17 +36,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from agent.core.llm import LLM
-from agent.core.types import Message
-from agent.memory.store import Session
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.loop import RunResult, run_turn
-from agent.tools.context import ToolContext
-from agent.tools.files import register_file_tools
-from agent.tools.plan import format_view
-from agent.tools.registry import Tool, ToolRegistry
-from agent.tools.terminal import register_terminal_tools
-from agent.tools.worktree import (
+from facta.core.llm import LLM
+from facta.core.types import Message
+from facta.memory.store import Session
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.loop import RunResult, run_turn
+from facta.tools.context import ToolContext
+from facta.tools.files import register_file_tools
+from facta.tools.plan import format_view
+from facta.tools.registry import Tool, ToolRegistry
+from facta.tools.terminal import register_terminal_tools
+from facta.tools.worktree import (
     commit_and_merge_back,
     create_worktree,
     discard_worktree,

@@ -22,7 +22,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from agent.paths import WORKSPACE_ROOT, WORKTREES_DIR
+from facta.paths import WORKSPACE_ROOT, WORKTREES_DIR
 
 _TIMEOUT = 30   # git 命令超时（本地操作，给足但不无限等）
 

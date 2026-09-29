@@ -39,16 +39,16 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from agent.core.llm import get_llm
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
-from agent.memory.store import Session, SessionStore
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
-from agent.orchestrator.loop import run_turn
-from agent.tools.context import ToolContext
-from agent.tools.registry import ToolRegistry
-from agent.tools.terminal import register_terminal_tools
+from facta.core.llm import get_llm
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
+from facta.memory.store import Session, SessionStore
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
+from facta.orchestrator.loop import run_turn
+from facta.tools.context import ToolContext
+from facta.tools.registry import ToolRegistry
+from facta.tools.terminal import register_terminal_tools
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = Path(__file__).parent / "scenarios" / "kill_resume.jsonl"
@@ -146,7 +146,7 @@ def _run_child(state: ChildState) -> int:
 
 
 def _spawn(state: ChildState, tmp: Path) -> subprocess.CompletedProcess[str]:
-    """起一个子进程跑一段。cwd=仓库根：`-m evals.resume_eval` 与 `import agent` 都靠它。"""
+    """起一个子进程跑一段。cwd=仓库根：`-m evals.resume_eval` 与 `import facta` 都靠它。"""
     state_path = tmp / f"state-{state.phase}.json"
     state.dump(state_path)
     try:

@@ -12,11 +12,11 @@
 
 import json
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.memory.consolidate import consolidate
-from agent.memory.learned import ORIGIN_TAG_PREFIX, origin_tag
-from agent.memory.store import Session
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.memory.consolidate import consolidate
+from facta.memory.learned import ORIGIN_TAG_PREFIX, origin_tag
+from facta.memory.store import Session
 
 
 def _session(dialogue: list[Message], summary: str | None = None, upto: int = 1) -> Session:
@@ -52,7 +52,7 @@ def test_full_pipeline_writes_and_reports(tmp_path):
     llm = ScriptedLLM(script)
     session = _session(_dialogue())
 
-    report = consolidate(session, llm, tmp_path / "learned")
+    report, _ = consolidate(session, llm, tmp_path / "learned")
 
     assert "新增 1 条" in report
     decisions = (tmp_path / "learned" / "decisions.md").read_text(encoding="utf-8")
@@ -80,7 +80,7 @@ def test_reviewer_drops_fabricated_entries(tmp_path):
     llm = ScriptedLLM(script)
     session = _session(_dialogue())
 
-    report = consolidate(session, llm, tmp_path / "learned")
+    report, _ = consolidate(session, llm, tmp_path / "learned")
 
     assert "新增 1 条" in report
     assert "驳回 1 条" in report
@@ -113,10 +113,11 @@ def test_bad_json_is_graceful(tmp_path):
     llm = ScriptedLLM([Message(role="assistant", content="这绝不是 JSON")])
     session = _session(_dialogue())
 
-    report = consolidate(session, llm, tmp_path / "learned")
+    report, ok = consolidate(session, llm, tmp_path / "learned")
 
     assert "无法解析" in report
     assert "坏 JSON" in report
+    assert ok is False   # P2-7：可重试失败，调用方不得推进固化游标
     assert not (tmp_path / "learned").exists()
 
 
@@ -125,7 +126,7 @@ def test_empty_array_means_explicitly_nothing(tmp_path):
     llm = ScriptedLLM([Message(role="assistant", content="```json\n[]\n```")])
     session = _session(_dialogue())
 
-    report = consolidate(session, llm, tmp_path / "learned")
+    report, _ = consolidate(session, llm, tmp_path / "learned")
 
     assert "无条目可沉淀" in report
     assert len(llm.calls) == 1   # 明确无产出 → 不白烧第二次（审查）调用
@@ -144,9 +145,10 @@ def test_review_bad_json_stops_before_disk(tmp_path):
     llm = ScriptedLLM(script)
     session = _session(_dialogue())
 
-    report = consolidate(session, llm, tmp_path / "learned")
+    report, ok = consolidate(session, llm, tmp_path / "learned")
 
     assert "审查输出无法解析" in report
+    assert ok is False   # P2-7：同上，游标不推进、下轮重烧
     assert not (tmp_path / "learned").exists()
 
 
@@ -177,7 +179,7 @@ def test_no_new_dialogue_skips_without_llm_call(tmp_path):
     session = _session(_dialogue())
 
     # since = 全部消息数 → 之后没有任何 user 消息（启动即退出的场景）
-    report = consolidate(session, llm, tmp_path / "learned", since=len(session.messages))
+    report, _ = consolidate(session, llm, tmp_path / "learned", since=len(session.messages))
 
     assert "跳过复盘" in report
     assert llm.calls == []   # 一次 LLM 调用都没发生——不白烧钱
@@ -195,7 +197,7 @@ def test_entries_are_capped_and_deduped(tmp_path):
     llm = ScriptedLLM(script)
     session = _session(_dialogue())
 
-    report = consolidate(session, llm, tmp_path / "learned")
+    report, _ = consolidate(session, llm, tmp_path / "learned")
 
     assert "新增 5 条" in report
     lines = (tmp_path / "learned" / "constraints.md").read_text(encoding="utf-8").strip().splitlines()
@@ -225,7 +227,7 @@ def test_user_scope_splits_to_user_md(tmp_path):
     session = _session(_dialogue())
     user_md = tmp_path / "personal" / "user.md"
 
-    report = consolidate(session, llm, tmp_path / "learned", user_memory_path=user_md)
+    report, _ = consolidate(session, llm, tmp_path / "learned", user_memory_path=user_md)
 
     assert "新增 2 条" in report and "用户级 1 条" in report
     constraints = (tmp_path / "learned" / "constraints.md").read_text(encoding="utf-8")
@@ -241,7 +243,7 @@ def test_user_scope_dropped_when_unconfigured(tmp_path):
     llm = ScriptedLLM(_both_scope_script())
     session = _session(_dialogue())
 
-    report = consolidate(session, llm, tmp_path / "learned", user_memory_path=None)
+    report, _ = consolidate(session, llm, tmp_path / "learned", user_memory_path=None)
 
     assert "新增 1 条" in report
     assert "1 条用户级候选因未配置位置丢弃" in report
@@ -269,7 +271,7 @@ def test_sensitive_entries_never_land(tmp_path):
     llm = ScriptedLLM(script)
     session = _session(_dialogue())
 
-    report = consolidate(session, llm, tmp_path / "learned", user_memory_path=tmp_path / "u.md")
+    report, _ = consolidate(session, llm, tmp_path / "learned", user_memory_path=tmp_path / "u.md")
 
     assert "新增 1 条" in report   # 只剩合法条目
     for md in list((tmp_path / "learned").glob("*.md")) + [tmp_path / "u.md"]:
@@ -340,7 +342,7 @@ def test_unverified_lessons_become_candidates(tmp_path):
     llm = ScriptedLLM(script)
     session = _session(_dialogue())
 
-    report = consolidate(session, llm, tmp_path / "learned")
+    report, _ = consolidate(session, llm, tmp_path / "learned")
 
     assert "新增 2 条" in report
     assert "已验证 1 条" in report
@@ -368,7 +370,7 @@ def test_all_candidates_reported_when_nothing_written(tmp_path):
     llm = ScriptedLLM(script)
     session = _session(_dialogue())
 
-    report = consolidate(session, llm, tmp_path / "learned")
+    report, _ = consolidate(session, llm, tmp_path / "learned")
 
     assert "未写入" in report
     assert "降为候选（待确认）" in report
@@ -393,7 +395,7 @@ def test_perishable_facts_blocked_but_reported(tmp_path):
     script = [Message(role="assistant", content=entries)] * 2
     llm = ScriptedLLM(script)
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
     assert "循环体在 loop.py" in other          # 稳定条目照常入库
@@ -420,7 +422,7 @@ def test_perishable_gate_does_not_overreach(tmp_path):
     script = [Message(role="assistant", content=entries)] * 2
     llm = ScriptedLLM(script)
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     assert "新增 4 条" in report
     assert "易腐" not in report
@@ -513,7 +515,7 @@ def test_enum_keep_takes_extract_original(tmp_path):
         [{"id": "e1", "verdict": "keep", "content": "审查回抄的漂移版本"}],
     ))
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     assert "新增 1 条" in report
     other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
@@ -529,7 +531,7 @@ def test_enum_edit_stores_edited_and_logs_sidecar(tmp_path):
         [{"id": "e1", "verdict": "edit", "content": "忠实化后的原句"}],
     ))
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned", sid="0009")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned", sid="0009")
 
     other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
     assert "忠实化后的原句" in other and "冗长" not in other
@@ -551,7 +553,7 @@ def test_enum_edit_sensitive_content_still_blocked(tmp_path):
           "content": "用户的 key 是 sk-abc123def456ghi789jkl012"}],
     ))
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     assert "未写入" in report                    # 敏感闸拦下，零入库
     assert "经审查修改已留痕" in report           # 改写事件本身仍被记录
@@ -574,7 +576,7 @@ def test_hallucinated_id_and_unruled_dropped(tmp_path):
         ],
     ))
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
     assert "有裁决的条目" in other
@@ -591,7 +593,7 @@ def test_illegal_verdict_drops(tmp_path):
         [{"id": "e1", "verdict": "maybe"}],
     ))
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     assert "1 条裁决非法（非 keep/drop/edit），按 drop 处置" in report
     assert "未写入" in report
@@ -604,7 +606,7 @@ def test_edit_without_content_drops(tmp_path):
         [{"id": "e1", "verdict": "edit"}],
     ))
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     assert "1 条 edit 缺改后正文" in report
     assert "未写入" in report
@@ -618,7 +620,7 @@ def test_old_format_review_widely_accepted(tmp_path):
         [{"category": "other", "content": "旧格式审查照抄条目", "verified": True}],
     ))
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     assert "新增 1 条" in report
     assert "审查输出为旧格式" in report
@@ -637,7 +639,7 @@ def test_missing_extract_ids_minted_positionally(tmp_path):
         [{"id": "e1", "verdict": "keep"}, {"id": "e2", "verdict": "drop"}],
     ))
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     assert "新增 1 条" in report
     other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
@@ -652,7 +654,7 @@ def test_review_can_only_demote_verification(tmp_path):
         [{"id": "e1", "verdict": "keep", "verified": False}],
     ))
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     assert "未写入" in report
     assert "1 条教训缺客观背书降为候选（待确认）" in report
@@ -670,7 +672,7 @@ def test_duplicate_extract_id_dropped(tmp_path):
         [{"id": "e1", "verdict": "keep"}],
     ))
 
-    report = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
 
     assert "1 条萃取条目 id 重复，已弃" in report
     other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")

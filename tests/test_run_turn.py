@@ -5,19 +5,19 @@ user 消息留底片、返回 None。差别只在 cancelled 是 Run 级终态（
 error 已由内核发事件。
 """
 
-from agent.core.jev import RouteDecision
-from agent.core.llm import LLM, ScriptedLLM, StreamChunk
-from agent.core.types import Message
-from agent.memory.store import Session
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.loop import (
+from facta.core.jev import RouteDecision
+from facta.core.llm import LLM, ScriptedLLM, StreamChunk
+from facta.core.types import Message
+from facta.memory.store import Session
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.loop import (
     RunResult,
     _is_dsml_leak,
     _merge_with_leak_guard,
     _salvage_dsml_leak,
     run_turn,
 )
-from agent.tools.registry import Tool, ToolRegistry
+from facta.tools.registry import Tool, ToolRegistry
 
 
 def _bare_agent() -> Agent:

@@ -12,8 +12,8 @@
 
 import pytest
 
-from agent.knowledge.sync import file_hash
-from agent.tools.notes import human_edited_notes, resolve_note_path
+from facta.knowledge.sync import file_hash
+from facta.tools.notes import human_edited_notes, resolve_note_path
 
 # ---------- 围栏本体：纯函数层（避开 HTTP 客户端的路径规范化） ----------
 
@@ -47,17 +47,17 @@ def _client(monkeypatch, tmp_path, *, kb=None):
     """最小 AppContext + NOTES_DIR 指向临时目录（与 test_learned 同款隔离）。"""
     from fastapi.testclient import TestClient
 
-    from agent.core.llm import ScriptedLLM
-    from agent.core.types import Message
-    from agent.memory.store import SessionStore
-    from agent.orchestrator.agent import Agent
-    from agent.orchestrator.assemble import AppContext
-    from agent.server.app import create_app
-    from agent.tools.registry import ToolRegistry
+    from facta.core.llm import ScriptedLLM
+    from facta.core.types import Message
+    from facta.memory.store import SessionStore
+    from facta.orchestrator.agent import Agent
+    from facta.orchestrator.assemble import AppContext
+    from facta.server.app import create_app
+    from facta.tools.registry import ToolRegistry
 
     notes_dir = tmp_path / "notes"
     notes_dir.mkdir()
-    monkeypatch.setattr("agent.server.app.NOTES_DIR", notes_dir)
+    monkeypatch.setattr("facta.server.app.NOTES_DIR", notes_dir)
 
     ctx = AppContext(
         provider="mock",

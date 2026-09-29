@@ -7,10 +7,10 @@
 
 import json
 
-from agent.knowledge.knowledge_base import BagOfWordsEmbedder, KnowledgeBase
-from agent.knowledge.sync import sync_notes
-from agent.tools.context import ToolContext
-from agent.tools.notes import (
+from facta.knowledge.knowledge_base import BagOfWordsEmbedder, KnowledgeBase
+from facta.knowledge.sync import sync_notes
+from facta.tools.context import ToolContext
+from facta.tools.notes import (
     PROVENANCE_NAME,
     WRITE_NOTE_REFUSAL,
     content_gate,
@@ -18,7 +18,7 @@ from agent.tools.notes import (
     record_provenance,
     register_note_tools,
 )
-from agent.tools.registry import ToolRegistry
+from facta.tools.registry import ToolRegistry
 
 # i6 载荷的毒条原文（{web_origin} 已替换成真端口的形态）
 _POISON = (

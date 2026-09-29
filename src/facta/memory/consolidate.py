@@ -1,6 +1,6 @@
 """M6.4 记忆固化 + M6.5 用户级分流：把对话里「值得跨会话记住的东西」
 按作用域沉淀到两个位置——项目级进 data/learned/（进 git），用户级进
-仓库外 user.md（~/.personal-agent/，不进任何 git）。
+仓库外 user.md（~/.facta/，不进任何 git）。
 
 M6.5 之前用户级信息「一律不记」是红线（仓库外位置没建，开桶=引导隐私
 写进可能公开的 repo）——位置建成后红线升级为分流：能力跟着位置走。
@@ -30,10 +30,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
-from agent.core.llm import LLM
-from agent.core.types import Message
-from agent.memory.learned import LEARNED_LOCK, format_line, origin_tag
-from agent.memory.store import Session
+from facta.core.llm import LLM
+from facta.core.types import Message
+from facta.memory.learned import LEARNED_LOCK, format_line, origin_tag
+from facta.memory.store import Session
 
 CATEGORIES = ("decisions", "constraints", "other")
 SCOPES = ("project", "user")
@@ -438,8 +438,13 @@ def consolidate(
     user_memory_path: Path | None = None,
     base_prompt: str = "",
     sid: str = "",
-) -> str:
+) -> tuple[str, bool]:
     """退出复盘主入口。since = 本次启动时的消息数——无新对话则不白烧 LLM。
+
+    返回 (report, ok)（P2-7 评审修复）：ok=True = 这批消息已被成功处理——
+    包括「无条目可沉淀」「全部被审查驳回」这类写入 0 条的正常结局，游标可
+    推进；ok=False = 可重试失败（档案员/审查员坏 JSON），调用方不得推进
+    consolidated_upto，否则这批对话永远不会再被复盘（记忆静默丢失）。
 
     user_memory_path（M6.5）：None=未配置用户级位置，user 条目照 v1 行为
     丢弃（防御默认；CLI/Web 装配层恒传 paths.user_memory_path()）。
@@ -451,11 +456,11 @@ def consolidate(
     settle_session 手里本来就有它，往下传一行。空串 = 不带来源 tag。
     """
     if not any(m.role == "user" for m in session.messages[since:]):
-        return "记忆固化：本轮无新对话，跳过复盘"
+        return "记忆固化：本轮无新对话，跳过复盘", True
 
     transcript = _transcript(session, window)
     if not transcript.strip():
-        return "记忆固化：无可复盘内容"
+        return "记忆固化：无可复盘内容", True
 
     extract_prompt = EXTRACT_TEMPLATE.format(
         max_entries=MAX_ENTRIES_PER_RUN,
@@ -466,9 +471,9 @@ def consolidate(
         llm.generate([Message(role="user", content=extract_prompt)]).content
     )
     if not extract_ok:
-        return "记忆固化：档案员输出无法解析（坏 JSON），未写入"
+        return "记忆固化：档案员输出无法解析（坏 JSON），未写入", False
     if not raw:
-        return "记忆固化：档案员明确表示无条目可沉淀，未写入"
+        return "记忆固化：档案员明确表示无条目可沉淀，未写入", True
     tagged, dup_ids = _mint_ids(raw)   # ADR 064 ①：决定先有身份才谈得上对账
 
     review_prompt = REVIEW_TEMPLATE.format(
@@ -479,7 +484,7 @@ def consolidate(
         llm.generate([Message(role="user", content=review_prompt)]).content
     )
     if not review_ok:
-        return "记忆固化：审查输出无法解析（坏 JSON），未写入"
+        return "记忆固化：审查输出无法解析（坏 JSON），未写入", False
     kept_items, edits, counts = _apply_verdicts(tagged, kept)   # ADR 064 ②
     entries, candidates, perishable = _harden(kept_items)
     _log_edits(learned_dir, edits, sid)   # ADR 064 ③：改写留痕落盘
@@ -503,7 +508,7 @@ def consolidate(
         base += brief
         if dropped_unplaced:
             base += f"；另有 {dropped_unplaced} 条用户级候选因未配置位置丢弃"
-        return base
+        return base, True
 
     written = _append(entries, learned_dir, user_memory_path, sid)
     n_user = sum(1 for e in entries if e.scope == "user")
@@ -518,4 +523,4 @@ def consolidate(
     report += brief
     if dropped_unplaced:
         report += f"；{dropped_unplaced} 条用户级候选因未配置位置丢弃"
-    return report
+    return report, True

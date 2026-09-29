@@ -1,9 +1,9 @@
 """M7.5c 缓存验收：精确档（同输入命中/LRU/副本隔离）+ 语义档（相似复用/保守条件）。"""
 
-from agent.core.gateway import GatewayConfig, RobustLLM, SemanticCacheLLM
-from agent.core.llm import LLM
-from agent.core.telemetry import UsageLedger
-from agent.core.types import Message
+from facta.core.gateway import GatewayConfig, RobustLLM, SemanticCacheLLM
+from facta.core.llm import LLM
+from facta.core.telemetry import UsageLedger
+from facta.core.types import Message
 
 
 class CountingLLM(LLM):

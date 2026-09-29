@@ -12,14 +12,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.memory.store import Session, SessionStore
-from agent.memory.todos import TodoStore
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.assemble import AppContext, ensure_persona
-from agent.server.app import create_app
-from agent.tools.registry import ToolRegistry
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.memory.store import Session, SessionStore
+from facta.memory.todos import TodoStore
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.assemble import AppContext, ensure_persona
+from facta.server.app import create_app
+from facta.tools.registry import ToolRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -32,8 +32,8 @@ def _isolate_disk_state(tmp_path, monkeypatch):
     仓库由 _make_ctx 注入一次性 tmp 目录，这里补还住在模块级的路径常量
     （app.LEARNED_DIR 供记忆面板端点，assemble.LEARNED_DIR 供收官固化）。
     """
-    monkeypatch.setattr("agent.server.app.LEARNED_DIR", tmp_path / "learned")
-    monkeypatch.setattr("agent.orchestrator.assemble.LEARNED_DIR", tmp_path / "learned")
+    monkeypatch.setattr("facta.server.app.LEARNED_DIR", tmp_path / "learned")
+    monkeypatch.setattr("facta.orchestrator.assemble.LEARNED_DIR", tmp_path / "learned")
 
 
 def _make_ctx(reply: str = "你好！", llm=None, registry=None) -> AppContext:
@@ -142,7 +142,7 @@ def test_messages_endpoint_filters_to_storyline():
 
 
 def test_runs_list_newest_first_and_filter_by_session():
-    from agent.server.run_store import STATUS_COMPLETED, RunStore
+    from facta.server.run_store import STATUS_COMPLETED, RunStore
 
     run_store = RunStore()
     old = run_store.create(title="会话A的任务", session_id="20260913-101956")
@@ -219,6 +219,148 @@ def test_settle_sets_llm_title():
     assert ctx.store.load(sid).title == "PHP 工具封装"   # 不是首句截断
 
 
+# ---------- 收官容错（P1-5/P2-7 评审修复：固化失败不拖死对话保存） ----------
+
+import facta.orchestrator.assemble as asm  # noqa: E402  # settle 的 monkeypatch 靶子
+from facta.memory.store import derive_title  # noqa: E402
+
+
+def _dialogue(n: int = 3) -> Session:
+    s = Session()
+    for i in range(n):
+        s.messages.append(Message(role="user", content=f"第{i}句"))
+        s.messages.append(Message(role="assistant", content=f"答{i}"))
+    return s
+
+
+def test_settle_saves_dialog_even_if_consolidate_crashes(tmp_path, monkeypatch):
+    """评审故障注入复现：固化抛异常曾把 store.save 一起拖死——已回答的
+    文本在刷新后消失。修复后对话本体先保底落盘，游标不动、报告异常。
+    """
+    store = SessionStore(tmp_path / "sessions")
+    session = _dialogue()
+    sid = store.create(Session())
+    monkeypatch.setattr(asm, "CONSOLIDATE_THRESHOLD", 1)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("固化模型炸了")
+
+    monkeypatch.setattr(asm, "consolidate", _boom)
+
+    report = asm.settle_session(session, sid, store, ScriptedLLM([]))
+
+    saved = store.load(sid)
+    assert len(saved.messages) == len(session.messages)   # 对话本体没丢
+    assert "异常中断" in report
+    assert saved.consolidated_upto == 0                   # 游标未推进，下轮重试
+
+
+def test_settle_keeps_cursor_when_consolidate_reports_failure(tmp_path, monkeypatch):
+    # P2-7：consolidate 返回 (report, False)（坏 JSON）——游标不推进，
+    # 否则这批对话永远不会再被复盘（记忆静默丢失）
+    store = SessionStore(tmp_path / "sessions")
+    session = _dialogue()
+    sid = store.create(Session())
+    monkeypatch.setattr(asm, "CONSOLIDATE_THRESHOLD", 1)
+    monkeypatch.setattr(asm, "consolidate", lambda *a, **k: ("记忆固化：坏 JSON，未写入", False))
+
+    asm.settle_session(session, sid, store, ScriptedLLM([]))
+
+    assert store.load(sid).consolidated_upto == 0
+
+
+def test_settle_advances_cursor_on_success(tmp_path, monkeypatch):
+    # 正常路径（含「全驳回/无条目」这类 ok=True 的零写入结局）：游标推进并落盘
+    store = SessionStore(tmp_path / "sessions")
+    session = _dialogue()
+    sid = store.create(Session())
+    monkeypatch.setattr(asm, "CONSOLIDATE_THRESHOLD", 1)
+    monkeypatch.setattr(asm, "consolidate", lambda *a, **k: ("记忆固化：新增 1 条", True))
+
+    asm.settle_session(session, sid, store, ScriptedLLM([]))
+
+    assert store.load(sid).consolidated_upto == len(session.messages)
+
+
+def test_settle_title_failure_falls_back_to_first_line(tmp_path, monkeypatch):
+    # 标题提炼（LLM）失败：退回首句派生，照样保存——标题是增益不是本体
+    store = SessionStore(tmp_path / "sessions")
+    session = _dialogue(1)
+    sid = store.create(Session())
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("标题炸了")
+
+    monkeypatch.setattr(asm, "summarize_title", _boom)
+
+    asm.settle_session(session, sid, store, ScriptedLLM([]))
+
+    assert store.load(sid).title == derive_title(session)
+
+
+# ---------- 语义 RAG 降级判定（P1-1 评审修复） ----------
+
+def test_rag_degrades_without_siliconflow_key(monkeypatch):
+    # 评审复现：只配 DEEPSEEK key 时 assemble 曾崩在 embedder 构造
+    #（RuntimeError 缺少 SILICONFLOW_API_KEY）——README 承诺不装 [rag]
+    # 也能跑。现在缺 key 降级词袋，主聊天不受影响。
+    monkeypatch.delenv("FACTA_EMBED_PROVIDER", raising=False)
+    monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+    assert asm._rag_missing_reason("deepseek") == "缺 SILICONFLOW_API_KEY"
+
+
+def test_rag_degrades_without_chromadb(monkeypatch):
+    # sys.modules 里挂 None = import 必炸（CPython 语义），环境无关地模拟
+    # 「没装 [rag] extra」
+    import sys
+    monkeypatch.delenv("FACTA_EMBED_PROVIDER", raising=False)
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "sk-test")
+    monkeypatch.setitem(sys.modules, "chromadb", None)
+    assert asm._rag_missing_reason("deepseek") == "未安装 [rag] 依赖（chromadb）"
+
+
+def test_rag_teaching_providers_never_degrade_report():
+    # 教学组合本来就词袋：不算「降级」，不产生误导性日志
+    assert asm._rag_missing_reason("mock") is None
+
+
+# ---------- 兼容多家供应商（ADR 070 开源兼容轮） ----------
+
+
+def test_rag_key_follows_configured_embed_provider(monkeypatch):
+    # ADR 070：FACTA_EMBED_PROVIDER=openai 时，缺 OPENAI_API_KEY 才报缺 key，
+    # 不会再说「缺 SILICONFLOW_API_KEY」——硅基不再是硬编码。
+    from facta.knowledge.knowledge_base import EMBED_PROVIDERS
+    monkeypatch.setenv("FACTA_EMBED_PROVIDER", "openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+    reason = asm._rag_missing_reason("deepseek")
+    assert reason == f"缺 {EMBED_PROVIDERS['openai']['prefix']}_API_KEY"
+
+
+def test_rag_rejects_unknown_embed_provider(monkeypatch):
+    # FACTA_EMBED_PROVIDER 拼错时给清晰提示（含可选清单），不静默走错路径
+    monkeypatch.setenv("FACTA_EMBED_PROVIDER", "bogus-llm")
+    reason = asm._rag_missing_reason("deepseek")
+    assert reason is not None and "bogus-llm" in reason and "siliconflow" in reason
+
+
+def test_rag_openai_key_unlocks_full_path(monkeypatch):
+    # OPENAI_API_KEY 配齐 + chromadb 在 = 不再降级（回归实证：
+    # embedder 装配改走 configured_embed_provider 后还能识别「已配齐」）
+    import sys
+    monkeypatch.setenv("FACTA_EMBED_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.delitem(sys.modules, "chromadb", raising=False)
+    # 探依赖：缺 chromadb 的测试分支不能影响「key 已配齐」的判定
+    try:
+        import chromadb  # noqa: F401
+        assert asm._rag_missing_reason("deepseek") is None
+    except ImportError:
+        # 测试环境没装 [rag]：降级词袋是正确行为；本断言变成「配置已识别」
+        assert asm._rag_missing_reason("deepseek") == "未安装 [rag] 依赖（chromadb）"
+
+
 # ---------- S8a 会话 CRUD（身份=文件名，无 active 特例） ----------
 
 
@@ -273,7 +415,7 @@ def test_write_endpoints_409_while_session_running():
     # 准入策略代替锁：worker 整轮独占这段对话（load→改→save），此时任何外部
     # 写都会在 worker 落盘时被覆盖（lost update）。与其用锁把写排队到几十秒后，
     # 不如直接 409 告诉用户「这段对话正在被写」。
-    from agent.server.run_store import STATUS_RUNNING, RunStore
+    from facta.server.run_store import STATUS_RUNNING, RunStore
 
     ctx = _make_ctx()
     sid = ctx.store.create(Session())
@@ -293,7 +435,7 @@ def test_write_endpoints_409_while_session_running():
 
 def test_ensure_persona_three_branches():
     # 装配不变量：会话必须带 agent 的 system_prompt 开工——Web 入口曾跑过无人设会话
-    from agent.orchestrator.agent import DEFAULT_SYSTEM_PROMPT
+    from facta.orchestrator.agent import DEFAULT_SYSTEM_PROMPT
 
     agent = Agent(name="test", system_prompt=DEFAULT_SYSTEM_PROMPT, registry=ToolRegistry())
 
@@ -311,13 +453,23 @@ def test_ensure_persona_three_branches():
     assert [m.role for m in legacy.messages] == ["system", "user"]
     assert legacy.summarized_upto == 4
 
-    # 正常会话（已有 system）：不动
+    # 正常会话（已有 system 且与 agent 一致）：不动
     normal = Session()
-    normal.messages.append(Message(role="system", content="人设"))
+    normal.messages.append(Message(role="system", content=DEFAULT_SYSTEM_PROMPT))
     normal.messages.append(Message(role="user", content="你好"))
     ensure_persona(normal, agent)
     assert len(normal.messages) == 2
-    assert normal.messages[0].content == "人设"
+    assert normal.messages[0].content == DEFAULT_SYSTEM_PROMPT
+
+    # system 过期（P1-4 评审修复）：就地刷新——旧会话头部的快照不是记忆真值，
+    # 记忆面板改/删后旧快照必须让位，否则被删的记忆仍进 payload
+    stale = Session()
+    stale.messages.append(Message(role="system", content="过期人设+旧记忆快照"))
+    stale.messages.append(Message(role="user", content="你好"))
+    stale.summarized_upto = 2   # 替换只动 content 不动位置：游标必须原样
+    ensure_persona(stale, agent)
+    assert stale.messages[0].content == DEFAULT_SYSTEM_PROMPT
+    assert stale.summarized_upto == 2
 
 
 def test_ensure_persona_merges_duplicate_system_messages():
@@ -328,7 +480,9 @@ def test_ensure_persona_merges_duplicate_system_messages():
     s.summarized_upto = 4
     ensure_persona(s, Agent(name="test", system_prompt="人设X", registry=ToolRegistry()))
     assert [m.role for m in s.messages] == ["system", "user"]
-    assert s.messages[0].content == "人设A"   # 保留第一条
+    # P1-4：合并保留第一条是去重语义；随后照第三分支刷新为 agent 当前 prompt
+    # （合并的旧快照同样是过期快照，无保留价值）
+    assert s.messages[0].content == "人设X"
     assert s.summarized_upto == 2              # 4 - 2 条重复
 
 
@@ -371,7 +525,7 @@ def test_todos_update_and_delete_api():
 
 def test_cancel_interrupts_running_run():
     # 用注入的 store 造一个正在运行的 Run——避免真线程跑太快、cancel 追不上的竞态
-    from agent.server.run_store import STATUS_RUNNING, RunStore
+    from facta.server.run_store import STATUS_RUNNING, RunStore
 
     store = RunStore()
     run = store.create_if_idle("20260913-101956")
@@ -428,8 +582,8 @@ def test_confirm_endpoint_409_without_pending_404_unknown_run():
 def test_confirm_approve_flow_end_to_end(tmp_path):
     # 全链路：worker 挂起 → POST confirm(approve) → 命令真执行 → run 完成
     # 副作用验证（审计佐证思路）：看文件落没落地，不看模型嘴说
-    from agent.tools.context import ToolContext
-    from agent.tools.terminal import register_terminal_tools
+    from facta.tools.context import ToolContext
+    from facta.tools.terminal import register_terminal_tools
 
     registry = ToolRegistry()
     register_terminal_tools(registry, ToolContext(notes_dir=tmp_path, workspace_root=tmp_path))
@@ -449,8 +603,8 @@ def test_confirm_approve_flow_end_to_end(tmp_path):
 
 def test_confirm_reject_flow_end_to_end(tmp_path):
     # 拒绝不炸会话：拒绝提示作为工具结果回灌，模型收尾回答，run 正常完成
-    from agent.tools.context import ToolContext
-    from agent.tools.terminal import register_terminal_tools
+    from facta.tools.context import ToolContext
+    from facta.tools.terminal import register_terminal_tools
 
     registry = ToolRegistry()
     register_terminal_tools(registry, ToolContext(notes_dir=tmp_path, workspace_root=tmp_path))
@@ -473,7 +627,7 @@ def test_confirm_reject_flow_end_to_end(tmp_path):
 
 def _graph_ctx() -> AppContext:
     """带预填图的 ctx：两个实体一条边——panels 数据返回的最小非空样本。"""
-    from agent.knowledge.graph import GraphStore
+    from facta.knowledge.graph import GraphStore
 
     ctx = _make_ctx()
     graph = GraphStore()
@@ -501,8 +655,8 @@ def test_graph_rebuild_forces_full_resync(tmp_path, monkeypatch):
     # 「重建图谱」= force 全量：清空指纹 → sync_graph。internal_llm 是
     # ScriptedLLM([])（抽取输出非法 JSON → failed），但端点行为可断言：
     # 指纹被清空（force 生效）、report/stats 结构返回、失败不记指纹
-    import agent.server.app as app_module
-    from agent.knowledge.graph import GraphStore
+    import facta.server.app as app_module
+    from facta.knowledge.graph import GraphStore
 
     notes = tmp_path / "notes"
     notes.mkdir()

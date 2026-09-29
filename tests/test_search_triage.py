@@ -8,12 +8,12 @@
 
 import json
 
-from agent.knowledge.graph import GraphStore
-from agent.knowledge.knowledge_base import BagOfWordsEmbedder, KnowledgeBase
-from agent.knowledge.sync import sync_notes
-from agent.tools.context import ToolContext
-from agent.tools.notes import register_note_tools
-from agent.tools.registry import ToolRegistry
+from facta.knowledge.graph import GraphStore
+from facta.knowledge.knowledge_base import BagOfWordsEmbedder, KnowledgeBase
+from facta.knowledge.sync import sync_notes
+from facta.tools.context import ToolContext
+from facta.tools.notes import register_note_tools
+from facta.tools.registry import ToolRegistry
 
 
 def _registry(tmp_path, *, with_graph=True):

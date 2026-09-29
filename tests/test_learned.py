@@ -10,12 +10,15 @@
 
 import pytest
 
-from agent.memory.learned import (
+from facta.memory.learned import (
     delete_line,
+    delete_line_by_id,
     format_line,
+    make_id,
     read_learned,
     render,
     update_line,
+    update_line_by_id,
     visible_text,
 )
 
@@ -89,23 +92,23 @@ def test_delete_line_keeps_rest(tmp_path):
 def _client(monkeypatch, tmp_path):
     """最小 AppContext + LEARNED_DIR 指向临时目录（与 test_app 同款隔离模式）。
 
-    user 桶也一并隔离（CORTEX_USER_MEMORY，041 的现成注入点）：面板端点把
+    user 桶也一并隔离（FACTA_USER_MEMORY，041 的现成注入点）：面板端点把
     user 当第四个伪 category，路径走 paths.user_memory_path()——不隔离就会
     读真 home 的隐私文件，且断言「列出的条目集」会被开发机上的真实用户级
     记忆污染（2026-09-29 实爆：首条真实用户记忆落盘后本测试翻红）。
     """
     from fastapi.testclient import TestClient
 
-    from agent.core.llm import ScriptedLLM
-    from agent.core.types import Message
-    from agent.memory.store import SessionStore
-    from agent.orchestrator.agent import Agent
-    from agent.orchestrator.assemble import AppContext
-    from agent.server.app import create_app
-    from agent.tools.registry import ToolRegistry
+    from facta.core.llm import ScriptedLLM
+    from facta.core.types import Message
+    from facta.memory.store import SessionStore
+    from facta.orchestrator.agent import Agent
+    from facta.orchestrator.assemble import AppContext
+    from facta.server.app import create_app
+    from facta.tools.registry import ToolRegistry
 
-    monkeypatch.setattr("agent.server.app.LEARNED_DIR", tmp_path)
-    monkeypatch.setenv("CORTEX_USER_MEMORY", str(tmp_path / "user.md"))
+    monkeypatch.setattr("facta.server.app.LEARNED_DIR", tmp_path)
+    monkeypatch.setenv("FACTA_USER_MEMORY", str(tmp_path / "user.md"))
 
     ctx = AppContext(
         provider="mock",
@@ -166,11 +169,11 @@ def test_api_guards(monkeypatch, tmp_path):
 # ---------- 041：用户级分栏 ----------
 
 def test_learned_path_user_follows_env(monkeypatch, tmp_path):
-    """user 的路径走 paths.user_memory_path()——与 agent 注入侧同源（CORTEX_USER_MEMORY）。"""
-    from agent.server.app import PANEL_CATEGORIES, _learned_path
+    """user 的路径走 paths.user_memory_path()——与 agent 注入侧同源（FACTA_USER_MEMORY）。"""
+    from facta.server.app import PANEL_CATEGORIES, _learned_path
 
-    monkeypatch.setattr("agent.server.app.LEARNED_DIR", tmp_path)
-    monkeypatch.setenv("CORTEX_USER_MEMORY", str(tmp_path / "user.md"))
+    monkeypatch.setattr("facta.server.app.LEARNED_DIR", tmp_path)
+    monkeypatch.setenv("FACTA_USER_MEMORY", str(tmp_path / "user.md"))
     assert _learned_path("user") == tmp_path / "user.md"
     assert _learned_path("constraints") == tmp_path / "constraints.md"
     assert PANEL_CATEGORIES == ("decisions", "constraints", "other", "user")
@@ -184,7 +187,7 @@ def test_api_user_scope_roundtrip(monkeypatch, tmp_path):
     project = tmp_path / "constraints.md"
     project.write_text("- [2026-09-13] 项目甲\n", encoding="utf-8")
     before = project.read_bytes()
-    monkeypatch.setenv("CORTEX_USER_MEMORY", str(user_md))
+    monkeypatch.setenv("FACTA_USER_MEMORY", str(user_md))
     client = _client(monkeypatch, tmp_path)
 
     listed = client.get("/api/learned").json()
@@ -202,7 +205,7 @@ def test_api_user_scope_roundtrip(monkeypatch, tmp_path):
 
 
 def test_api_user_scope_missing_file_and_guards(monkeypatch, tmp_path):
-    monkeypatch.setenv("CORTEX_USER_MEMORY", str(tmp_path / "never-created.md"))
+    monkeypatch.setenv("FACTA_USER_MEMORY", str(tmp_path / "never-created.md"))
     client = _client(monkeypatch, tmp_path)
 
     # 新用户：固化管线还没写出 user.md → 空栏，不是错误
@@ -231,6 +234,74 @@ def test_origin_tag_lands_on_disk_but_not_in_prompt(tmp_path):
     assert (e.tags, e.content) == (("[固化:0001]",), "用 BGE-M3")
     assert render(e) == "- [2026-09-13] 用 BGE-M3"
     assert visible_text(e) == "用 BGE-M3"     # 面板也看不见它，要看就去磁盘看原行
+
+
+# ---------- ADR 071：稳定 id 落盘 + by-id 增改删 ----------
+
+
+def test_make_id_is_deterministic():
+    # 同一 (date, content, seq) → 同一 id；内容变 → id 变
+    a = make_id("2026-09-29", "测试", 1)
+    b = make_id("2026-09-29", "测试", 1)
+    c = make_id("2026-09-29", "测试改", 1)
+    d = make_id("2026-09-29", "测试", 2)
+    assert a == b
+    assert a != c       # content 变 → id 变
+    assert a != d       # seq 变 → id 变（防御同秒同内容撞车）
+    assert len(a) == 8  # 8 字节 hex
+
+
+def test_id_round_trip(tmp_path):
+    """id 写入落盘后 read_learned 能解析回来；老格式行 id=None 不破坏。"""
+    new = format_line("2026-09-29", [], "新内容", id="abcd1234")
+    legacy = format_line("2026-09-13", [], "老格式无 id")     # 不传 id → 不写注释
+    path = _write(tmp_path, new + "\n" + legacy + "\n")
+
+    e1, e2 = read_learned(path)
+    assert e1.id == "abcd1234" and e1.content == "新内容"
+    assert e2.id is None and e2.content == "老格式无 id"     # 向后兼容：老文件没 id
+
+
+def test_update_by_id_preserves_id(tmp_path):
+    # id 在 edit 时保留（避免 hash 重算导致外部链接失效）
+    path = _write(tmp_path, format_line("2026-09-29", [], "原内容", id="abcd1234") + "\n")
+    update_line_by_id(path, "abcd1234", "改后内容")
+    e = read_learned(path)[0]
+    assert e.id == "abcd1234"
+    assert e.content == "改后内容"
+    assert "abcd1234" in path.read_text()    # 尾注释仍存
+
+
+def test_delete_by_id_works_and_misses_raise(tmp_path):
+    p = format_line("2026-09-29", [], "保留", id="aaaabbbb")
+    q = format_line("2026-09-29", [], "删除目标", id="ccccdddd")
+    path = _write(tmp_path, p + "\n" + q + "\n")
+
+    delete_line_by_id(path, "ccccdddd")
+    lines = read_learned(path)
+    assert len(lines) == 1
+    assert lines[0].id == "aaaabbbb"
+
+    # id 不存在 → KeyError（API 层转 404）
+    with pytest.raises(KeyError):
+        delete_line_by_id(path, "deadbeef")
+    with pytest.raises(KeyError):
+        update_line_by_id(path, "deadbeef", "应该不写")
+
+
+def test_id_stable_across_concurrent_delete(tmp_path):
+    """评审边界复现——两标签页拿同一 id 删不同行：各删各的，行号错位也不互相干扰。"""
+    p = format_line("2026-09-29", [], "甲", id="aaaa1111")
+    q = format_line("2026-09-29", [], "乙", id="bbbb2222")
+    r = format_line("2026-09-29", [], "丙", id="cccc3333")
+    path = _write(tmp_path, p + "\n" + q + "\n" + r + "\n")
+
+    # 模拟：tab1 在 t0 读到三行 id={aaaa, bbbb, cccc}；tab2 删了 bbbb；tab1 按 id 删 cccc
+    delete_line_by_id(path, "bbbb2222")    # tab2 的删除
+    delete_line_by_id(path, "cccc3333")    # tab1 按 id 删除（不再是「按行号 2」——行号变了）
+
+    lines = read_learned(path)
+    assert [(e.id, e.content) for e in lines] == [("aaaa1111", "甲")]
 
 
 def test_visible_tags_render_in_order(tmp_path):

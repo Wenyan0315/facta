@@ -11,14 +11,14 @@
 
 import json
 
-from agent.core.llm import LLM, LLMUnavailableError, ScriptedLLM
-from agent.core.types import Message
-from agent.memory.plan import StepStatus
-from agent.memory.store import Session
-from agent.tools.context import ToolContext
-from agent.tools.plan import register_plan_tools
-from agent.tools.registry import ToolRegistry
-from agent.tools.spawn import _FORBIDDEN, register_spawn_tools
+from facta.core.llm import LLM, LLMUnavailableError, ScriptedLLM
+from facta.core.types import Message
+from facta.memory.plan import StepStatus
+from facta.memory.store import Session
+from facta.tools.context import ToolContext
+from facta.tools.plan import register_plan_tools
+from facta.tools.registry import ToolRegistry
+from facta.tools.spawn import _FORBIDDEN, register_spawn_tools
 
 
 class FailLLM(LLM):

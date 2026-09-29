@@ -8,9 +8,9 @@
 
 import pytest
 
-from agent.tools.context import ToolContext
-from agent.tools.registry import ToolRegistry
-from agent.tools.web import (
+from facta.tools.context import ToolContext
+from facta.tools.registry import ToolRegistry
+from facta.tools.web import (
     _fetch_web,
     _parse_bocha,
     _web_search,
@@ -102,7 +102,7 @@ def test_parse_bocha_empty_payload():
 
 def test_get_web_search_priority(monkeypatch):
     # 优先级：BOCHA > TAVILY > None（不上菜单）
-    from agent.tools.web import BochaSearch, TavilySearch
+    from facta.tools.web import BochaSearch, TavilySearch
 
     monkeypatch.delenv("BOCHA_API_KEY", raising=False)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
@@ -139,7 +139,7 @@ def test_fetch_web_rejects_domain_resolving_to_private(monkeypatch):
         def __getitem__(self, i): return self._addr
 
     monkeypatch.setattr(
-        "agent.tools.web.socket.getaddrinfo",
+        "facta.tools.web.socket.getaddrinfo",
         lambda host, port: [(0, 0, 0, "", ("10.66.66.66", 0))],
     )
     with pytest.raises(ValueError, match="内网"):
@@ -148,7 +148,7 @@ def test_fetch_web_rejects_domain_resolving_to_private(monkeypatch):
     # 对照：解析到公网 IP 放行到 HTTP 层（用不存在的 TLD 让请求失败，
     # 证明过了栅栏——错误不再是 ValueError）
     monkeypatch.setattr(
-        "agent.tools.web.socket.getaddrinfo",
+        "facta.tools.web.socket.getaddrinfo",
         lambda host, port: [(0, 0, 0, "", ("93.184.216.34", 0))],
     )
     with pytest.raises(Exception) as exc_info:
@@ -158,7 +158,7 @@ def test_fetch_web_rejects_domain_resolving_to_private(monkeypatch):
 
 def test_fetch_web_truncates_long_text(monkeypatch):
     # 假 HTTP 层：返回超长正文 → 截到 8000 + 标记
-    from agent.tools import web
+    from facta.tools import web
 
     class _FakeResp:
         def __enter__(self): return self

@@ -9,9 +9,9 @@
 
 import json
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
 from evals.baseline_agent import run_scenario
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
 
 
 def _ordering(command: str) -> Message:

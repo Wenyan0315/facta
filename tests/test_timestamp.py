@@ -6,10 +6,10 @@
 
 from datetime import datetime
 
-from agent.cli import EXIT_QUIT, run_chat
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.orchestrator.loop import _time_stamp
+from facta.cli import EXIT_QUIT, run_chat
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.orchestrator.loop import _time_stamp
 
 
 def test_time_stamp_format():

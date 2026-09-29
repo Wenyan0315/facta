@@ -1,10 +1,10 @@
 """跨工具编号一致性：search_history 与 read_history 必须共享同一套 #编号坐标系。"""
 
-from agent.core.types import Message
-from agent.paths import NOTES_DIR
-from agent.tools.builtin import register_builtin
-from agent.tools.context import ToolContext
-from agent.tools.registry import ToolRegistry
+from facta.core.types import Message
+from facta.paths import NOTES_DIR
+from facta.tools.builtin import register_builtin
+from facta.tools.context import ToolContext
+from facta.tools.registry import ToolRegistry
 
 
 def _make_registry(history: list[Message]) -> ToolRegistry:

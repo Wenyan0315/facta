@@ -3,7 +3,7 @@
 对外出口，内部 agent 不消费它（注入仍走 system prompt 快照，见 044 第 4 节）。
 与 notes_server 的两点有意差异：
 
-1. **import agent 源码**（notes_server 是零依赖自包含）——行格式解析、白名单、
+1. **import facta 源码**（notes_server 是零依赖自包含）——行格式解析、白名单、
    路径锚必须单份真值，复制进来就是两个真值源（044 第 3 节）。代价：必须用仓库
    venv 的解释器拉起（`.venv/bin/python servers/memory_server.py`）。
 2. **只读**：写路径 `memory_add` 未实现，挂触发信号「tombstone 删除语义落地 +
@@ -20,9 +20,9 @@ import os
 import sys
 from pathlib import Path
 
-from agent.memory.consolidate import CATEGORIES, SCOPES
-from agent.memory.learned import read_learned, render, visible_text
-from agent.paths import LEARNED_DIR, user_memory_path
+from facta.memory.consolidate import CATEGORIES, SCOPES
+from facta.memory.learned import read_learned, render, visible_text
+from facta.paths import LEARNED_DIR, user_memory_path
 
 # 项目级记忆目录。默认值取 paths.LEARNED_DIR（单份真值），env 覆写只是测试注入
 # 点——子进程里 monkeypatch 够不着，与 notes_server 的 MCP_SANDBOX_DIR 同款理由。
@@ -36,7 +36,7 @@ ENTRY_FORMAT = "- [YYYY-MM-DD] {[已验证] }{[手改] }内容"
 def _bucket(category: str) -> Path:
     """category → 文件，与记忆面板 `app._learned_path` 同口径。
 
-    user 桶走 `user_memory_path()`（函数而非常量：CORTEX_USER_MEMORY 覆写点在
+    user 桶走 `user_memory_path()`（函数而非常量：FACTA_USER_MEMORY 覆写点在
     paths.py，面板与注入侧同源，这里也不能自己拼路径）。
     """
     if category == "user":

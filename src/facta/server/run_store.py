@@ -190,7 +190,7 @@ class RunStore:
     def __init__(self, max_in_flight: int = 1) -> None:
         # S8a：并发上限。默认 1 = S2b 起的老语义（全进程只跑一个 Run），
         # 直接构造 RunStore() 的调用方行为不变；服务端从
-        # CORTEX_MAX_CONCURRENT_RUNS 注入更大的值以支持「长任务期间另开会话聊」。
+        # FACTA_MAX_CONCURRENT_RUNS 注入更大的值以支持「长任务期间另开会话聊」。
         self._runs: dict[str, Run] = {}
         self._max_in_flight = max(1, int(max_in_flight))
         self._lock = threading.Lock()   # 保护 _runs 与「准入」检查+创建的原子性

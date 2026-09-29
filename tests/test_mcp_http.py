@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from agent.tools.mcp_client import McpCallError, McpError, register_mcp_tools
-from agent.tools.mcp_http import HttpMcpClient
-from agent.tools.registry import ToolRegistry
+from facta.tools.mcp_client import McpCallError, McpError, register_mcp_tools
+from facta.tools.mcp_http import HttpMcpClient
+from facta.tools.registry import ToolRegistry
 
 SERVER = Path(__file__).resolve().parents[1] / "servers" / "http_demo_server.py"
 

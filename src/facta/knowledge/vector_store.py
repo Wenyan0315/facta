@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agent.core.vector_math import (
+from facta.core.vector_math import (
     cosine_similarity,  # M7.5c：余弦搬到 core 地基，跨层消费
 )
 

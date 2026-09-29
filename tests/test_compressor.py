@@ -4,9 +4,9 @@
 修过一次就再也不踩。（devix 评审：问题 2「测试节奏完全缺位」）
 """
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.memory.compressor import (
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.memory.compressor import (
     build_payload,
     maybe_compress,
     trim_incomplete_round,

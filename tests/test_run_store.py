@@ -7,7 +7,7 @@ S8a 增补：单锁口径收窄到「一段对话一把」+ 全局并发上限�
 import threading
 import time
 
-from agent.server.run_store import (
+from facta.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_RUNNING,

@@ -6,21 +6,21 @@
 
 import json
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.memory.plan import PlanBoard
-from agent.memory.store import Session, load_session, save_session
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.loop import run_turn
-from agent.tools.context import ToolContext
-from agent.tools.registry import Tool, ToolRegistry
-from agent.tools.spawn import register_spawn_tools
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.memory.plan import PlanBoard
+from facta.memory.store import Session, load_session, save_session
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.loop import run_turn
+from facta.tools.context import ToolContext
+from facta.tools.registry import Tool, ToolRegistry
+from facta.tools.spawn import register_spawn_tools
 
 # ---------- R1：读边界 ----------
 
 
 def test_read_notes_rejects_path_escape(tmp_path):
-    from agent.tools.builtin import register_builtin
+    from facta.tools.builtin import register_builtin
 
     notes = tmp_path / "notes"
     notes.mkdir()
@@ -39,7 +39,7 @@ def test_read_notes_rejects_path_escape(tmp_path):
 
 
 def test_search_code_skips_env_files(tmp_path):
-    from agent.tools import files as files_mod
+    from facta.tools import files as files_mod
 
     (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=sk-secret123", encoding="utf-8")
     (tmp_path / "code.py").write_text("password = 'plain-in-code'", encoding="utf-8")
@@ -54,7 +54,7 @@ def test_search_code_skips_env_files(tmp_path):
 
 
 def test_event_map_emits_dot_names():
-    from agent.server.app import _EVENT_MAP
+    from facta.server.app import _EVENT_MAP
 
     assert _EVENT_MAP["tool_started"] == "tool.started"
     assert _EVENT_MAP["tool_result"] == "tool.result"
@@ -103,7 +103,7 @@ def test_switch_restores_plan_from_archive(tmp_path):
 
 
 def test_spawn_default_subset_excludes_history_tools():
-    from agent.tools.spawn import _FORBIDDEN
+    from facta.tools.spawn import _FORBIDDEN
 
     assert {"search_history", "read_history"} <= _FORBIDDEN
 
@@ -136,7 +136,7 @@ def test_spawn_menu_never_contains_history_tools():
 
 
 def test_run_store_broadcasts_to_all_subscribers():
-    from agent.server.run_store import RunStore
+    from facta.server.run_store import RunStore
 
     store = RunStore()
     run = store.create()

@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from agent.core.telemetry import UsageLedger
+from facta.core.telemetry import UsageLedger
 
 logger = logging.getLogger(__name__)
 

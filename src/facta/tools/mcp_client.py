@@ -31,10 +31,10 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from agent.tools.registry import Tool, ToolRegistry
+from facta.tools.registry import Tool, ToolRegistry
 
 if TYPE_CHECKING:  # 仅类型检查期导入：HttpMcpClient 与 stdio 版接口同构（运行期鸭子类型）
-    from agent.tools.mcp_http import HttpMcpClient
+    from facta.tools.mcp_http import HttpMcpClient
 
 
 class McpError(RuntimeError):
@@ -109,7 +109,7 @@ class McpClient:
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "personal-agent", "version": "0.9"},
+                "clientInfo": {"name": "facta", "version": "0.9"},
             },
         )
         self._notify("notifications/initialized", {})

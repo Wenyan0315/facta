@@ -13,9 +13,9 @@ import json
 
 import pytest
 
-from agent.core.audit import AuditLog
-from agent.tools.registry import Tool, ToolRegistry
-from agent.tools.terminal import (
+from facta.core.audit import AuditLog
+from facta.tools.registry import Tool, ToolRegistry
+from facta.tools.terminal import (
     WORKSPACE_ROOT,
     _confirm_rule,
     _run_command,
@@ -27,7 +27,7 @@ from agent.tools.terminal import (
 
 @pytest.mark.parametrize("command", [
     "ls -la",
-    "cat src/agent/paths.py",
+    "cat src/facta/paths.py",
     "grep -r def src/",
     "git status",
     "git log --oneline -5",
@@ -35,10 +35,7 @@ from agent.tools.terminal import (
     "git show HEAD",
     "python -m pytest tests/ -q",
     "python3 -m pytest -q",
-    "pytest -q",
-    "rg 'def run_turn' src/",
     "echo hello",
-    "/usr/bin/git status",            # 绝对路径 → 取 basename 判白名单
     # 参数级校验的回归侧（S4 评审 #17）：干净参数不误伤
     "find . -name *.py",
     "find tests/ -type f",
@@ -47,6 +44,35 @@ from agent.tools.terminal import (
 ])
 def test_whitelisted_commands_skip_confirm(command):
     assert needs_confirm(command) is False
+
+
+# ADR 071：白名单 basename + 真实路径必须在 _SAFE_SYSTEM_DIRS 内才免确认。
+# 裸 `pytest` 不在 PATH 里 = which None = 保守确认；开发用 `python -m pytest`
+# 走另一条免确认分支（test_whitelisted_commands_skip_confirm 已覆盖）。
+# `rg` 在本机 PATH 找到的是 IDE 自带 ripgrep（@vscode/ripgrep）——不在
+# 系统目录里，按规要确认；如需 rg 在 PATH 注入场景下做端到端跑进
+# /usr/local/bin/rg（Homebrew）才会免确认。
+@pytest.mark.parametrize("command", [
+    "pytest -q",               # PATH 缺 pytest 时 which=None → 保守确认
+    "rg 'def run_turn' src/",  # 真实路径在 IDE 自带 ripgrep（@vscode）目录 → 不在系统目录
+])
+def test_whitelisted_basename_outside_system_dirs_requires_confirm(command):
+    # ADR 071：白名单只是第一步——真实路径解析后必须在 _SAFE_SYSTEM_DIRS 内
+    # 才算「PATH 里那个公认只读的程序」。PATH 注入（~/.local/bin/echo）或
+    # IDE 携带的非系统目录命令（Trae 自带 ripgrep）都走这条确认。
+    assert needs_confirm(command) is True
+
+
+# P1-3 评审修复①：程序带路径不再享受 basename 免确认——白名单的语义是
+# 「PATH 里那个公认只读的程序」，./tools/echo、bin/evil 证明不了自己是它。
+# 绝对路径调用只读命令多弹一次确认，不值得为省这次点击赌程序来源。
+@pytest.mark.parametrize("command", [
+    "/usr/bin/git status",
+    "./tools/echo hello",             # 评审实测用例：仓库内同名程序冒充系统 echo
+    "bin/custom-ls -la",
+])
+def test_pathed_programs_require_confirm(command):
+    assert needs_confirm(command) is True
 
 
 # ---------- needs_confirm：绕过用例（草案承诺专打） ----------
@@ -77,6 +103,11 @@ def test_whitelisted_commands_skip_confirm(command):
     "find . -name *.pyc -delete",          # -delete 删文件
     "sort -o /tmp/victim data.txt",        # sort -o 覆盖任意文件
     "sort --output=/tmp/victim data.txt",  # 长选项等号形式
+    # P1-3 评审修复②③：短选项粘连与 git 只读子命令的写参数
+    "sort -o/tmp/victim data.txt",         # 粘连形态：单个 token，精确匹配抓不到
+    "git diff --no-index --output=/tmp/out a b",   # 评审实测：git diff 名下的写文件
+    "git log --output=/tmp/out",           # git log 同款 --output
+    "find . -name x -fprint /tmp/out",     # find 的 -fprint 家族同 -o 一样写任意路径
     # 环境变量前缀：语法不在白名单模型里 → 保守确认
     "FOO=1 ls",
     # 边界
@@ -121,7 +152,7 @@ def test_credential_paths_need_confirm(command):
     "grep -rn os.environ src/",           # .environ 不是 .env
     "cat docs/env.md",
     "cat docs/environment.md",
-    "cat src/agent/env.py",
+    "cat src/facta/env.py",
     "ls .ssh",                            # 列目录名不泄内容
     "cat keyboard.md",                    # .key 只认后缀不认词中
     "cat monkey.py",
@@ -132,6 +163,25 @@ def test_credential_paths_need_confirm(command):
 ])
 def test_non_credential_paths_stay_whitelisted(command):
     assert needs_confirm(command) is False
+
+
+# ADR 071 PATH 注入复现：用户把 ~/.local/bin 放 PATH 最前，里面有自己写的
+# fake echo——白名单 basename=echo 通过，但真实路径不在系统目录，必须确认。
+def test_path_injected_basename_requires_confirm(monkeypatch, tmp_path):
+    from facta.tools import terminal
+    # 1) 在 tmp_path 造一个 fake echo（不是 symlink——shutil.which 直接拿到 fake）
+    bin_dir = tmp_path / "evil_bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "echo"
+    fake.write_text("#!/bin/sh\necho evil\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{__import__('os').pathsep}{__import__('os').environ.get('PATH', '')}")
+    # 2) shutil.which 缓存清理（caching 行为）
+    import shutil as _shutil
+    _shutil.which.cache_clear() if hasattr(_shutil.which, "cache_clear") else None
+    # 3) 解析：fake echo 在 ~/.local/bin 风格的用户目录 → 走确认
+    assert terminal._basename_resolves_to_system("echo") is False
+    assert needs_confirm("echo hello") is True
 
 
 # ---------- 确认规则归因（050）：撞了哪道围栏是可记录的事实 ----------
@@ -183,12 +233,12 @@ def test_run_command_echo_and_exit_code():
 
 
 def test_run_command_timeout(monkeypatch):
-    monkeypatch.setattr("agent.tools.terminal.TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr("facta.tools.terminal.TIMEOUT_SECONDS", 1)
     assert "超时" in _run_command("sleep 5")
 
 
 def test_run_command_truncates_long_output(monkeypatch):
-    monkeypatch.setattr("agent.tools.terminal.MAX_OUTPUT_CHARS", 10)
+    monkeypatch.setattr("facta.tools.terminal.MAX_OUTPUT_CHARS", 10)
     out = _run_command("echo 01234567890123456789")
     assert "截断" in out
     assert "01234567890123456789" not in out   # 只剩前 10 字
@@ -196,7 +246,7 @@ def test_run_command_truncates_long_output(monkeypatch):
 
 def test_run_command_cwd_is_workspace_root():
     # cwd 锚定的行为验证 = pwd 输出就是 WORKSPACE_ROOT 本身。
-    # 不断言目录名（本地 my_project1 / CI checkout 到 cortex-from-scratch——
+    # 不断言目录名（本地 my_project1 / CI checkout 到 facta——
     # 目录名假设是 CI 15 连红的另一个根因）
     assert str(WORKSPACE_ROOT) in _run_command("pwd")
 
@@ -216,7 +266,7 @@ def test_run_command_survives_non_utf8_output():
 def _terminal_registry(audit: AuditLog | None = None, root=WORKSPACE_ROOT) -> ToolRegistry:
     from pathlib import Path
 
-    from agent.tools.context import ToolContext
+    from facta.tools.context import ToolContext
 
     registry = ToolRegistry(audit=audit)
     register_terminal_tools(registry, ToolContext(notes_dir=Path("data/notes"), workspace_root=root))
@@ -350,14 +400,14 @@ def test_default_tools_unaffected_by_confirm_seam():
     # needs_confirmation=False 的既有工具：不传 confirm 也照常执行（回归）
     from pathlib import Path
 
-    from agent.tools.context import ToolContext
-    from agent.tools.files import register_file_tools
+    from facta.tools.context import ToolContext
+    from facta.tools.files import register_file_tools
 
     registry = ToolRegistry()
     register_file_tools(registry, ToolContext(notes_dir=Path("data/notes")))
 
     out = registry.execute(
-        "read_file", json.dumps({"path": "src/agent/paths.py", "offset": 17})
+        "read_file", json.dumps({"path": "src/facta/paths.py", "offset": 17})
     )
 
     assert "拒绝" not in out and "WORKSPACE_ROOT" in out
@@ -368,11 +418,11 @@ def test_default_tools_unaffected_by_confirm_seam():
 def test_run_turn_passes_confirm_through(tmp_path, monkeypatch):
     # 缝契约：壳层的 on_confirm 透传到 registry.execute——拒绝结果作为
     # tool 消息回灌（模型看得见原因），会话继续（拒绝不炸会话）
-    from agent.core.llm import ScriptedLLM
-    from agent.core.types import Message
-    from agent.memory.store import Session
-    from agent.orchestrator.agent import Agent
-    from agent.orchestrator.loop import RunResult, run_turn
+    from facta.core.llm import ScriptedLLM
+    from facta.core.types import Message
+    from facta.memory.store import Session
+    from facta.orchestrator.agent import Agent
+    from facta.orchestrator.loop import RunResult, run_turn
 
     llm = ScriptedLLM([
         Message(role="assistant", content="", tool_calls=[
@@ -401,7 +451,7 @@ def test_run_turn_passes_confirm_through(tmp_path, monkeypatch):
 # ---------- CLI 确认缝 ----------
 
 def test_cli_confirm_explicit_y_approves(monkeypatch):
-    from agent.cli import _cli_on_confirm
+    from facta.cli import _cli_on_confirm
 
     monkeypatch.setattr("builtins.input", lambda _: "y")
     assert _cli_on_confirm("run_command", {"command": "rm x"}) is True
@@ -410,7 +460,7 @@ def test_cli_confirm_explicit_y_approves(monkeypatch):
 @pytest.mark.parametrize("answer", ["", "n", "no", "yes", "x"])
 def test_cli_confirm_anything_else_rejects(monkeypatch, answer):
     # 默认拒绝：空回车/任意非 y 输入都算拒——批准必须是显式动作
-    from agent.cli import _cli_on_confirm
+    from facta.cli import _cli_on_confirm
 
     monkeypatch.setattr("builtins.input", lambda _: answer)
     assert _cli_on_confirm("run_command", {"command": "rm x"}) is False

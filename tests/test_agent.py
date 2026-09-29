@@ -9,16 +9,16 @@
 
 import hashlib
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.memory.store import Session
-from agent.orchestrator.agent import (
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.memory.store import Session
+from facta.orchestrator.agent import (
     DEFAULT_SYSTEM_PROMPT,
     Agent,
     build_default_agent,
 )
-from agent.orchestrator.loop import RunResult, run_turn
-from agent.tools.registry import Tool, ToolRegistry
+from facta.orchestrator.loop import RunResult, run_turn
+from facta.tools.registry import Tool, ToolRegistry
 
 
 def _reg(*names: str) -> ToolRegistry:

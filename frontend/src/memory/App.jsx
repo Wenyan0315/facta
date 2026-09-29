@@ -16,7 +16,7 @@ const CATEGORY_ZH = {
   user: "用户级记忆",
 };
 const CATEGORY_ORDER = ["decisions", "constraints", "other", "user"];
-// 041：user.md 住在仓库外（~/.personal-agent/），git 兜不住 → 误删没有
+// 041：user.md 住在仓库外（~/.facta/），git 兜不住 → 误删没有
 // `git checkout` 那条后路。不可逆性写在 UI 上，而不是假装能撤销。
 const CATEGORY_HINT = {
   user: "跨项目生效 · 不进 git，删除不可撤销",

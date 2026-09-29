@@ -11,9 +11,9 @@ derive_title 保留为 fallback——LLM 挂了也归档，不因标题失败而
 
 from __future__ import annotations
 
-from agent.core.llm import LLM, LLMUnavailableError
-from agent.core.types import Message
-from agent.memory.store import Session
+from facta.core.llm import LLM, LLMUnavailableError
+from facta.core.types import Message
+from facta.memory.store import Session
 
 TITLE_MAX_LEN = 20   # 与 derive_title 的 TITLE_MAX_LEN 对齐：标签是一行，不是摘要
 

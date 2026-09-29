@@ -10,15 +10,15 @@ import json
 
 import pytest
 
-from agent.core.llm import ScriptedLLM
-from agent.core.types import Message
-from agent.memory.plan import StepStatus
-from agent.memory.store import Session, load_session, save_session
-from agent.orchestrator.agent import Agent
-from agent.orchestrator.loop import RunResult, run_turn
-from agent.tools.context import ToolContext
-from agent.tools.plan import register_plan_tools
-from agent.tools.registry import ToolRegistry
+from facta.core.llm import ScriptedLLM
+from facta.core.types import Message
+from facta.memory.plan import StepStatus
+from facta.memory.store import Session, load_session, save_session
+from facta.orchestrator.agent import Agent
+from facta.orchestrator.loop import RunResult, run_turn
+from facta.tools.context import ToolContext
+from facta.tools.plan import register_plan_tools
+from facta.tools.registry import ToolRegistry
 
 
 def _plan_registry(session: Session) -> ToolRegistry:
@@ -42,7 +42,7 @@ def _isolated_learned(tmp_path, monkeypatch):
     """
     empty = tmp_path / "learned"
     empty.mkdir()
-    monkeypatch.setattr("agent.tools.plan._LEARNED_DIR", empty)
+    monkeypatch.setattr("facta.tools.plan._LEARNED_DIR", empty)
 
 
 # ---------- 值对象与状态机 ----------
@@ -472,7 +472,7 @@ def _run(session: Session, llm: ScriptedLLM) -> None:
 def test_finish_plan_with_failed_step_appends_ledger(tmp_path, monkeypatch):
     # 判定标准①：failed 收官 → 台账一行、字段自含（查重不回查会话）
     ledger = tmp_path / "plan_failures.jsonl"
-    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    monkeypatch.setattr("facta.tools.plan._FAILURES_PATH", ledger)
     session = Session()
     _run(session, ScriptedLLM([
         Message(role="assistant", content="", tool_calls=[
@@ -501,7 +501,7 @@ def test_finish_plan_with_failed_step_appends_ledger(tmp_path, monkeypatch):
 def test_finish_plan_all_done_writes_nothing(tmp_path, monkeypatch):
     # 判定标准②：无 failed ⇒ 不落账（台账只记失败，成功不进索引）
     ledger = tmp_path / "plan_failures.jsonl"
-    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    monkeypatch.setattr("facta.tools.plan._FAILURES_PATH", ledger)
     session = Session()
     _run(session, ScriptedLLM([
         Message(role="assistant", content="", tool_calls=[
@@ -522,7 +522,7 @@ def test_failed_step_before_revision_still_recorded(tmp_path, monkeypatch):
     # 修订换表前的 failed 也入账：view() fold 只看得见最终表，事件史记得——
     # 失败经历是事实，title 靠逐事件 fold 当时表找回
     ledger = tmp_path / "plan_failures.jsonl"
-    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    monkeypatch.setattr("facta.tools.plan._FAILURES_PATH", ledger)
     session = Session()
     _run(session, ScriptedLLM([
         Message(role="assistant", content="", tool_calls=[
@@ -563,7 +563,7 @@ def test_make_plan_softwarns_on_similar_history(tmp_path, monkeypatch):
     # 命中软拦——回灌带历史失败，但计划照常创建（「计划已创建」开头）
     ledger = tmp_path / "plan_failures.jsonl"
     ledger.write_text(_LEDGER_ROW + "\n", encoding="utf-8")
-    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    monkeypatch.setattr("facta.tools.plan._FAILURES_PATH", ledger)
     session = Session()
     _run(session, ScriptedLLM([
         Message(role="assistant", content="", tool_calls=[
@@ -582,7 +582,7 @@ def test_make_plan_dissimilar_history_no_warning(tmp_path, monkeypatch):
     # 零命中：不相似的计划不带警告段
     ledger = tmp_path / "plan_failures.jsonl"
     ledger.write_text(_LEDGER_ROW + "\n", encoding="utf-8")
-    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    monkeypatch.setattr("facta.tools.plan._FAILURES_PATH", ledger)
     session = Session()
     _run(session, ScriptedLLM([
         Message(role="assistant", content="", tool_calls=[
@@ -604,7 +604,7 @@ def test_make_plan_warns_despite_embellished_titles(tmp_path, monkeypatch):
         "failed": [{"title": "搜索 RAG 的最新实践", "note": "联网搜索全部超时"}],
         "summary": "搜索全灭，调研失败",
     }, ensure_ascii=False) + "\n", encoding="utf-8")
-    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", ledger)
+    monkeypatch.setattr("facta.tools.plan._FAILURES_PATH", ledger)
     session = Session()
     _run(session, ScriptedLLM([
         Message(role="assistant", content="", tool_calls=[
@@ -628,7 +628,7 @@ def _learned(tmp_path, monkeypatch, **buckets: str) -> None:
     d.mkdir()
     for name, text in buckets.items():
         (d / f"{name}.md").write_text(text, encoding="utf-8")
-    monkeypatch.setattr("agent.tools.plan._LEARNED_DIR", d)
+    monkeypatch.setattr("facta.tools.plan._LEARNED_DIR", d)
 
 
 def _plan_echo(args: dict) -> str:
@@ -666,7 +666,7 @@ def test_recall_silent_without_ascii_keys(tmp_path, monkeypatch):
 def test_recall_matches_identifiers_in_titles(tmp_path, monkeypatch):
     # 候选键也来自步骤标题：省略 tools 声明的计划照样召回（057 之前存量兼容）
     _learned(tmp_path, monkeypatch,
-             other="- [2026-09-23] run_turn 定义在 src/agent/orchestrator/loop.py。\n")
+             other="- [2026-09-23] run_turn 定义在 src/facta/orchestrator/loop.py。\n")
     out = _plan_echo({"steps": [{"title": "读 loop.py 弄清 run_turn 的投影"}]})
     assert "[other] - [2026-09-23] run_turn 定义在" in out
 
@@ -689,7 +689,7 @@ def test_recall_capped_and_ordered_by_matched_keys(tmp_path, monkeypatch):
 
 def test_recall_tolerates_missing_dir(tmp_path, monkeypatch):
     # 判定标准④：目录缺席 ⇒ 计划照常创建、不抛异常、不带召回段（宽容语义）
-    monkeypatch.setattr("agent.tools.plan._LEARNED_DIR", tmp_path / "不存在的目录")
+    monkeypatch.setattr("facta.tools.plan._LEARNED_DIR", tmp_path / "不存在的目录")
     out = _plan_echo({"steps": [{"title": "读 loop.py"}]})
     assert out.startswith("计划已创建")
     assert "长时记忆" not in out
@@ -745,7 +745,7 @@ def _verify_setup(tmp_path, monkeypatch, judge, approve, *, complete: bool = Tru
     标准要断言返回串**逐字节**，中间不该混进循环与投影的噪声。台账路径一并
     monkeypatch 掉——否则归档会写真实 data/plan_failures.jsonl（污染仓库资产）。
     """
-    monkeypatch.setattr("agent.tools.plan._FAILURES_PATH", tmp_path / _LEDGER)
+    monkeypatch.setattr("facta.tools.plan._FAILURES_PATH", tmp_path / _LEDGER)
     session = Session()
     registry = ToolRegistry()
     ctx = ToolContext(notes_dir=None, session=session, llm=judge)   # type: ignore[arg-type]

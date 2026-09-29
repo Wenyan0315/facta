@@ -11,13 +11,13 @@
 
 from __future__ import annotations
 
-from agent.core.llm import LLM
-from agent.core.types import Message
-from agent.memory.compressor import trim_incomplete_round
-from agent.memory.store import Session
-from agent.orchestrator.agent import DEFAULT_SYSTEM_PROMPT, Agent
-from agent.orchestrator.loop import RunResult, run_turn
-from agent.tools.registry import ToolRegistry
+from facta.core.llm import LLM
+from facta.core.types import Message
+from facta.memory.compressor import trim_incomplete_round
+from facta.memory.store import Session
+from facta.orchestrator.agent import DEFAULT_SYSTEM_PROMPT, Agent
+from facta.orchestrator.loop import RunResult, run_turn
+from facta.tools.registry import ToolRegistry
 
 # 用户输入这些词就结束对话
 _EXIT_WORDS = {"quit", "exit", "q", "退出", "再见"}

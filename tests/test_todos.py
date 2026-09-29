@@ -4,9 +4,9 @@
 跨会话资产，独立于 session（不随归档走）。
 """
 
-from agent.memory.todos import TodoStore
-from agent.tools.registry import ToolRegistry
-from agent.tools.todo import register_todo_tools
+from facta.memory.todos import TodoStore
+from facta.tools.registry import ToolRegistry
+from facta.tools.todo import register_todo_tools
 
 
 def _store(tmp_path) -> TodoStore:

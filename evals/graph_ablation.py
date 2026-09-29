@@ -36,9 +36,10 @@ from __future__ import annotations
 
 from dotenv import load_dotenv
 
-from agent.evalkit import is_relevant
-from agent.knowledge.graph import GraphStore
-from agent.knowledge.knowledge_base import (
+from evals.retrieval_eval import STOPWORDS
+from facta.evalkit import is_relevant
+from facta.knowledge.graph import GraphStore
+from facta.knowledge.knowledge_base import (
     BagOfWordsEmbedder,
     Embedder,
     KnowledgeBase,
@@ -46,9 +47,8 @@ from agent.knowledge.knowledge_base import (
     get_embedder,
     tokenize,
 )
-from agent.knowledge.sync import sync_notes
-from agent.paths import GRAPH_PATH, NOTES_DIR
-from evals.retrieval_eval import STOPWORDS
+from facta.knowledge.sync import sync_notes
+from facta.paths import GRAPH_PATH, NOTES_DIR
 
 TOP_K = 3               # 与生产 search_notes 同参
 GRAPH_HOPS = 2          # 实体 BFS 扩展层数（见模块 docstring）
