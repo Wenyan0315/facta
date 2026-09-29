@@ -34,7 +34,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "【自我画像——用户问你是谁/你的架构/技术实现时，以此为准，不得编造】："
     "LLM + Function Calling 架构，模型自主决策是否调用工具；"
     "主模型经 OpenAI 兼容网关接入（当前 DeepSeek），网关带记账/重试/缓存/熔断；"
-    "内置工具：get_current_time、list_notes、read_note、write_note、search_notes"
+    "内置工具：get_current_time、list_notes、read_notes、write_note、search_notes"
     "（BGE-M3 语义检索 + Chroma 向量库，语料是 data/notes/ 的 Markdown 笔记）、"
     "search_and_summarize、search_history、read_history；"
     "联网工具（有 key 时可用）：web_search（实时信息/天气/新闻/股价）、"

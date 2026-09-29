@@ -33,7 +33,7 @@ from agent.tools.registry import Tool, ToolRegistry
 SEARCH_TIMEOUT = 10.0
 FETCH_TIMEOUT = 15.0
 MAX_BYTES = 2 * 1024 * 1024     # 响应大小上限：防内存炸弹
-MAX_TEXT_CHARS = 8000           # 正文截断：防灌爆上下文（与 read_note 同量级纪律）
+MAX_TEXT_CHARS = 8000           # 正文截断：防灌爆上下文（与 read_notes 同量级纪律）
 
 # 外部内容界碑（S3 注入防护）：联网结果是不可信输入，进模型上下文前用
 # 明确边界包裹——降「网页内容里藏指令被模型执行」的概率。提示词层防御

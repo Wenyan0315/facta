@@ -42,10 +42,13 @@ def test_prompt_move_is_byte_identical():
     # 「无意识改动」——素材变了 = 主 agent 行为变了。
     # hash 更新史：S5a 搬家锁 b24025d4…（逐字节等价）；S5c 能力扩张
     # （补 S5b 计划工具+spawn 介绍——S5b 落码时漏了 prompt 介绍，本次
-    # 补上）→ 5fa79c0b…。锁的语义是「改动必须显式过这里」，不是「永不改」
+    # 补上）→ 5fa79c0b…；ADR 067 错名修正（read_note→read_notes——
+    # 人设报错工具名，泄漏 markup/计划 tools 声明跟着错，057 范围闸
+    # 因此拦过正确名调用）→ c6b9bc49…。锁的语义是「改动必须显式过
+    # 这里」，不是「永不改」
     assert (
         hashlib.sha256(DEFAULT_SYSTEM_PROMPT.encode()).hexdigest()
-        == "5fa79c0bdc7ee17837d7f49a42ec00383136f8938f57f97808fffd273a03d6b0"
+        == "c6b9bc49189d70d683cfa7d7bfb36ea255fa08c173dc07aae0e9df4f3c901ee7"
     )
 
 
