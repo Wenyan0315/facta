@@ -126,3 +126,10 @@ bash: cd /Users/wenyan 2>/dev/null; pwd; ls -la . | head -40
 ⑦ **口径登记**：`--only i1-,…,i6-` 的连字符 token 匹配不到 `i1h-`／`i2h-`，本轮只跑 6 条（上轮 8 条）。两条加硬场景上轮两臂皆绿、信息量最低，未补跑；跨轮对比时按 6 条口径读。成本注：双臂合计 ¥0.2149，其中 bash i6 单条 ¥0.0801 占 74%（它在副本里跑 embedding、多轮 `python3 -c` 试闸）。i6 结果三轮翻三次（049 两臂红／050 两臂绿／051 full 绿 bash 红）＝非确定性，**不据此下机制结论**，只用于说明「绿必须能被归因」。
 
 ⑧ **判定标准 6 未完全达成，诚实登记**：副本内 `git show`／`git log` 确实拿不到东西，但**「bash 臂不再需要 `find /`」没有发生**——它照旧扫（`find / -maxdepth 4/5 -name sandbox_demo`），只是扫不到案卷了。预防堵不住机器扫描，这正是丁案（污染检测）存在的理由。
+
+⑨ **清单边界被 [063](063-eval-harness-answer-sheet-isolation.md) 收紧（2026-09-29 追加，不改写 ①-⑧ 历史正文）**：
+
+- ③ 里那句「`evals/frozen_eval.py` … 都在」是当时的真值，**现已反转**：063 把整个 `evals/` 列进 `_ANSWER_SHEETS`（`"evals"` **替换**而非追加 `"evals/scenarios"`，目录级已吞掉子目录），`_CONTAMINATION_MARKERS` 的 `"evals/scenarios"` 同步放宽成 `"evals/"`（带斜杠顺带把 `data/evals/` 历史出分也判红）。② 记的「删除清单与匹配片段不共用」原则不变，变的是覆盖面。③ 那份冒烟清单同样过时（副本顶层不再是 11 项）。
+- ② 最后那条纪律（**隔离断言必须先证「导出确实自带」再证「prepare 后没了」**）原样沿用，只是被证的对象从题库扩到 harness：`test_real_copy_has_no_git_and_no_answer_sheets` 新增前置断言 `assert (wt/"evals"/"frozen_eval.py").is_file()`，末尾断言翻转为 `assert not (wt/"evals").exists()`（单列一条，防有人把 `"evals"` 从清单删掉后循环断言抓不到）。
+- 063 的最大风险（child 在某条未覆盖的 import 路径上隐式依赖副本 `evals/`）钉成**常驻零成本冒烟**：mock 档真 `_spawn_child`（rc 0、status COMPLETED、cost 0.0）+ `-c` 探针证 `agent` 来自副本 `src/`、harness 与 baseline 来自主仓库绝对路径。本案之后「评测器在考场外运行」有了机器可读的证明，不再只靠 `_child_env` 的 PYTHONPATH 拼法自证。
+- ⑥ 的「不给 marker 加码」裁定在 063 那里被**部分推翻**：063 放宽了 marker（`evals/scenarios` → `evals/`）。区别在于 063 的依据不是单次分数波动，而是**实机轨迹证据 + 目录级清单本就自动落网的一致性**（新加的 harness 文件不该因为写在 `evals/` 根而非 `evals/scenarios/` 就漏网）。⑥ 反对的那种「按单次观察调匹配串」仍然禁止。

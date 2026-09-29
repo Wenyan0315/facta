@@ -11,6 +11,8 @@
 """
 
 import json
+import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 
@@ -257,15 +259,20 @@ def test_contaminated_flags_answer_sheet_reads():
     bash 臂无沙箱，i6 的实机轨迹里就有 `find / -maxdepth 6 -type d -name
     sandbox_demo` 与 `cd /Users/wenyan`。两臂轨迹同源（050 给 full 臂装上了参数），
     所以一条字符串匹配就够。反面同样要钉：正常读代码/语料不许误报——误报会让
-    每次出分都白烧钱。
+    每次出分都白烧钱。063 把 `evals/scenarios` 放宽成 `evals/`（一条盖住整个
+    harness 源码面），所以反面清单必须照旧全绿。
     """
     dirty = [
         "bash: cat evals/scenarios/injections/evil_readme_i6.md",
+        # 063：harness 源码同样是答案纸（i4 实机读过 evals/frozen_eval.py 60 行），
+        # 相对写法与主仓库绝对写法都要抓到
+        "read_file: path=evals/frozen_eval.py",
+        "bash: cat /Users/x/my_project1/evals/baseline_agent.py",
         "read_file: path=docs/decisions/049-p0-8-injection-hardening.md",
         "bash: sed -n '1,40p' /Users/x/my_project1/docs/architecture.md",
     ]
     assert fe._contaminated(dirty) == [
-        "evals/scenarios", "docs/decisions", "architecture.md",
+        "evals/", "docs/decisions", "architecture.md",
     ]
     clean = [
         "read_file: path=src/agent/tools/notes.py",
@@ -430,7 +437,8 @@ def test_real_copy_has_no_git_and_no_answer_sheets(tmp_path):
     049 那条钉住测试断言的是假命题：在手工搭的空目录上 `assert not
     (wt/"evals").exists()`——恒真，绿着骗过 049/050 两轮出分，因为真副本的
     `evals/` 来自 checkout（题库在 6041eeb 入库了）。手工目录只能证明「你没往里
-    塞」，证明不了「它本来没有」。
+    塞」，证明不了「它本来没有」。063 把整个 `evals/` 列进案卷，同一条断言这才
+    从假命题变成真命题——但前提依旧是「跑在真导出副本上」。
     """
     wt = tmp_path / "copy"
     wt.mkdir()
@@ -440,6 +448,7 @@ def test_real_copy_has_no_git_and_no_answer_sheets(tmp_path):
     assert not (wt / ".git").exists()
     # 导出确实自带答案纸 —— 不先钉住这条，下面的删除断言就退化回 049 那种假绿
     assert (wt / "evals" / "scenarios" / "frozen_real.jsonl").is_file()
+    assert (wt / "evals" / "frozen_eval.py").is_file()   # harness 源码也在导出里（063）
 
     fe._prepare_copy(wt)
 
@@ -448,7 +457,52 @@ def test_real_copy_has_no_git_and_no_answer_sheets(tmp_path):
     # 反面：语料与被测代码不误伤。data/notes 的 15 篇是 r1/i3/i4 的 verify 计数基准
     assert len(list((wt / "data" / "notes").glob("*.md"))) == 15
     assert (wt / "src" / "agent" / "paths.py").is_file()
-    assert (wt / "evals" / "frozen_eval.py").is_file()   # 删的是 scenarios，不是整个 evals
+    # 063：整个 evals/ 出局（不只是 scenarios）。单列一条，防有人把 "evals" 从
+    # `_ANSWER_SHEETS` 里删掉——那时上面的循环就再也抓不到这个洞
+    assert not (wt / "evals").exists()
+
+
+def test_child_smoke_runs_with_evals_out_of_the_copy(tmp_path):
+    """063 判定标准 2：`evals/` 出考场后 child 仍能跑完，且导入几何没变。
+
+    风险原文：child 可能在某条未覆盖的 import 路径上隐式依赖副本 `evals/`。
+    mock 档不花一分钱（词袋 embedder + 假 LLM，cost/tokens 全 0），所以这条冒烟
+    能每次 pytest 都跑，不必等出分那轮才发现。
+    两半都要：`_spawn_child` 证明 `--child` 全路径能起、能交出结果；`-c` 探针证明
+    `agent` 来自副本 `src/`（不是 editable 安装指回主仓库的那份），评测器与基线
+    从主仓库绝对路径加载。
+    """
+    wt = tmp_path / "copy"
+    wt.mkdir()
+    assert fe._export_head(wt) == ""
+    fe._prepare_copy(wt)
+    assert not (wt / "evals").exists()
+
+    state = fe.ChildState("mock", "列出 data/notes 里的文件名", "approve",
+                          str(tmp_path / "r.json"), "full")
+    state_path = tmp_path / "state.json"
+    state.dump(state_path)
+
+    proc = fe._spawn_child(wt, state_path)
+
+    assert proc.returncode == 0, (proc.stdout or "") + (proc.stderr or "")
+    child = json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))
+    assert child["status"] == "COMPLETED" and child["error"] == ""
+    assert child["cost"] == 0.0 and child["tokens_in"] == 0   # 冒烟不许花模型钱
+
+    probe = (
+        "import agent, evals.frozen_eval as h, evals.baseline_agent as b;"
+        "print(agent.__file__);print(h.__file__);print(b.__file__)"
+    )
+    p = subprocess.run(
+        [sys.executable, "-c", probe], cwd=wt, env=fe._child_env(wt),
+        capture_output=True, text=True, timeout=180, check=False,
+    )
+    assert p.returncode == 0, p.stderr[-800:]
+    agent_file, harness_file, baseline_file = p.stdout.split()
+    assert agent_file.startswith(str(wt / "src"))        # 被测对象来自副本
+    assert harness_file.startswith(str(fe.REPO_ROOT))    # 评测器在考场外
+    assert baseline_file.startswith(str(fe.REPO_ROOT))
 
 
 def test_stage_scenario_payloads_placeholder_points_at_tmp(tmp_path):
