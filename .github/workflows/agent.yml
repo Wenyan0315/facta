@@ -1,0 +1,80 @@
+# facta-bot：issue → agent 自动开 PR；PR → agent 自动审查
+#
+# 触发方式（三选一）：
+#   1. 给 issue 打 label `agent`          → fix-issue
+#   2. 在 issue/PR 下评论 `@facta fix`    → fix-issue（issue）或 review-pr（PR）
+#   3. 同仓库 PR open / synchronize       → review-pr
+#
+# 安全约定：
+#   - fork 的 PR 一律不触发本工作流（HEAD 仓库 != 本仓库直接跳过）
+#   - bot 只开 PR / 发评论，永不合并；合并由人完成（分支保护兜底）
+#   - 高危工具调用在 worker 里被自动拒绝（on_confirm 恒 False）
+
+name: facta-bot
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  # 同一 issue/PR 串行：后到的触发排队而不是并行改同一分支
+  group: facta-bot-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  agent:
+    # 闸门：打 agent label / 评论 @facta fix / 同仓 PR 更新，三者命中其一才跑
+    if: >-
+      (github.event_name == 'issues' && github.event.label.name == 'agent') ||
+      (github.event_name == 'issue_comment' &&
+        contains(github.event.comment.body, '@facta') &&
+        github.event.issue.pull_request == null) ||
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30            # agent runaway 的总闸：到点 Actions 强杀
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 facta（含 dev 依赖：pytest/ruff/mypy）
+        run: pip install -e ".[dev]"
+
+      - name: 决定任务类型
+        id: task
+        env:
+          IS_PR: ${{ github.event_name == 'pull_request' || github.event.issue.pull_request != null }}
+        run: |
+          if [ "$IS_PR" = "true" ]; then
+            echo "bot_task=review-pr" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${{ github.event.pull_request.number || github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "bot_task=fix-issue" >> "$GITHUB_OUTPUT"
+            echo "issue_number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 跑 facta-bot
+        env:
+          BOT_TASK: ${{ steps.task.outputs.bot_task }}
+          ISSUE_NUMBER: ${{ steps.task.outputs.issue_number }}
+          PR_NUMBER: ${{ steps.task.outputs.pr_number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # 细粒度 PAT：contents+pull-requests+issues 读写，仅本仓库。
+          # 为什么不用 GITHUB_TOKEN：它发起的 push 不会触发 CI 工作流（GitHub 防递归），
+          # bot 的 PR 会裸奔无检查。PAT 则和真人推送等价。见 docs/github-bot.md。
+          BOT_TOKEN: ${{ secrets.FACTA_BOT_TOKEN }}
+          # LLM key：变量名按 .env.example 里的实际名字改（DeepSeek 档示例）
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          FACTA_PROVIDER: deepseek-flash
+        run: python -m facta.github_bot.worker
