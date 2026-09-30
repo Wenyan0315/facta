@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import subprocess
@@ -154,7 +155,9 @@ def _session_with_persona(ctx, persona: str | None) -> tuple[Session, Agent]:
     sid = ctx.store.create(Session())
     session = ctx.store.load(sid)
     agent = ctx.build_agent(session)
-    agent.max_tool_rounds = BOT_MAX_ROUNDS  # 外设层放宽预算：不动内核 dataclass 默认
+    # Agent 是 frozen dataclass（「frozen=配置不是状态」）：放宽预算走 replace 换新实例，
+    # 内核默认值不动（spawn.py 注预算也是构造期注入，同款姿势）
+    agent = dataclasses.replace(agent, max_tool_rounds=BOT_MAX_ROUNDS)
     if persona:
         agent.system_prompt = persona  # 外设层覆盖人设：不动工厂默认
     from facta.core.types import Message  # 延迟导入：与 cli.py 同款的底片播种
