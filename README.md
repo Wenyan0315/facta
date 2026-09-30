@@ -159,6 +159,7 @@ Assembly follows a "single source of truth": both CLI and Web build through depe
 | [docs/architecture.md](docs/architecture.md) | 系统架构（分层图、71 份 ADR 索引、在册触发信号）/ System architecture (layered diagram, index of 71 ADRs, registered trigger signals) |
 | [docs/decisions/](docs/decisions/) | 架构决策记录（ADR 001–071，含否决档案）/ Architecture decision records (ADR 001–071, incl. rejected alternatives) |
 | [docs/manual-test-cases.md](docs/manual-test-cases.md) | 人工测试用例集 / Manual test cases |
+| [docs/github-bot.md](docs/github-bot.md) | facta-bot 接入指南（issue 打 label 自动修、PR 自动审查的 GitHub 接入层配置手册）/ facta-bot integration guide (GitHub entry layer: label an issue to auto-fix, auto-review PRs) |
 
 ## 许可证 / License
 
