@@ -13,6 +13,8 @@ v1 只落 Tavily（免费额度/agent 生态标准/返回已清洗摘要——�
   ② 私网地址拒绝（DNS 解析后逐 IP 检查——只查 hostname 字符串挡不住
      「evil.com 解析到 127.0.0.1」的绕过；DNS rebinding TOCTOU 是已知
      边界，个人工具 v1 接受，S3 完整栅栏再议）
+     ——例外：fake-ip 占位段（_FAKE_IP_RANGES）。该段无真实服务可打，
+     拦它防不住任何攻击，却会误杀整类透明代理用户（issue #10）
   ③ 只读 GET
   ④ 超时（搜索 10s / 抓取 15s）+ 响应大小上限 2MB + 正文截 8000 字
 """
@@ -34,6 +36,16 @@ SEARCH_TIMEOUT = 10.0
 FETCH_TIMEOUT = 15.0
 MAX_BYTES = 2 * 1024 * 1024     # 响应大小上限：防内存炸弹
 MAX_TEXT_CHARS = 8000           # 正文截断：防灌爆上下文（与 read_notes 同量级纪律）
+
+# fake-ip 占位段豁免（issue #10）：Clash/mihomo 的 fake-ip 模式把 DNS 应答换成
+# 一个占位 IP（默认落在 IANA Benchmarking 段 198.18.0.0/15），真实连接由代理
+# 发起。Python ≥3.13 起该段并入 is_private，于是 fake-ip 用户解析任何公网域名都
+# 撞上「私网拒绝」——防护收益≈0（该段不可公网路由、没有服务跑在那儿，挡不住
+# 真实攻击），误杀成本=整类用户联网工具全废。常规补救「连接后校验对端真实 IP」
+# 在 fake-ip 下不成立（连接由代理发起，本进程拿不到真实对端），故只能在判定侧
+# 豁免，交由后续请求自行失败（代理没配好时用户会看到连接错误，而不是这句误导性
+# 的「内网地址」）。
+_FAKE_IP_RANGES = (ipaddress.ip_network("198.18.0.0/15"),)
 
 # 外部内容界碑（S3 注入防护）：联网结果是不可信输入，进模型上下文前用
 # 明确边界包裹——降「网页内容里藏指令被模型执行」的概率。提示词层防御
@@ -106,31 +118,27 @@ BOCHA_API_URL = "https://api.bochaai.com/v1/web-search"
 
 
 def _parse_bocha(payload: dict) -> list[dict]:
-    """博查响应归一化：data.webPages.value[] → 协议约定的三项。
+    """博查响应归一化：data.webPages.value[] → 协议三项（与 Tavily 同构）。
 
-    纯函数单测的原料——各家响应形状不同（Tavily 平铺 results、博查嵌套
-    webPages），归一化收在实现类里，协议消费方（工具本体）零感知。
-    summary（长摘要）优先、snippet 兜底；datePublished 附进 content 尾部
-    （时效信息对天气/新闻类查询是关键证据）。
+    博查的双摘要：summary 优先、snippet 兜底（summary 可能为空串/缺失）。
+    datePublished 附尾（ISO 串截到日）——新闻、股价类查询靠它判断时效。
     """
-    items = payload.get("data", {}).get("webPages", {}).get("value", [])
+    values = payload.get("data", {}).get("webPages", {}).get("value", []) or []
     out = []
-    for r in items:
-        content = (r.get("summary") or r.get("snippet") or "").strip()
-        date = r.get("datePublished", "")
+    for v in values:
+        content = (v.get("summary") or v.get("snippet") or "").strip()
+        date = (v.get("datePublished") or "")[:10]
         if date:
-            content = f"{content}（发布：{date[:10]}）" if content else f"发布：{date[:10]}"
-        out.append({"title": r.get("name", ""), "url": r.get("url", ""), "content": content})
+            content = f"{content}（发布：{date}）"
+        out.append({"title": v.get("name", ""), "url": v.get("url", ""), "content": content})
     return out
 
 
 class BochaSearch:
-    """博查实现（2026-09-16 先行）：中文搜索质量好、国内直连。
+    """博查（Bocha）实现：先行接入的国内 Provider（中文检索场景的候选）。
 
-    summary=True 要长摘要（博查特色：比 snippet 详细，对 LLM 更友好）；
-    freshness=noLimit 不限时间——时间过滤的决策权留给模型（它知道用户
-    问的是「今天天气」还是「历史事件」），触发信号=模型常带时间词查询
-    却拿不到新结果时，再把 freshness 暴露成工具参数。
+    与 Tavily 同姿势：httpx 手写 REST、key 走环境变量。默认拒绝、不做语言
+    路由——双 Provider 分发的触发信号是实测出语言偏好差异，届时再加包装层。
     """
 
     name = "bocha"
@@ -142,7 +150,7 @@ class BochaSearch:
         resp = httpx.post(
             BOCHA_API_URL,
             headers={"Authorization": f"Bearer {self._key}"},
-            json={"query": query, "count": 5, "summary": True, "freshness": "noLimit"},
+            json={"query": query, "count": 5, "summary": True},
             timeout=SEARCH_TIMEOUT,
         )
         resp.raise_for_status()
@@ -170,6 +178,9 @@ def _assert_public_http_url(url: str) -> None:
 
     坏 URL 以 ValueError 抛出——工具错误经 registry 变错误字符串回给模型，
     模型可自我纠正（换 URL），不炸会话。
+
+    fake-ip 占位段是唯一的豁免（见 _FAKE_IP_RANGES）：它既拦不住攻击，
+    又会把走透明代理的用户全部误杀，成本/收益是反的。
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -188,6 +199,8 @@ def _assert_public_http_url(url: str) -> None:
         ips = {ipaddress.ip_address(info[4][0]) for info in infos}
 
     for ip in ips:
+        if any(ip in net for net in _FAKE_IP_RANGES):
+            continue   # 占位地址：真实对端由代理决定，本层判不了，交由后续请求自行失败
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
             raise ValueError(f"拒绝访问内网/保留地址：{host}（解析到 {ip}）")
 
