@@ -239,7 +239,7 @@ def run_review_pr(progress: Progress) -> int:
     if not DRY_RUN:
         _run(["git", "config", "user.name", "facta-bot"])
         _run(["git", "config", "user.email", "facta-bot@users.noreply.github.com"])
-        _run(["gh", "pr", "checkout", PR])
+        gh("pr", "checkout", PR)
 
     ctx = assemble(PROVIDER)
     session, agent = _session_with_persona(ctx, None)
