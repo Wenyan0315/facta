@@ -58,6 +58,10 @@ TASK = env("BOT_TASK", "fix-issue")
 ISSUE = os.environ.get("ISSUE_NUMBER", "")
 PR = os.environ.get("PR_NUMBER", "")
 PROVIDER = os.environ.get("FACTA_PROVIDER", "deepseek-flash")
+# 工具轮数预算：内核默认 5 是「人还在场、下轮继续」的交互价；bot 要单发完成
+# 「勘查→改动→跑测试」全程，默认放宽到 15（issue #2 首轮就烧光预算没写成）。
+# 失控兜底仍在：原地踏步熔断 + workflow 30 分钟超时。
+BOT_MAX_ROUNDS = int(os.environ.get("BOT_MAX_ROUNDS", "15"))
 
 
 # ---------------------------------------------------------------- 小工具
@@ -150,6 +154,7 @@ def _session_with_persona(ctx, persona: str | None) -> tuple[Session, Agent]:
     sid = ctx.store.create(Session())
     session = ctx.store.load(sid)
     agent = ctx.build_agent(session)
+    agent.max_tool_rounds = BOT_MAX_ROUNDS  # 外设层放宽预算：不动内核 dataclass 默认
     if persona:
         agent.system_prompt = persona  # 外设层覆盖人设：不动工厂默认
     from facta.core.types import Message  # 延迟导入：与 cli.py 同款的底片播种
