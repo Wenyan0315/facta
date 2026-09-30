@@ -13,16 +13,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
 
 from facta.github_bot.prompts import render_task
 from facta.memory.store import Session
+from facta.orchestrator.agent import Agent
 from facta.orchestrator.assemble import assemble, settle_session
 from facta.orchestrator.loop import RunResult, run_turn
 
@@ -56,7 +57,7 @@ PROVIDER = os.environ.get("FACTA_PROVIDER", "deepseek-flash")
 
 # ---------------------------------------------------------------- 小工具
 def _run(cmd: list[str], *, input_text: str | None = None, check: bool = True) -> str:
-    p = subprocess.run(cmd, capture_output=True, text=True, input=input_text)
+    p = subprocess.run(cmd, capture_output=True, text=True, input=input_text, check=False)
     if check and p.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd)} 失败: {p.stderr.strip()[:500]}")
     return p.stdout
@@ -67,7 +68,7 @@ def gh(*args: str, input_text: str | None = None, check: bool = True) -> str:
     envs = dict(os.environ)
     if TOKEN:
         envs["GH_TOKEN"] = TOKEN
-    p = subprocess.run(full, capture_output=True, text=True, input=input_text, env=envs)
+    p = subprocess.run(full, capture_output=True, text=True, input=input_text, env=envs, check=False)
     if check and p.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args)} 失败: {p.stderr.strip()[:500]}")
     return p.stdout
@@ -139,7 +140,7 @@ class Progress:
 
 
 # ---------------------------------------------------------------- 主流程
-def _session_with_persona(ctx, persona: str | None) -> tuple[Session, object]:
+def _session_with_persona(ctx, persona: str | None) -> tuple[Session, Agent]:
     """新建一段空会话并种人设法——与 __main__ 同款姿势，换的是可选人设。"""
     sid = ctx.store.create(Session())
     session = ctx.store.load(sid)
@@ -262,7 +263,7 @@ def run_review_pr(progress: Progress) -> int:
         if sid:
             print(settle_session(session, sid, ctx.store, ctx.internal_llm, flush=True))
 
-    review_body = reply or progress.reply[-TRACE_TAIL:]
+    review_body = (reply.content if reply is not None else "") or progress.reply[-TRACE_TAIL:]
     if DRY_RUN:
         print(review_body)
         return 0
@@ -279,17 +280,15 @@ def run_review_pr(progress: Progress) -> int:
 def main() -> int:
     number = ISSUE or PR
     progress = Progress(number)
+    if TASK not in ("fix-issue", "review-pr"):
+        raise SystemExit(f"[facta-bot] 未知 BOT_TASK: {TASK}")
     try:
         if TASK == "fix-issue":
             return run_fix_issue(progress)
-        if TASK == "review-pr":
-            return run_review_pr(progress)
-        raise SystemExit(f"[facta-bot] 未知 BOT_TASK: {TASK}")
+        return run_review_pr(progress)
     except Exception as e:  # noqa: BLE001 —— bot 层要兜住所有异常并回显到 issue
-        try:
+        with contextlib.suppress(Exception):
             progress.post(f"❌ facta-bot 运行失败：`{e}`")
-        except Exception:
-            pass
         raise
 
 

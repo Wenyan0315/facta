@@ -48,8 +48,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 安装 facta（含 dev 依赖：pytest/ruff/mypy）
-        run: pip install -e ".[dev]"
+      - name: 安装 facta（含 dev：pytest/ruff/mypy；含 rag：worker 导入链需要 httpx）
+        run: pip install -e ".[dev,rag]"
 
       - name: 决定任务类型
         id: task
