@@ -39,6 +39,11 @@ DRY_RUN = os.environ.get("BOT_DRY_RUN") == "1"
 PROGRESS_INTERVAL = 15.0  # 进度评论节流秒数
 TRACE_TAIL = 4000         # 收尾评论里带上的模型输出/事件尾巴长度
 
+# 记忆子系统的数据目录（data/graph.json、data/memory/sessions/、data/learned/）：
+# agent 运行本身就会产生副作用写（会话落盘、图谱同步、固化），与任务无关。
+# 状态判断和提交都必须排除它们——否则 git add -A 会把副作用扫进 PR（issue #2 实录）。
+GIT_EXCLUDES = [":(exclude)data/"]
+
 
 def env(name: str, default: str | None = None) -> str:
     v = os.environ.get(name, default)
@@ -205,7 +210,7 @@ def run_fix_issue(progress: Progress) -> int:
         print(progress.reply[-TRACE_TAIL:])
         return 0
 
-    if not _run(["git", "status", "--porcelain"]).strip():
+    if not _run(["git", "status", "--porcelain", "--", ".", *GIT_EXCLUDES]).strip():
         progress.post("✅ 调查完毕，但 agent 判断无需修改代码，未产生提交。\n\n" + progress.reply[-2000:])
         return 0
 
@@ -215,7 +220,7 @@ def run_fix_issue(progress: Progress) -> int:
         progress.post(f"⚠️ agent 已改完但测试未全绿，先把现状推上来供人工接手。\n\n"
                       f"```\n{test_out[-2000:]}\n```")
 
-    _run(["git", "add", "-A"])
+    _run(["git", "add", "-A", "--", ".", *GIT_EXCLUDES])
     _run(["git", "commit", "-m", f"bot: fix issue #{ISSUE} - {title[:60]}"])
     _run(["git", "push", "-u", "origin", branch])
     pr_url = gh("pr", "create", "--title", f"bot: fix #{ISSUE} {title[:60]}",
