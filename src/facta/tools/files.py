@@ -11,12 +11,18 @@
   ③ write_file：二进制/超 1MB 拒写拒读；覆盖现有文件时返回 diff 摘要
      （S2 预留 diff 视图的数据源；改了什么模型和用户都一眼可见）
   ④ 分级：read/search/list = L0；write_file = L1（审计强化）
+  ⑤ 写盘原子（#13 丁案）：走同目录 tmp + os.replace（save_session / 面板保存同款），
+     写失败不留半截、旧内容不被中途截断
+  ⑥ 覆盖变短显式警告（#13 丙案）：read 有窗口而 write 是全量——这对不对称不能让
+     模型自己心算，变短时在返回里量化提示
 """
 
 from __future__ import annotations
 
 import difflib
+import os
 import re
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -190,7 +196,12 @@ def _list_dir(path: str = ".", *, root: Path = WORKSPACE_ROOT) -> str:
 
 
 def _write_file(path: str, content: str, *, root: Path = WORKSPACE_ROOT) -> str:
-    """写项目文件（新建或覆盖）。覆盖时返回 diff 摘要——改了什么一眼可见。"""
+    """写项目文件（新建或覆盖）。覆盖时返回 diff 摘要——改了什么一眼可见。
+
+    #13 起写盘有两种兜底：①原子写（丁案）——tmp + os.replace，中途被杀只可能
+    看到旧版或新版，不会留下半截，**旧内容也不会在写之前就被截断**；②覆盖变短
+    时量化警告（丙案）——把「读一半就写」这个静默事故形态变成返回里的一句话。
+    """
     target = _resolve_in_workspace(path, root=root)
     # 052 记忆写围栏：只拒写，读语义不动（_read_file 仍走 _resolve_in_workspace
     # 原路径）。记忆落盘的唯一入口是 write_note / sync_graph——它们带内容闸，
@@ -224,13 +235,44 @@ def _write_file(path: str, content: str, *, root: Path = WORKSPACE_ROOT) -> str:
         if len(diff) > MAX_DIFF_LINES:
             diff_note += f"\n〔diff 共 {len(diff)} 行，已截断〕"
 
+    # 丙案（#13）：覆盖后文件变短 → 显式硬警告。read_file 默认只给 100 行窗口，write_file
+    # 却是全量覆写——读一半就写会静默截断尾部（#10 修 web.py 时的实证事故），而 diff 自己
+    # 也截断到 40 行，事后信号只剩这一处。**只警告不拒写**：正常删减代码不该被挡；「拒写」
+    # 要动 write_file 的契约（甲/乙案），留给维护者单独裁定。
+    shrink_note = ""
+    if overwritten:
+        old_lines, new_lines = len(old_text.splitlines()), len(content.splitlines())
+        if new_lines < old_lines:
+            shrink_note = (
+                f"\n⚠ 新内容比原文件少 {old_lines - new_lines} 行"
+                f"（原 {old_lines} 行 → 新 {new_lines} 行）。若本次是「只读了窗口内一部分就全量重写」，"
+                f"尾部已被截断——请用 read_file 的 offset/limit 分段读完整个文件，确认无误后整体重写。"
+            )
+
+    # 丁案（#13）：原子写——同目录 tmp + os.replace，与 save_session（ADR 040）、笔记面板
+    # 保存（042）同款手法。此前直接 write_text 是「先截断再写」：进程在写盘中途被杀，旧内容
+    # 当场消失、新内容半截，截断从此不可恢复（换个环境就是纯数据丢失）。同文件系统内换名是
+    # 原子的——崩溃只可能看到旧版或新版，没有中间态。它不阻止截断，但把「静默丢失」降级成
+    # 「可恢复」。tmp 名带 uuid（并发写同一目标不互踩）；后缀 .tmp 不匹配任何 *.py/*.md glob，
+    # 半截临时文件不会混进清单或被打包。不做 fsync：与 store.py 同判据——威胁模型是「进程被
+    # 杀」，内核 page cache 仍在，掉电持久化是另一档需求。
+    tmp = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(content, encoding="utf-8")
+        if overwritten:
+            tmp.chmod(target.stat().st_mode)   # 保住原权限位：换名会把可执行脚本的 +x 写掉
+        os.replace(tmp, target)
     except OSError as e:
+        if tmp is not None:                    # 失败路径清尾巴（replace 没跑成，tmp 还留在盘上）
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
         return f"写入失败：{e}"
     action = "覆盖" if overwritten else "新建"
-    return f"已{action} {path}（{len(content)} 字）{diff_note}"
+    return f"已{action} {path}（{len(content)} 字）{shrink_note}{diff_note}"
 
 
 def register_file_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
@@ -284,7 +326,7 @@ def register_file_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     ))
     registry.register(Tool(
         name="write_file",
-        description="写入项目工作区文件（新建或覆盖）。覆盖已有文件时返回 diff 改动摘要。用于改代码/写文档/建配置；往知识库存笔记用 write_note 而非本工具。",
+        description="写入项目工作区文件（新建或覆盖）。覆盖已有文件时返回 diff 改动摘要；覆盖后内容比原文件变短会显式警告（防「只读了窗口内一部分就全量重写」截断尾部）。用于改代码/写文档/建配置；往知识库存笔记用 write_note 而非本工具。",
         parameters={
             "type": "object",
             "properties": {
