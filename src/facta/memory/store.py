@@ -183,7 +183,7 @@ class SessionMeta:
 
     id: str
     title: str
-    mtime: float          # 最后修改时刻（秒级 epoch）——「最近聊过的排前面」
+    mtime: int            # 最后修改时刻（纳秒级 epoch）——「最近聊过的排前面」
     collapsed: bool
 
 
@@ -247,7 +247,10 @@ class SessionStore:
             if not _ID_RE.match(sid):
                 continue   # 非本模块产出的文件（人手塞进来的东西）不进清单
             try:
-                mtime = path.stat().st_mtime
+                # 纳秒级：秒级 mtime 在粗时间戳文件系统（部分 overlay/网络盘）上
+                # 同刻两写会拿到相同值，排序退化成 glob 顺序——
+                # test_latest_is_most_recently_touched 曾因此 flake（issue #15 收尾时发现）
+                mtime = path.stat().st_mtime_ns
                 session = load_session(path)
             except (json.JSONDecodeError, TypeError, OSError):
                 # 损坏文件跳过不炸清单（写盘中途被杀会留 partial write——
@@ -259,7 +262,9 @@ class SessionStore:
                 mtime=mtime,
                 collapsed=session.collapsed,
             ))
-        metas.sort(key=lambda m: m.mtime, reverse=True)
+        # 决胜键 id：mtime 仍可能同刻（文件系统粒度再粗也有极限），id 时间戳前缀
+        # 让同刻排序至少是确定性的，不再随 glob 顺序漂移
+        metas.sort(key=lambda m: (m.mtime, m.id), reverse=True)
         return metas
 
     def load(self, sid: str) -> Session:
