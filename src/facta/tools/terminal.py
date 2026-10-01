@@ -40,10 +40,13 @@ TIMEOUT_SECONDS = 60
 MAX_OUTPUT_CHARS = 6000          # stdout+stderr 合并截断（与 read_file 同纪律）
 
 # 免确认白名单（S4b 草案裁定）：纯读取单命令；git 只给只读子命令
-# （git push / git branch -D 也是 git，不能整只放）；python 只给 -m pytest
+# （git push / git branch -D 也是 git，不能整只放）；python 只给 -m pytest。
+# ruff/mypy（issue #15 ①）：CI 同口径验证要求 bot 能跑 lint 和类型检查；
+# ruff 的写形态（format/--fix）在 _DANGEROUS_ARGS 里拦，mypy 只写缓存。
 _WHITELIST_SIMPLE = frozenset({
     "ls", "cat", "head", "tail", "grep", "rg", "find", "wc", "pwd",
     "which", "file", "sort", "uniq", "diff", "echo", "pytest",
+    "ruff", "mypy",
 })
 _GIT_READONLY = frozenset({"status", "log", "diff", "show"})
 # shell 元字符：出现一个即弹窗（防 cat x; rm y / git status && evil / $(…) 绕过）
@@ -73,6 +76,10 @@ _DANGEROUS_ARGS: dict[str, frozenset[str]] = {
                        "-fprint", "-fprint0", "-fprintf", "-fls"}),
     "sort": frozenset({"-o", "--output"}),  # -o/--output 可覆盖任意文件
     "git": frozenset({"--output"}),          # diff/log/show 的 --output= 写文件
+    # ruff（issue #15 ①）：check 是只读的，但 format / --fix 家族会改写源文件——
+    # bot 没有人可以弹确认，这些形态必须落回确认闸门（bot 场景=拒绝）
+    "ruff": frozenset({"format", "--fix", "--fix-only", "--add-noqa",
+                       "--unsafe-fixes", "-w", "--watch"}),
 }
 # 短选项粘连形态（P1-3）：`sort -o/tmp/x` 是单个 token，精确匹配抓不到——
 # 按前缀补刀。误报方向安全（sort 没有其他 -o 开头的选项，多弹一次确认可接受）。

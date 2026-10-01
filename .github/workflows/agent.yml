@@ -1,8 +1,9 @@
 # facta-bot：issue → agent 自动开 PR；PR → agent 自动审查
 #
 # 触发方式（三选一）：
-#   1. 给 issue 打 label `agent`          → fix-issue
-#   2. 在 issue/PR 下评论 `@facta fix`    → fix-issue（issue）或 review-pr（PR）
+#   1. 给 issue 打 label `agent`          → fix-issue（label 本身需要 triage 权限，天然带门槛）
+#   2. 在 issue 下评论 `@facta fix`       → fix-issue（仅 OWNER/MEMBER/COLLABORATOR，
+#      外部贡献者评论不触发——否则任何人一句话就能烧 LLM 额度和 CI 分钟，issue #15 ③）
 #   3. 同仓库 PR open / synchronize       → review-pr
 #
 # 安全约定：
@@ -27,12 +28,14 @@ concurrency:
 
 jobs:
   agent:
-    # 闸门：打 agent label / 评论 @facta fix / 同仓 PR 更新，三者命中其一才跑
+    # 闸门：打 agent label / 评论 @facta fix（限仓库成员）/ 同仓 PR 更新，三者命中其一才跑
     if: >-
       (github.event_name == 'issues' && github.event.label.name == 'agent') ||
       (github.event_name == 'issue_comment' &&
         contains(github.event.comment.body, '@facta') &&
-        github.event.issue.pull_request == null) ||
+        github.event.issue.pull_request == null &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+          github.event.comment.author_association)) ||
       (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest

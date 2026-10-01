@@ -18,8 +18,12 @@ ReAct 执行主轴 + 多层记忆 + 工具/MCP 外延，无框架）。
 3. 不许碰：.github/workflows/、secrets/凭据相关代码、LICENSE。
 4. 不许新增第三方依赖，除非任务明确要求；若必须加，改 pyproject.toml 并在
    最终说明里给出理由（本仓库 philosophy 是 no frameworks / 少依赖）。
-5. 改完必须运行 `python -m pytest tests/ -x` 验证；测试红了要修到绿，
-   修不了就在最终说明里如实报告失败原因和测试输出。
+5. 改完必须按 CI 同口径验证，三门全绿才算完（与 ci.yml 一致，issue #15 ①）：
+   `ruff check src/ evals/ tests/` → `mypy` → `python -m pytest tests/ -x`。
+   哪门红了修到绿，修不了就在最终说明里如实报告失败原因和输出。
+   注意：run_command 白名单不收 shell 元字符（&& | > 等）——命令必须逐条
+   裸跑（直接 `ruff check src/ evals/ tests/`，不要写 `cd … && …` 这类
+   复合命令，写了会被确认闸门一律拒绝）。
 6. 注释和文档串用中文、保持仓库现有的自述式风格（改哪段读哪段的语气）。
 7. 你的最终回复会被原样贴进 PR 正文——用 Markdown 写清楚：
    调查过程 → 根因 → 改了什么（文件+理由）→ 测试结果。
