@@ -125,6 +125,11 @@ def test_latest_is_most_recently_touched(tmp_path):
     second = store.create(_talked())
     assert store.latest() == second            # 刚建的排最前
     store.save(first, store.load(first))       # 聊回旧会话 → 它变成 latest
+    # 显式推进 mtime：本测试断言的是「最近触碰者居首」的排序语义，不是文件系统的
+    # 时间戳精度——粗粒度 fs（部分 overlay/网络盘）上 save 与 create 同刻会拿到
+    # 相同 mtime，排序语义对，测试却红了（issue #15 收尾时实测复现，干净 main 同款）
+    future = store.path(second).stat().st_mtime + 2
+    os.utime(store.path(first), (future, future))
     assert store.latest() == first
 
 
