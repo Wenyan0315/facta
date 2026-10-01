@@ -57,6 +57,15 @@ The four web panels below were captured in mock mode (`FACTA_PROVIDER=mock`); ev
 
 ---
 
+## 竞品对标 / Competitive Landscape
+
+批判视角的 25 维对照（2026-09 口径，facta 数据来自实际读码）：明确领先的只有**工程诚实度**——公开的负面结果与失效边界；能力维度全面落后，第一个真对手不是 Claude Code，而是自己的 bash-only 基线。
+A deliberately critical 25-dimension comparison (as of 2026-09; facta data from actually reading the code): the only clear lead is **engineering honesty**—published negative results and failure boundaries. On capability it lags across the board; the first real competitor isn't Claude Code, it's its own bash-only baseline.
+
+![facta × 主流 coding agent 25 维对标 / 25-dimension comparison with mainstream coding agents](docs/assets/competitive-comparison.png)
+
+---
+
 ## 快速开始 / Quick Start
 
 需要 Python 3.11+。 / Requires Python 3.11+.
