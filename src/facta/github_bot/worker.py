@@ -45,6 +45,12 @@ TRACE_TAIL = 4000         # 收尾评论里带上的模型输出/事件尾巴长
 # 状态判断和提交都必须排除它们——否则 git add -A 会把副作用扫进 PR（issue #2 实录）。
 GIT_EXCLUDES = [":(exclude)data/"]
 
+# 提交闸门（issue #15 ②）：agent 干活时会自己造临时文件（补丁脚本、探针脚本……），
+# 它自述「用完即删」但可能没删（PR #14 的 patch_013.py 实录）。git add -A 会把它们
+# 一并扫进 PR。改为白名单提交：只有预期路径进 commit，其余列进 PR 正文供人工核对。
+COMMIT_ALLOW_PREFIXES = ("src/", "tests/", "docs/", "evals/")
+COMMIT_ALLOW_FILES = frozenset({"pyproject.toml", "README.md"})
+
 
 def env(name: str, default: str | None = None) -> str:
     v = os.environ.get(name, default)
@@ -171,6 +177,44 @@ def _auto_deny(name: str, args: dict) -> bool:
     return False  # bot 不批准任何事；被拒后 run_turn 会把拒绝回灌给模型
 
 
+def _verify_ci_trio() -> tuple[str, str, str, list[str]]:
+    """CI 同口径复验（issue #15 ①）：提示词要求的三门由 worker 兜底复跑。
+
+    返回 (ruff 输出, mypy 输出, pytest 输出, 未通过的科目列表)——任何一门红了
+    都如实写进 PR 正文：「bot 认为验证过了」必须等于「CI 认为通过」。
+    """
+    lint_out = _run(["ruff", "check", "src/", "evals/", "tests/"], check=False)
+    type_out = _run(["mypy"], check=False)
+    test_out = _run(["python", "-m", "pytest", "tests/", "-x", "--timeout", "120"],
+                    check=False)
+    bad = []
+    if "All checks passed" not in lint_out:  # ruff 全绿会打印这行，不能按空输出判
+        bad.append("ruff")
+    if "error:" in type_out:
+        bad.append("mypy")
+    if "failed" in test_out or "error" in test_out:
+        bad.append("pytest")
+    return lint_out, type_out, test_out, bad
+
+
+def _stage_whitelist() -> tuple[list[str], list[str]]:
+    """提交闸门（issue #15 ②）：白名单路径才进 commit。
+
+    agent 干活时会自造临时文件（补丁脚本、探针脚本……），它自述「用完即删」但
+    可能没删（PR #14 的 patch_013.py 实录）。返回 (待提交, 被拦截) 两组路径，
+    拦截组不进 commit、列进 PR 正文供人工核对。
+    """
+    staged, blocked = [], []
+    status = _run(["git", "status", "--porcelain", "--", ".", *GIT_EXCLUDES])
+    for line in status.splitlines():
+        path = line[3:].split(" -> ")[-1].strip('"')  # 兼容 rename 的 old -> new
+        if path.startswith(COMMIT_ALLOW_PREFIXES) or path in COMMIT_ALLOW_FILES:
+            staged.append(path)
+        else:
+            blocked.append(path)
+    return staged, blocked
+
+
 def run_fix_issue(progress: Progress) -> int:
     issue = gh_json(f"issues/{ISSUE}")
     title = issue.get("title", "")
@@ -222,19 +266,32 @@ def run_fix_issue(progress: Progress) -> int:
         progress.post("✅ 调查完毕，但 agent 判断无需修改代码，未产生提交。\n\n" + progress.reply[-2000:])
         return 0
 
-    test_out = _run(["python", "-m", "pytest", "tests/", "-x", "--timeout", "120"],
-                    check=False)
-    if "failed" in test_out or "error" in test_out:
-        progress.post(f"⚠️ agent 已改完但测试未全绿，先把现状推上来供人工接手。\n\n"
-                      f"```\n{test_out[-2000:]}\n```")
+    lint_out, type_out, test_out, verify_bad = _verify_ci_trio()
+    if verify_bad:
+        progress.post(f"⚠️ agent 已改完但复验未全绿（{', '.join(verify_bad)}），"
+                      f"先把现状推上来供人工接手。\n\n"
+                      f"```\n{(lint_out + type_out + test_out)[-2000:]}\n```")
 
-    _run(["git", "add", "-A", "--", ".", *GIT_EXCLUDES])
+    staged, blocked = _stage_whitelist()
+    if not staged:
+        progress.post("✅ 调查完毕，但改动均在提交白名单之外，未产生提交。\n\n"
+                      + progress.reply[-2000:])
+        return 0
+    _run(["git", "add", "--", *staged])
     _run(["git", "commit", "-m", f"bot: fix issue #{ISSUE} - {title[:60]}"])
     _run(["git", "push", "-u", "origin", branch])
+    blocked_note = ""
+    if blocked:
+        blocked_note = ("\n\n## ⚠️ 提交闸门拦截的文件（未进本 PR，请人工核对后清理）\n\n"
+                        + "\n".join(f"- `{p}`" for p in blocked))
     pr_url = gh("pr", "create", "--title", f"bot: fix #{ISSUE} {title[:60]}",
                 "--body-file", "-", input_text=(
                     f"Fixes #{ISSUE}\n\n## agent 调查与修改说明\n\n{progress.reply[-TRACE_TAIL:]}\n\n"
-                    f"## 测试结果\n\n```\n{test_out[-2000:]}\n```\n\n"
+                    f"## 复验结果（worker 兜底复跑，与 CI 同口径）\n\n"
+                    f"### ruff\n```\n{lint_out[-1000:] or 'clean'}\n```\n"
+                    f"### mypy\n```\n{type_out[-1000:]}\n```\n"
+                    f"### pytest\n```\n{test_out[-2000:]}\n```\n"
+                    f"{blocked_note}\n\n"
                     f"> 由 facta-bot 生成，合并前请人工 review。"
                 )).strip()
     progress.post(f"✅ PR 已创建：{pr_url}")
