@@ -22,6 +22,9 @@
      env-prefix / dangerous-arg / credential-path / not-whitelisted /
      empty），经 needs_confirmation 进审计的 extra["guard"]。「这次弹窗
      撞的是哪道围栏」从此是记录里的事实，不再靠模型自述
+  ⑧ 引号归一（P1-4）：凭证判定先剥 token 的成对包裹引号再匹配——写法
+     不是语义，`cat ".env"` 与 `cat .env` 同判。修前 `.env` 的两个锚点
+     都够不着引号形态，命令静默退回白名单免确认。
 """
 
 from __future__ import annotations
@@ -91,7 +94,7 @@ _DANGEROUS_PREFIXES: dict[str, frozenset[str]] = {
 # `.env` 失效。只收「读了就等于泄漏」的几类；沙箱那边 deny read 只围 .env
 # 一族（home 凭证 deny read 会打断沙箱内 git 的 SSH 认证），这层补上缺口。
 # 误报口径（tests/test_terminal.py 钉住）：grep -r env src/、cat docs/env.md、
-# ls .ssh（列目录名不泄内容）都不触发。
+# ls .ssh（列目录名不泄内容）都不触发，加引号也一视同仁（P1-4）。
 _CREDENTIAL_RE = re.compile(
     r"(?:^|/)\.env"                       # .env / .env.local / .env.example
     r"|\.ssh/"                            # ~/.ssh/xxx（裸目录名 .ssh 不算）
@@ -101,15 +104,35 @@ _CREDENTIAL_RE = re.compile(
     r"|(?:^|/)\.(?:netrc|npmrc|git-credentials)$"
 )
 
+# 成对包裹引号（P1-4）：token 首尾同一种引号才算包裹，剥掉后重判。
+_BARE_QUOTES = "\"'"
+
+
+def _strip_wrapping_quotes(token: str) -> str:
+    """剥掉 token 的成对包裹引号（P1-4）。
+
+    语义是归一化写法，不是替 shell 做词法分析：只认「首尾同一种引号且
+    长度 ≥2」的成对形态；落单引号（`"env`、`env"`）原样返回，不猜用户
+    想说什么。误报方向安全——剥出来的内容仍要过 _CREDENTIAL_RE，认不出
+    凭证路径就不触发。
+    """
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in _BARE_QUOTES:
+        return token[1:-1]
+    return token
+
 
 def _has_credential_path(command: str) -> bool:
     """命令任一 token 是否指向凭证路径（049）。
 
     token 级检查 + 等号形式取右值（--file=.env → .env），避免整串匹配
-    把无关文本误判成路径。
+    把无关文本误判成路径；再剥成对包裹引号（P1-4），否则 `cat ".env"`
+    的 token 是 `".env"`，`(?:^|/)\\.env` 的两个锚点都够不着 → 静默免确认。
+    两步次序要紧：先取等号右值再剥引号，`--file=".env"` 这种叠加写法
+    才一并命中；反过来的话引号在串尾、与串首的 `-` 不成对，会漏过去。
     """
     return any(
-        _CREDENTIAL_RE.search(token.rsplit("=", 1)[-1]) for token in command.split()
+        _CREDENTIAL_RE.search(_strip_wrapping_quotes(token.rsplit("=", 1)[-1]))
+        for token in command.split()
     )
 
 

@@ -140,6 +140,16 @@ def test_dangerous_or_complex_commands_need_confirm(command):
     "cat ~/.git-credentials",
     # 等号形式：取右值再判（否则 --file=.env 会漏）
     "tar --file=.env",
+    # P1-4：token 被引号包裹时曾是盲区（锚点要求 .env 在串首或 / 之后）
+    'cat ".env"',
+    "cat '.env'",
+    'cat "./.env"',
+    'head -20 ".env.local"',
+    'cat ".ssh/id_rsa"',
+    "cat '~/.ssh/id_rsa'",
+    'cat "server.pem"',
+    "tar --file='.env'",
+    'tar --file=".env"',
 ])
 def test_credential_paths_need_confirm(command):
     assert needs_confirm(command) is True
@@ -160,9 +170,20 @@ def test_credential_paths_need_confirm(command):
     "cat README.md",
     "find . -name *.py",
     "python -m pytest tests/ -q",
+    'grep -r "env" src/',
+    'cat "docs/env.md"',
+    'ls ".ssh"',
 ])
 def test_non_credential_paths_stay_whitelisted(command):
     assert needs_confirm(command) is False
+
+
+# P1-4 复现：路径被引号包裹时锚点够不着 → 退回 cat 白名单静默免确认。
+# 修法（剥成对引号）的靶子：同一路径的三种写法必须同判。
+@pytest.mark.parametrize("path", [".env", "./.env", "~/.ssh/id_rsa", "keys/app.key"])
+def test_quoted_credential_path_parity(path):
+    for probe in (path, f'"{path}"', f"'{path}'"):
+        assert needs_confirm(f"cat {probe}") is True, probe
 
 
 # ADR 071 PATH 注入复现：用户把 ~/.local/bin 放 PATH 最前，里面有自己写的
@@ -188,6 +209,8 @@ def test_path_injected_basename_requires_confirm(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("command,rule", [
     ("cat .env", "credential-path"),
+    ('cat ".env"', "credential-path"),
+    ("cat '.env'", "credential-path"),
     ("cat ~/.ssh/id_rsa", "credential-path"),
     ("echo a; rm -rf b", "shell-meta"),
     ("FOO=1 pytest", "env-prefix"),
@@ -211,7 +234,7 @@ def test_confirm_rule_is_none_when_whitelisted(command):
 def test_confirm_rule_never_drifts_from_needs_confirm():
     # needs_confirm 是薄封装：真值必须逐条一致，否则 60+ 条既有断言与归因各说各话
     commands = [
-        "ls", "cat .env", "cat README.md", "git status", "git push", "rm -rf x",
+        "ls", "cat .env", 'cat ".env"', "cat README.md", "git status", "git push", "rm -rf x",
         "python -m pytest", "python x.py", "echo a; rm b", "", "sort -o out in",
         "find . -delete", "FOO=1 ls", "cat ~/.ssh/id_rsa", "cat keyboard.md",
     ]
