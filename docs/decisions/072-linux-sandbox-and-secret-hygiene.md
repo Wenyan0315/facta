@@ -100,6 +100,26 @@ OWNER/MEMBER/COLLABORATOR。残余：PAT 无法按「不许读 actions secrets�
    / 目录黑名单 + MEMORY_WRITE_FENCE）；不可用则在 ADR 补记实测结论后重审。
 3. 乙、丙否决（理由如上）；网络维度维持「另案」不变。
 
+## 实测记录（2026-10-02，探针 workflow run 36952782730）
+
+1. **丁案已落地**（#22）：`terminal.py` 子进程 env 剥 `*_KEY/_TOKEN/_SECRET` 形态变量，
+   测试钉住 `sk-` 形态秘密不进子进程。
+2. **探针①（裸 bwrap）= FAIL**：ubuntu-24.04 runner 报
+   `bwrap: setting up uid map: Permission denied`，实测
+   `kernel.apparmor_restrict_unprivileged_userns = 1`——Ubuntu 23.10+ 的 AppArmor
+   userns 限制实锤，bwrap 开箱不可用。
+3. **探针①b（`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` 后）= OK**：
+   runner 一次性 VM 内 sudo 改内核参数可行，bwrap 正常起。
+4. **探针②（写围栏语义）= 对齐 seatbelt**：workspace 内可写（`WRITE_WORKSPACE: OK`），
+   `/etc` 与 `$HOME` 只读（`Read-only file system`）——甲案的 profile 语义成立。
+5. **探针③（/proc/self/environ）= 可见**：`SECRET_PROBE_TOKEN` 经 `grep -c` 命中 1 次——
+   威胁模型 3 实锤，bwrap 不围 env，丁案净化是必要补层（已落地）。
+
+**当前待拍板项**：甲案落地的唯一代价是 agent.yml 加一行
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`（在 bot job 内、
+跑 agent 之前；runner 一次性，影响面限于当次 run）。拍板通过则按 048 同构实现
+`detect_backend()` Linux 分支；否决则本 ADR 以丁案-only 结题，残余写围栏缺口挂触发信号。
+
 ## 触发信号
 
 - bwrap 探针在 ubuntu-24.04 runner 的实测结果 → 决定甲案是否落地
