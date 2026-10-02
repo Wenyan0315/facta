@@ -22,11 +22,38 @@ from facta.core.audit import AuditLog
 from facta.tools import files as files_mod
 from facta.tools import sandbox
 from facta.tools.registry import Tool, ToolRegistry
-from facta.tools.sandbox import build_seatbelt_profile, detect_backend, wrap_command
+from facta.tools.sandbox import (
+    build_bwrap_argv,
+    build_seatbelt_profile,
+    detect_backend,
+    wrap_command,
+)
 from facta.tools.terminal import _run_command
 
 HAS_SEATBELT = sys.platform == "darwin" and shutil.which("sandbox-exec") is not None
 seatbelt_only = pytest.mark.skipif(not HAS_SEATBELT, reason="需要 macOS sandbox-exec")
+
+# 072 甲案：bwrap 探测制与 detect_backend 同源——which 命中 + 空跑成功才算在
+# （Ubuntu 23.10+ AppArmor 限 userns，binary 在不代表能跑）。
+def _has_bwrap() -> bool:
+    if not sys.platform.startswith("linux") or not shutil.which("bwrap"):
+        return False
+    try:
+        return subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--unshare-pid",
+             "--die-with-parent", "/bin/true"],
+            capture_output=True, timeout=10, check=False,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+HAS_BWRAP = _has_bwrap()
+bwrap_only = pytest.mark.skipif(not HAS_BWRAP, reason="需要 Linux + 可用 bubblewrap")
+# 后端互斥：macOS 优先 seatbelt，bwrap 测试只在「bwrap 是检出后端」时跑
+bwrap_backend = pytest.mark.skipif(
+    not (HAS_BWRAP and not HAS_SEATBELT), reason="需要 bwrap 为检出后端",
+)
 
 # pytest tmp_path 在 macOS 常含 /var→/private/var symlink；seatbelt 按真实
 # 路径匹配，root 必须 resolve 后才与 profile 锚点对齐（调用方责任，钉在
@@ -51,7 +78,12 @@ def test_detect_backend_env_off(monkeypatch):
 
 
 def test_detect_backend_matches_platform():
-    expected = "seatbelt" if HAS_SEATBELT else None
+    if HAS_SEATBELT:
+        expected = "seatbelt"
+    elif HAS_BWRAP:
+        expected = "bwrap"
+    else:
+        expected = None
     assert detect_backend() == expected
 
 
@@ -299,8 +331,8 @@ def test_audit_sandbox_field(tmp_path):
     reg.execute("run_command", '{"command": "ls"}', confirm=lambda n, a: False)  # 拒绝
     reg.execute("read_file", "{}")
     events = audit.read()
-    assert events[0]["sandbox"] in ("seatbelt", "off")   # 批准带标
-    assert events[1]["sandbox"] in ("seatbelt", "off")   # 拒绝也带标
+    assert events[0]["sandbox"] in ("seatbelt", "bwrap", "off")   # 批准带标
+    assert events[1]["sandbox"] in ("seatbelt", "bwrap", "off")   # 拒绝也带标
     assert "sandbox" not in events[2]                    # 非沙箱工具零行为差
 
 
@@ -355,3 +387,164 @@ def test_env_read_deny_is_zero_friction_for_python(tmp_path):
     assert "dotenv: False" in r
     assert "open: PermissionError" in r
     assert "canary" not in r
+
+
+# ── 8. bwrap 后端（072 甲案）：argv 结构 + 实跑围栏 ──────────
+# 语义逐条对齐 seatbelt（ADR 072 补注记录三个已知语义差：枚举式遮蔽 /
+# 目录 --tmpfs / EROFS 文案）。实跑类需要 bwrap 为检出后端（CI 钉
+# ubuntu-22.04 + apt 装 bubblewrap 后恒跑——bot 的日常运行态进 CI 视野）。
+
+def test_bwrap_argv_structure_and_order(tmp_path):
+    """argv 骨架：ro-bind / 打头、写白名单随后、黑名单遮蔽最后（bwrap 按序
+    应用、后者盖前者——与 seatbelt「后定义者胜出」同构，顺序漂移即红）。"""
+    root = _root(tmp_path)
+    (root / "data" / "memory").mkdir(parents=True)
+    argv = build_bwrap_argv("echo hi", root=root)
+    r = str(root)
+    assert argv[0] == "bwrap"
+    assert argv[1:4] == ["--ro-bind", "/", "/"]                     # 全机只读打底
+    assert ["--bind", r, r] == argv[argv.index(r) - 1:argv.index(r) + 2]
+    assert argv[-3:] == ["/bin/sh", "-c", "echo hi"]                # shell 语义由围栏内 sh 承担
+    # 顺序：写白名单（rw bind）必须早于一切遮蔽（ro-bind/tmpfs 盖回）
+    first_rw = argv.index("--bind")
+    last_ro = len(argv) - 1 - argv[::-1].index("--ro-bind")
+    assert first_rw < last_ro
+    # 黑名单目录在场才遮蔽（bwrap 对不存在 source 报错——判在是显式税）
+    assert str(root / "data" / "memory") in argv
+    assert str(root / "data" / "notes") not in argv                 # 不存在 → 无害省略
+    # .git 丙案同款：hooks/config 围死，其余 .git 可写保 commit 闭环
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n")
+    argv = build_bwrap_argv("echo hi", root=root)
+    assert str(root / ".git" / "hooks") in argv
+    assert str(root / ".git" / "config") in argv
+
+
+def test_bwrap_argv_env_masking(tmp_path):
+    """049 对齐：root 级 .env* 前缀 + 任意深度 .env——文件走 /dev/null 遮蔽
+    （读空写 EROFS），目录走 --tmpfs（读空、写随进程消失）。"""
+    root = _root(tmp_path)
+    (root / ".env").write_text("SECRET=x")
+    (root / ".env.local").write_text("SECRET=y")
+    (root / "sub").mkdir()
+    (root / "sub" / ".env").write_text("SECRET=z")
+    (root / "envdir").mkdir()
+    (root / "envdir" / ".env").mkdir()
+    argv = build_bwrap_argv("echo hi", root=root)
+    text = " ".join(argv)
+    for p in (root / ".env", root / ".env.local", root / "sub" / ".env"):
+        assert f"--ro-bind /dev/null {p}" in text, p
+    assert f"--tmpfs {root / 'envdir' / '.env'}" in text
+    # 去重：root/.env 同时命中 glob('.env*') 与 rglob('.env')，只遮一次
+    # （按 argv 元素数，不能用子串 count——.env 是 .env.local 的前缀）
+    pairs = list(zip(argv, argv[1:], argv[2:], strict=False))
+    mask = ("--ro-bind", "/dev/null", str(root / ".env"))
+    assert pairs.count(mask) == 1
+
+
+@bwrap_backend
+def test_bwrap_write_fence_allows_root_denies_home(tmp_path):
+    root = _root(tmp_path)
+    inside = root / "ok.txt"
+    r = _run_command(f"touch {inside}", root=root)
+    assert "exit code: 0" in r and inside.exists()
+
+    home_target = Path.home() / f".facta_bw_fence_{os.getpid()}"
+    try:
+        r = _run_command(f"touch {home_target}", root=root)
+        assert "Read-only file system" in r
+        assert not home_target.exists()
+    finally:
+        home_target.unlink(missing_ok=True)
+
+
+@bwrap_backend
+def test_bwrap_env_denied(tmp_path):
+    """写 EROFS + 读空（/dev/null 遮蔽）：canary 一字不漏。"""
+    root = _root(tmp_path)
+    (root / ".env").write_text("SECRET=canary-DO-NOT-LEAK")
+    (root / "sub").mkdir()
+    (root / "sub" / ".env").write_text("SECRET=canary-nested")
+
+    r = _run_command("cat .env", root=root)
+    assert "canary" not in r
+    r = _run_command("cat sub/.env", root=root)
+    assert "canary" not in r
+    r = _run_command("echo x > .env", root=root)
+    assert "Read-only file system" in r
+    assert (root / ".env").read_text() == "SECRET=canary-DO-NOT-LEAK"   # 宿主侧原样
+    # 正对照：普通文件照读照写——围栏没误伤日常工作流
+    (root / "README.md").write_text("hello")
+    assert "hello" in _run_command("cat README.md", root=root)
+
+
+@bwrap_backend
+def test_bwrap_memory_write_denied_read_allowed(tmp_path):
+    """052 核心在 bwrap 上同样成立：记忆资产写/追加/删除全 EROFS，读照常——
+    i6 的 bash 臂规避链（自写脚本落盘 data/notes）在 bot 的 Linux 运行态也走不通。"""
+    root = _root(tmp_path)
+    notes = root / "data" / "notes"
+    notes.mkdir(parents=True)
+    (notes / "a.md").write_text("hi")
+    (root / "data" / "graph.json").write_text("{}")
+
+    assert "hi" in _run_command("cat data/notes/a.md", root=root)       # 读侧放行
+    r = _run_command("echo poison > data/notes/x.md", root=root)
+    assert "Read-only file system" in r and not (notes / "x.md").exists()
+    r = _run_command("echo poison >> data/notes/a.md", root=root)
+    assert "Read-only file system" in r and (notes / "a.md").read_text() == "hi"
+    r = _run_command("rm data/notes/a.md", root=root)
+    assert "Read-only file system" in r and (notes / "a.md").exists()
+    r = _run_command("echo {} > data/graph.json", root=root)
+    assert "Read-only file system" in r
+    assert (root / "data" / "graph.json").read_text() == "{}"
+    # i6 实际观测形状：解释器直写（绕开 shell 重定向）
+    r = _run_command(
+        f"{sys.executable} -c \"open('data/notes/p.md','w').write('poison')\"", root=root,
+    )
+    assert "Read-only file system" in r and not (notes / "p.md").exists()
+    # 正对照：非记忆路径不误伤
+    r = _run_command("echo ok > data/other.md", root=root)
+    assert "exit code: 0" in r and (root / "data" / "other.md").exists()
+
+
+@bwrap_backend
+def test_bwrap_git_hooks_config_denied_but_commit_loop_works(tmp_path):
+    """048 丙案在 bwrap 上同款：毒化入口围死 + 日常 commit 闭环保留。"""
+    root = _root(tmp_path)
+    _init_repo_outside_sandbox(root)
+
+    hook = root / ".git" / "hooks" / "pre-commit"
+    r = _run_command(f"echo evil > {hook}", root=root)
+    assert "Read-only file system" in r and not hook.exists()
+
+    r = _run_command("git config user.name evil", root=root)
+    assert "exit code: 0" not in r
+    assert "evil" not in (root / ".git" / "config").read_text()
+
+    (root / "a.txt").write_text("hi")
+    r = _run_command(
+        "git add a.txt && git -c user.name=t -c user.email=t@t commit -qm init",
+        root=root,
+    )
+    assert "exit code: 0" in r, r
+    assert "init" in _run_command("git log --oneline", root=root)
+
+
+@bwrap_backend
+def test_bwrap_tmp_writable_and_child_inherits(tmp_path):
+    """写白名单含 /tmp（pytest 缓存、临时脚本的日常去处）；sh 套 sh 的子进程
+    逃不出围栏（curl x | sh 同款链）。"""
+    root = _root(tmp_path)
+    marker = f"facta_bw_tmp_{os.getpid()}"
+    r = _run_command(f"touch /tmp/{marker} && echo ok", root=root)
+    assert "ok" in r
+    _run_command(f"rm -f /tmp/{marker}", root=root)
+
+    home_target = Path.home() / f".facta_bw_nest_{os.getpid()}"
+    try:
+        r = _run_command(f"sh -c 'touch {home_target}'", root=root)
+        assert "Read-only file system" in r
+        assert not home_target.exists()
+    finally:
+        home_target.unlink(missing_ok=True)

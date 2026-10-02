@@ -3,7 +3,9 @@
 形态（048 裁定·甲案）：平台派发抽象层——detect_backend() 探测本机可用
 后端，wrap_command() 把 shell 命令包进沙箱 argv；无后端环境诚实降级
 （原样跑 + 审计打标 off），不假装有围栏。macOS 用系统自带 sandbox-exec
-（seatbelt）；Linux/Windows 后端挂触发信号，检出也不假装支持。
+（seatbelt）；Linux 用 bubblewrap（072 甲案落地，探测制：which 命中还要
+空跑成功——Ubuntu 23.10+ AppArmor 限制 userns，binary 在不代表能跑，
+探针实锤 ubuntu-latest FAIL / ubuntu-22.04 OK）；Windows 后端挂触发信号。
 
 seatbelt 实战语义（本机探测地面真值，048 ADR）：
 - (deny default) 一刀切会掐死 shell 启动（getcwd/dyld 被拒）——实战
@@ -24,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -50,7 +53,33 @@ def detect_backend() -> str | None:
         return None
     if sys.platform == "darwin" and shutil.which("sandbox-exec"):
         return "seatbelt"
+    if sys.platform.startswith("linux") and _bwrap_available():
+        return "bwrap"
     return None
+
+
+def _bwrap_available() -> bool:
+    """bwrap 探测制（072 甲案）：which 命中 + 空跑成功才算在——Ubuntu 23.10+
+    用 AppArmor 限制非特权 userns 创建（kernel.apparmor_restrict_unprivileged_userns=1），
+    binary 装了也跑不起（探针 run 36954014738：ubuntu-latest FAIL、
+    ubuntu-22.04 OK）。试跑失败诚实降级 off，不假装有围栏——048 同款裁定。
+
+    不做缓存：which + 空跑合计几十毫秒，run_command 频率低；缓存会让
+    FACTA_SANDBOX=off 在同进程内不生效。
+    """
+    if not shutil.which("bwrap"):
+        return False
+    try:
+        proc = subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--unshare-pid",
+             "--die-with-parent", "/bin/true"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
 
 
 def build_seatbelt_profile(root: Path) -> str:
@@ -111,17 +140,75 @@ def build_seatbelt_profile(root: Path) -> str:
     return "\n".join(rules)
 
 
+def build_bwrap_argv(command: str, *, root: Path) -> list[str]:
+    """生成 bwrap argv（072 甲案）。root 必须已 resolve——与 seatbelt 同款
+    锚点纪律：bwrap 按真实路径挂 bind，symlink 锚点会让围栏整圈对不上。
+
+    语义逐条对齐 seatbelt profile（探针 run 36954014738 实测成立）：
+    - --ro-bind / / ≈ (allow file-read*) + 写默认拒：全机可读、处处只读
+    - 写白名单 = root + /tmp（seatbelt 的 root/TMPDIR//private/tmp 对应物；
+      Linux 侧 TMPDIR 缺省即 /tmp）
+    - --dev /dev：/dev/null 一族可写——git 等工具启动即开 /dev/null，
+      ro-bind / 会连设备写都掐死（seatbelt 的 (allow (literal "/dev/null")) 同款）
+    - 黑名单后 bind 覆盖白名单：bwrap 按序应用 bind、后者盖前者——与
+      seatbelt「同 operation 后定义者胜出」同构（测试钉住顺序）
+    - 网络不放 --unshare-net：与 048「网络维度另案」同款裁定
+
+    与 seatbelt 的三个已知语义差（ADR 072 补注，均为 bwrap 无 regex 所致）：
+    - 遮蔽清单是 wrap 时枚举不是模式匹配——wrap 之后新建的 .env 不在围栏内
+    - .env 目录用 --tmpfs 遮蔽：读空、写「成功」但随进程消失（文件则用
+      --ro-bind /dev/null，读空写 EROFS，与 seatbelt 完全同语义）
+    - 报错文案是 Read-only file system（EROFS）不是 Operation not permitted
+      （EPERM）——模型自我纠正的提示词要认两种（terminal 描述已对齐）
+    """
+    r = str(root)
+    argv = [
+        "bwrap",
+        "--ro-bind", "/", "/",
+        "--dev", "/dev",
+        "--tmpfs", "/dev/shm",   # multiprocessing/posix shm（seatbelt 的 ipc-posix-shm 对应物）
+        "--bind", r, r,
+        "--bind", "/tmp", "/tmp",
+    ]
+    # 写黑名单：ro-bind 自身盖回只读（可读不可写 = seatbelt deny file-write*）。
+    # 存在才 bind——seatbelt 对不存在路径「规则无害空转」，bwrap 对不存在的
+    # source 直接报错，判在是显式税。
+    for rel in (*_BLACKLIST_DIRS, *MEMORY_WRITE_FENCE):
+        p = root / rel
+        if p.exists():
+            argv += ["--ro-bind", str(p), str(p)]
+    # .git 丙案同款：只围死 hooks 与 config 两个毒化入口，保日常 commit 闭环
+    for p in (root / ".git" / "hooks", root / ".git" / "config"):
+        if p.exists():
+            argv += ["--ro-bind", str(p), str(p)]
+    # 读+写双遮（049 对齐）：root 级 .env* 前缀 + 任意深度 .env 文件/目录
+    masked: set[Path] = set()
+    for p in sorted(root.glob(".env*")) + sorted(root.rglob(".env")):
+        if p in masked or not p.exists():
+            continue
+        masked.add(p)
+        if p.is_dir():
+            argv += ["--tmpfs", str(p)]
+        else:
+            argv += ["--ro-bind", "/dev/null", str(p)]
+    argv += ["--unshare-pid", "--die-with-parent", "/bin/sh", "-c", command]
+    return argv
+
+
 def wrap_command(command: str, *, root: Path) -> tuple[list[str] | None, str]:
     """把 shell 命令包进沙箱。返回 (argv, backend)；无后端 (None, "off")
     = 降级原样跑（调用方 shell=True 走现状路径）。
 
-    argv 形态：sandbox-exec -p <profile> /bin/sh -c <command>——
+    argv 形态：<backend argv> /bin/sh -c <command>——
     shell 语义（管道/重定向/展开）由围栏内的 sh 承担，与现状 shell=True
     等价，只是多了进程级写围栏。
     """
-    if detect_backend() == "seatbelt":
+    backend = detect_backend()
+    if backend == "seatbelt":
         return (
             ["sandbox-exec", "-p", build_seatbelt_profile(root), "/bin/sh", "-c", command],
             "seatbelt",
         )
+    if backend == "bwrap":
+        return build_bwrap_argv(command, root=root), "bwrap"
     return None, "off"
