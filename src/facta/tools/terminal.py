@@ -278,6 +278,13 @@ def register_terminal_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                 ".env 同样不可读（Operation not permitted），私钥/证书一类凭证"
                 "路径会触发用户确认；需要密钥或配置值时不要自己去读，"
                 "直接请用户提供或代为执行。"
+                "命令必须逐条裸跑：含 shell 元字符（&&、|、>、; 等）一律触发"
+                "确认，复合命令拆成多条单命令分别执行。"
+                "被闸门拒绝时回灌带规则名，按名修正："
+                "shell-meta=拆了重试；not-whitelisted=换白名单只读命令"
+                "（ls/cat/grep/git status 等）或请用户代为执行；"
+                "credential-path=不要读凭证，请用户提供；"
+                "dangerous-arg=参数有写副作用，去掉该参数重试。"
             ),
             parameters={
                 "type": "object",

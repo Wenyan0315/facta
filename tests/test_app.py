@@ -618,7 +618,7 @@ def test_confirm_reject_flow_end_to_end(tmp_path):
     events = _read_events(client, run_id)
     assert [e["type"] for e in events][-1] == "run.completed"   # 拒绝后仍正常收口
     tool_results = [e["data"]["result"] for e in events if e["type"] == "tool.result"]
-    assert any("用户拒绝了" in r for r in tool_results)
+    assert any("确认闸门拒绝" in r for r in tool_results)
     assert not (tmp_path / "pwned.txt").exists()   # 拒绝 = 根本没执行
 
 
