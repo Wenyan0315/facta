@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -41,6 +42,22 @@ from facta.tools.sandbox import wrap_command
 
 TIMEOUT_SECONDS = 60
 MAX_OUTPUT_CHARS = 6000          # stdout+stderr 合并截断（与 read_file 同纪律）
+
+
+def _sanitized_env() -> dict[str, str]:
+    """子进程 env 净化（ADR 072 丁案）：剥掉秘密形态的变量。
+
+    主进程需要 LLM key / PAT 跑模型和开 PR，子进程不需要——而白名单免确认的
+    `cat /proc/self/environ`（Linux）一次就能把 *_API_KEY / BOT_TOKEN 全带进
+    模型上下文（049 的 .env 正则管的是文件路径，够不着 /proc）。seatbelt 围
+    文件不围 env，故 macOS 同样受益。判定按命名习惯：_KEY/_TOKEN/_SECRET
+    结尾 + 含 TOKEN/SECRET（MONKEY 这类不结尾的不误伤）。
+    """
+    def secret(name: str) -> bool:
+        n = name.upper()
+        return n.endswith(("_KEY", "_TOKEN", "_SECRET")) or "TOKEN" in n or "SECRET" in n
+
+    return {k: v for k, v in os.environ.items() if not secret(k)}
 
 # 免确认白名单（S4b 草案裁定）：纯读取单命令；git 只给只读子命令
 # （git push / git branch -D 也是 git，不能整只放）；python 只给 -m pytest。
@@ -243,6 +260,7 @@ def _run_command(command: str, *, root: Path = WORKSPACE_ROOT) -> str:
             argv if argv is not None else command,
             shell=argv is None,
             cwd=root,
+            env=_sanitized_env(),   # 072 丁案：子进程拿不到秘密，/proc/environ 读了也是空的
             capture_output=True,
             text=True,
             errors="replace",   # 命令吐非 UTF-8 字节（grep 二进制库等）不能让整轮炸

@@ -1,0 +1,57 @@
+# bwrap 可用性探针（ADR 072 甲案前置）：ubuntu runner 上 bubblewrap 的
+# 非特权 user namespace 是否开箱可用——Ubuntu 23.10+ 用 AppArmor 限制了
+# userns 创建，能否跑通决定甲案（Linux 沙箱后端）是否落地。
+# 手动触发（workflow_dispatch），结果记录回 ADR 072。
+
+name: bwrap-probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 环境指纹
+        run: |
+          lsb_release -a 2>/dev/null | head -2
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo "sysctl 项不存在（=未限制）"
+          sysctl kernel.unprivileged_userns_clone 2>/dev/null || true
+
+      - name: 安装 bubblewrap
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+
+      - name: 探针① 空跑（userns 能不能建）
+        id: smoke
+        run: |
+          if bwrap --ro-bind / / --unshare-pid --die-with-parent /bin/true; then
+            echo "BWRAP_SMOKE=OK" >> "$GITHUB_OUTPUT"
+          else
+            echo "BWRAP_SMOKE=FAIL" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 探针② 写围栏语义（对齐 seatbelt profile 的最小集）
+        if: steps.smoke.outputs.BWRAP_SMOKE == 'OK'
+        run: |
+          mkdir -p /tmp/ws/allowed
+          bwrap --ro-bind / / \
+                --bind /tmp/ws /tmp/ws \
+                --unshare-pid --die-with-parent \
+                /bin/sh -c '
+                  touch /tmp/ws/allowed/x && echo "WRITE_WORKSPACE: OK"
+                  touch /etc/evil 2>&1 | head -1 | sed "s/^/WRITE_ETC: /"
+                  touch "$HOME/evil" 2>&1 | head -1 | sed "s/^/WRITE_HOME: /"
+                '
+
+      - name: 探针③ /proc/self/environ 语义确认（威胁模型 3 取证）
+        if: steps.smoke.outputs.BWRAP_SMOKE == 'OK'
+        run: |
+          SECRET_PROBE_TOKEN=should-not-leak bwrap --ro-bind / / \
+            --unshare-pid --die-with-parent \
+            /bin/sh -c 'grep -c SECRET_PROBE /proc/self/environ; echo "^ 1=进程 env 经 /proc 可见——丁案净化的必要性实锤"'
+
+      - name: 结论
+        if: always()
+        run: |
+          echo "smoke=${{ steps.smoke.outputs.BWRAP_SMOKE }}"
+          echo "smoke=OK → ADR 072 甲案可落地；FAIL → 记录实测结论，重审（丁案-only 或 sudo sysctl 放行）"
