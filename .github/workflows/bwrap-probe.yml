@@ -30,8 +30,19 @@ jobs:
             echo "BWRAP_SMOKE=FAIL" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: 探针①b sysctl 放行后重试（裸 bwrap FAIL 时的回退路径）
+        if: steps.smoke.outputs.BWRAP_SMOKE == 'FAIL'
+        id: smoke_sudo
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if bwrap --ro-bind / / --unshare-pid --die-with-parent /bin/true; then
+            echo "BWRAP_SUDO=OK" >> "$GITHUB_OUTPUT"
+          else
+            echo "BWRAP_SUDO=FAIL" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 探针② 写围栏语义（对齐 seatbelt profile 的最小集）
-        if: steps.smoke.outputs.BWRAP_SMOKE == 'OK'
+        if: steps.smoke.outputs.BWRAP_SMOKE == 'OK' || steps.smoke_sudo.outputs.BWRAP_SUDO == 'OK'
         run: |
           mkdir -p /tmp/ws/allowed
           bwrap --ro-bind / / \
@@ -44,7 +55,7 @@ jobs:
                 '
 
       - name: 探针③ /proc/self/environ 语义确认（威胁模型 3 取证）
-        if: steps.smoke.outputs.BWRAP_SMOKE == 'OK'
+        if: steps.smoke.outputs.BWRAP_SMOKE == 'OK' || steps.smoke_sudo.outputs.BWRAP_SUDO == 'OK'
         run: |
           SECRET_PROBE_TOKEN=should-not-leak bwrap --ro-bind / / \
             --unshare-pid --die-with-parent \
@@ -53,5 +64,8 @@ jobs:
       - name: 结论
         if: always()
         run: |
-          echo "smoke=${{ steps.smoke.outputs.BWRAP_SMOKE }}"
-          echo "smoke=OK → ADR 072 甲案可落地；FAIL → 记录实测结论，重审（丁案-only 或 sudo sysctl 放行）"
+          echo "smoke（裸 bwrap）=${{ steps.smoke.outputs.BWRAP_SMOKE }}"
+          echo "smoke_sudo（sysctl 放行后）=${{ steps.smoke_sudo.outputs.BWRAP_SUDO }}"
+          echo "裸 OK → agent.yml 零改动可落地甲案"
+          echo "裸 FAIL + sudo OK → 甲案可落地但 workflow 需加一行 sudo sysctl（runner 一次性，可接受待拍板）"
+          echo "双 FAIL → 退回丁案-only，ADR 072 补记实测"
