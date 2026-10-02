@@ -304,8 +304,25 @@ def test_confirm_rejected_never_runs(tmp_path):
         confirm=lambda name, args: False,
     )
 
-    assert "用户拒绝了" in out and "换方案" in out   # 回灌的是指引不是异常
+    assert "确认闸门拒绝" in out and "换方案" in out   # 回灌的是指引不是异常
+    assert "not-whitelisted" in out                    # 规则名回灌（#17）：模型能按名修正
     assert not (tmp_path / "pwned.txt").exists()      # 拒绝 = 根本没执行
+
+
+def test_denial_names_shell_meta_rule(tmp_path):
+    """#17 文案修复：复合命令被拒时，回灌必须点名 shell-meta——
+
+    bot 场景没有用户可以「说明理由再重试」，模型自我纠正的唯一原料
+    就是规则名（054 同类：批准路径静默曾幻觉出「没弹确认」）。
+    """
+    registry = _terminal_registry(root=tmp_path)
+
+    out = registry.execute(
+        "run_command", json.dumps({"command": "ls && pytest"}),
+        confirm=lambda name, args: False,
+    )
+
+    assert "shell-meta" in out
 
 
 def test_confirm_approved_executes(tmp_path):
@@ -368,7 +385,7 @@ def test_no_confirm_channel_defaults_to_reject(tmp_path):
 
     out = registry.execute("run_command", json.dumps({"command": "touch pwned.txt"}))
 
-    assert "用户拒绝了" in out
+    assert "确认闸门拒绝" in out
     assert not (tmp_path / "pwned.txt").exists()
 
 
@@ -394,7 +411,7 @@ def test_rejection_is_audited(tmp_path):
     records = audit.read()
     assert len(records) == 1
     assert records[0]["tool"] == "run_command"
-    assert "用户拒绝了" in records[0]["result"]
+    assert "确认闸门拒绝" in records[0]["result"]  # 审计与模型所见同文案（054 口径）
 
 
 def test_guard_rule_is_audited_on_both_paths(tmp_path):
@@ -468,7 +485,7 @@ def test_run_turn_passes_confirm_through(tmp_path, monkeypatch):
     assert reply is not None and reply.content == "好的，我换个方案"
     assert not (tmp_path / "x.txt").exists()
     tool_msgs = [m for m in session.messages if m.role == "tool"]
-    assert any("用户拒绝了" in (m.content or "") for m in tool_msgs)
+    assert any("确认闸门拒绝" in (m.content or "") for m in tool_msgs)
 
 
 # ---------- CLI 确认缝 ----------

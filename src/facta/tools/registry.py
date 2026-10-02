@@ -219,7 +219,12 @@ class ToolRegistry:
         # 就正好漏掉要归因的那一条。
         guard = needs if isinstance(needs, str) else None
         if needs and (confirm is None or not confirm(name, args)):
-            result = "用户拒绝了这次操作（未经确认不执行）。请换方案，或先向用户说明理由再重试。"
+            # 回灌带规则名（#17）：旧文案「用户拒绝了」在 bot 场景是误导（没有用户），
+            # 且模型看不到自己撞了哪道墙——054 记录的幻觉确认事故正源于这种静默。
+            # 规则词表归工具所有（如 run_command 的 description），registry 只透传名字。
+            rule = f"（触发规则：{guard}）" if guard else ""
+            result = (f"操作被确认闸门拒绝{rule}，未执行。请换方案；"
+                      f"若是规则误伤，修正触发点后重试。")
             _record(self._audit, tool, name, args, result, guard)
             return result
 
