@@ -248,6 +248,28 @@ def test_run_command_echo_and_exit_code():
     out = _run_command("echo hello")
     assert "exit code: 0" in out and "hello" in out
 
+
+def test_child_env_strips_secret_vars(monkeypatch, tmp_path):
+    """ADR 072 丁案：子进程 env 不含秘密形态变量，主进程 env 不动。
+
+    地面真值是 `cat /proc/self/environ` 这类白名单免确认读法——子进程里
+    没有，读了也读不到。用解释器自印 env 取证（跨平台，不依赖 /proc）。
+    """
+    import os
+    import sys
+
+    monkeypatch.setenv("FACTA_TEST_LEAK_TOKEN", "sk-should-not-leak-072")
+    monkeypatch.setenv("FACTA_TEST_PLAIN_VAR", "visible-072")
+
+    out = _run_command(
+        f'"{sys.executable}" -c "import os; print(sorted(os.environ.values()))"',
+        root=tmp_path,
+    )
+
+    assert "sk-should-not-leak-072" not in out        # 秘密形态：剥
+    assert "visible-072" in out                        # 普通变量：留
+    assert os.environ["FACTA_TEST_LEAK_TOKEN"] == "sk-should-not-leak-072"  # 主进程不动
+
     # 非零退出码如实回传（模型可据此自纠）。用 shell 内建 exit 3 定码——
     # ls 不存在路径的退出码跨平台不同（BSD=1 / GNU=2），不可断言具体值
     # （CI 15 连红的根因之一：本地 macOS 全绿掩盖了 Linux runner 的差异）
