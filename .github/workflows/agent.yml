@@ -38,7 +38,7 @@ jobs:
           github.event.comment.author_association)) ||
       (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04   # 072 甲案：bwrap 在 22.04 裸跑可用（ubuntu-latest 的 AppArmor 限 userns）
     timeout-minutes: 30            # agent runaway 的总闸：到点 Actions 强杀
     permissions:
       contents: write
@@ -50,6 +50,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: 安装 bubblewrap（072 甲案：bot 的 run_command 写围栏后端，探测制检出）
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
 
       - name: 安装 facta（含 dev：pytest/ruff/mypy；含 rag：worker 导入链需要 httpx）
         run: pip install -e ".[dev,rag]"

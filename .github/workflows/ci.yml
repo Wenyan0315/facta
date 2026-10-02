@@ -6,13 +6,16 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04   # 072 甲案：与 bot 运行态同版本，bwrap 裸跑可用
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: 安装 bubblewrap（072 甲案：test_sandbox 的 bwrap 实跑类在 CI 恒跑）
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
 
       - name: 安装依赖（dev 静态检查件 + rag 向量库 + web 壳——mypy 要看全 import 面）
         run: |

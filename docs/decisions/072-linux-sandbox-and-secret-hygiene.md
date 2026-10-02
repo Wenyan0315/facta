@@ -1,6 +1,6 @@
 # ADR 072：Linux 沙箱后端与 bot 场景的秘密卫生
 
-- 状态：**草案（待拍板）**
+- 状态：**已拍板（丁案 #22 落地；甲案 ubuntu-22.04 路线落地）**
 - 日期：2026-10-02
 - 立项出处：#15 复盘后的优先级梳理（P1）——facta-bot 跑在 ubuntu CI 上，而 048 的
   seatbelt 是 macOS 专属；`detect_backend()` 在 CI 恒返回 None，`wrap_command` 诚实降级
@@ -115,13 +115,32 @@ OWNER/MEMBER/COLLABORATOR。残余：PAT 无法按「不许读 actions secrets�
 5. **探针③（/proc/self/environ）= 可见**：`SECRET_PROBE_TOKEN` 经 `grep -c` 命中 1 次——
    威胁模型 3 实锤，bwrap 不围 env，丁案净化是必要补层（已落地）。
 
-**当前待拍板项**：甲案落地的唯一代价是 agent.yml 加一行
-`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`（在 bot job 内、
-跑 agent 之前；runner 一次性，影响面限于当次 run）。拍板通过则按 048 同构实现
-`detect_backend()` Linux 分支；否决则本 ADR 以丁案-only 结题，残余写围栏缺口挂触发信号。
+~~**当前待拍板项**~~（已拍板，见下节实测记录续）
+
+## 实测记录续（2026-10-02，矩阵探针 run 36954014738 → 甲案落地）
+
+6. **ubuntu-22.04 裸 bwrap = OK**（矩阵探针新增 leg）：AppArmor userns 限制是
+   23.10 引入的，22.04 LTS 上 `bwrap --ro-bind / / --unshare-pid` 开箱即通，
+   探针②③语义同验成立。**裁定：走 22.04 路线，不动内核参数**——agent.yml 与
+   ci.yml 钉 `ubuntu-22.04`（22.04 支持到 2027 年中，到期前重审或届时
+   ubuntu-latest 策略有变再说），零 sudo sysctl。
+7. **甲案落地形态**：`sandbox.py` 加 `_bwrap_available()`（which + 空跑探测制，
+   检出也不假装支持——048 同款）与 `build_bwrap_argv()`，`wrap_command` 派发
+   第二支。语义逐条对齐 seatbelt：ro-bind / 打底、写白名单 root+/tmp、
+   黑名单 ro-bind 盖回、.git hooks/config 围死、.env 读写双遮、网络放行（另案不变）。
+8. **与 seatbelt 的三个已知语义差**（bwrap 无 regex，接受并记录）：
+   - 遮蔽清单是 wrap 时枚举——wrap 之后新建的 .env 不在围栏内（seatbelt 是模式匹配）；
+   - .env 目录走 `--tmpfs` 遮蔽（读空、写「成功」但随进程消失），文件走
+     `--ro-bind /dev/null`（读空写 EROFS，与 seatbelt 同语义）；
+   - 报错文案不是 seatbelt 的 Operation not permitted（EPERM）：ro-bind 目录写 =
+     Read-only file system（EROFS），/dev/null 遮蔽文件写 = Permission denied
+     （EACCES）——run_command 工具描述已对齐三种文案，bot 自我纠正材料不缺。
+9. **CI 视野**：ci.yml 同钉 22.04 + 装 bubblewrap——test_sandbox 的 bwrap 实跑类
+   （写围栏正反对称/记忆围栏/git 闭环/子进程继承）在 CI 恒跑，bot 的日常运行态
+   不再是「本地 skip 的盲区」。
 
 ## 触发信号
 
-- bwrap 探针在 ubuntu-24.04 runner 的实测结果 → 决定甲案是否落地
-- bot run 审计里 `sandbox=off` 的出现率（现状：CI 上恒 100%）→ 甲案落地后应归零
+- ~~bwrap 探针实测结果~~（已完成：24.04 FAIL / sudo OK / 22.04 裸 OK，甲案走 22.04 落地）
+- bot run 审计里 `sandbox=off` 的出现率（现状：CI 上恒 100%）→ 甲案落地后应归零（出现即查 bwrap 安装/探测）
 - 出现「测试文件被注入改写后跑 pytest」的实机样本 → 威胁模型 2 的残余面升级为独立案
