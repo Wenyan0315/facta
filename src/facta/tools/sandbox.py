@@ -157,9 +157,11 @@ def build_bwrap_argv(command: str, *, root: Path) -> list[str]:
     与 seatbelt 的三个已知语义差（ADR 072 补注，均为 bwrap 无 regex 所致）：
     - 遮蔽清单是 wrap 时枚举不是模式匹配——wrap 之后新建的 .env 不在围栏内
     - .env 目录用 --tmpfs 遮蔽：读空、写「成功」但随进程消失（文件则用
-      --ro-bind /dev/null，读空写 EROFS，与 seatbelt 完全同语义）
-    - 报错文案是 Read-only file system（EROFS）不是 Operation not permitted
-      （EPERM）——模型自我纠正的提示词要认两种（terminal 描述已对齐）
+      --ro-bind /dev/null，读空、写被拒）
+    - 报错文案与 seatbelt 的 Operation not permitted（EPERM）不同：ro-bind
+      目录写 = Read-only file system（EROFS），/dev/null 遮蔽文件写 =
+      Permission denied（EACCES）——模型自我纠正的提示词要认（terminal
+      描述已对齐，测试钉住两种文案）
     """
     r = str(root)
     argv = [

@@ -471,7 +471,9 @@ def test_bwrap_env_denied(tmp_path):
     r = _run_command("cat sub/.env", root=root)
     assert "canary" not in r
     r = _run_command("echo x > .env", root=root)
-    assert "Read-only file system" in r
+    # /dev/null 遮蔽文件的写拒绝文案实测是 Permission denied（EACCES）——
+    # 与 ro-bind 目录的 Read-only file system（EROFS）不同，两种都认
+    assert "Permission denied" in r or "Read-only file system" in r
     assert (root / ".env").read_text() == "SECRET=canary-DO-NOT-LEAK"   # 宿主侧原样
     # 正对照：普通文件照读照写——围栏没误伤日常工作流
     (root / "README.md").write_text("hello")

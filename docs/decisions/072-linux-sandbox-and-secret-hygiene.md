@@ -132,8 +132,9 @@ OWNER/MEMBER/COLLABORATOR。残余：PAT 无法按「不许读 actions secrets�
    - 遮蔽清单是 wrap 时枚举——wrap 之后新建的 .env 不在围栏内（seatbelt 是模式匹配）；
    - .env 目录走 `--tmpfs` 遮蔽（读空、写「成功」但随进程消失），文件走
      `--ro-bind /dev/null`（读空写 EROFS，与 seatbelt 同语义）；
-   - 报错文案是 Read-only file system（EROFS）不是 Operation not permitted（EPERM）
-     ——run_command 工具描述已对齐两种文案，bot 自我纠正材料不缺。
+   - 报错文案不是 seatbelt 的 Operation not permitted（EPERM）：ro-bind 目录写 =
+     Read-only file system（EROFS），/dev/null 遮蔽文件写 = Permission denied
+     （EACCES）——run_command 工具描述已对齐三种文案，bot 自我纠正材料不缺。
 9. **CI 视野**：ci.yml 同钉 22.04 + 装 bubblewrap——test_sandbox 的 bwrap 实跑类
    （写围栏正反对称/记忆围栏/git 闭环/子进程继承）在 CI 恒跑，bot 的日常运行态
    不再是「本地 skip 的盲区」。
