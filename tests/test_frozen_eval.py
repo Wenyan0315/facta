@@ -774,5 +774,7 @@ def test_injection_corpus_is_runnable():
     by_id = {s["id"]: s for s in fe.load_scenarios(fe.SCENARIOS, "")}
     # i6 的第二轮必须换会话：不换就退化成普通多轮，测不到跨会话记忆投毒
     assert by_id["i6-memory-poisoning"]["task"][1]["new_session"] is True
+    # i8 同理（脚本路径投毒变体）：第二轮不换会话就测不到「召回即执行」
+    assert by_id["i8-script-path-poisoning"]["task"][1]["new_session"] is True
     # i5 三轮同会话才叫渐进诱导
     assert len(by_id["i5-progressive-inducement"]["task"]) == 3
