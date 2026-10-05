@@ -17,6 +17,7 @@ import logging
 
 from facta.core.llm import LLM
 from facta.core.types import Message
+from facta.memory.learned import STATUS_PREFIXES
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +36,14 @@ _SUMMARY_PROMPT = (
     "禁止写入：对助手自身能力/表现的评价或建议（如'检索偶发不命中，需兜底'）、"
     "对用户意图的猜测（如'用户在测试边界'）、任何策略性元叙事。"
     "这类内容混进摘要会污染后续行为（自证预言）。"
-    "摘要末尾必须固定附加一个小节：先写「【关键决定与约束】」再逐条列出仍有效的"
-    "决定、承诺、约束（含旧摘要里仍有效的——摘要滚动合并，不许把上一轮的决定洗掉）；"
-    "确实没有这类内容时写「【关键决定与约束】无」。"
+    "摘要末尾必须固定附加一个小节：先写「【关键决定与约束】」，内分三段、"
+    "无内容的段整段省略——「有效：」列仍有效的决定、承诺、约束"
+    "（含旧摘要里仍有效的）；「被取代：」列被本次对话推翻的旧决定，"
+    "写明旧 → 新的取代关系；「已撤回：」列用户明确收回且无替代的。"
+    "滚动合并纪律：旧摘要决定节里的每一条必须在新小节三段之一落位，"
+    "不许静默消失——「不做了」这类改主意绝不能洗成「曾讨论过该计划」，"
+    "必须以「被取代/已撤回」留痕；"
+    "确实没有任何决定类内容时写「【关键决定与约束】无」。"
     "小节是摘要正文的固定组成部分，不是可选装饰。"
     "除该小节外直接输出摘要正文，不要前言、标题或解释。"
 )
@@ -45,6 +51,11 @@ _SUMMARY_PROMPT = (
 # 073 摘要决定节：摘要末尾的固定小节标记——程序校验的锚点（防摘要
 # 洗平决定：Confidence Routing ⑦④ 与 FR「滚动摘要洗平撤回」同族）。
 _DECISION_TAG = "【关键决定与约束】"
+
+# 077 决定节轨迹词：复用 074 learned 状态词表（learned.STATUS_PREFIXES）——
+# 「被取代/已撤回」跨两个载体（learned 行内 tag、摘要决定节段头）只认一份词。
+# 已过期排除：时效失效是 074 规则层的活，与「改主意」（撤回/取代）不同范畴。
+_RETRACT_TAGS = tuple(t for t in STATUS_PREFIXES if t != "已过期")
 
 
 def window_start(messages: list[Message], keep_last: int = KEEP_LAST) -> int:
@@ -115,6 +126,7 @@ def maybe_compress(
     if len(fresh) < margin:
         return summary, summarized_upto        # 缓存复用：本轮零成本
     logger.debug("记忆压缩：窗口外积压 %s 条 → 滚动摘要（一次内部 LLM 调用）", len(fresh))
+    prev = summary
     summary = _summarize(llm, summary, fresh)
     # 073 程序校验：决定节必须在场（指令层要求 + 程序检查兑现——062 同款
     # 「谁检查兑现」补位）。宽容方向：缺失只记 warning 照用不阻断——观测
@@ -123,6 +135,15 @@ def maybe_compress(
         logger.warning(
             "[摘要决定节缺失] 滚动摘要未携带「%s」小节（照用不阻断；升级前落盘的"
             "旧缓存重组一次即自愈）", _DECISION_TAG,
+        )
+    # 077 轨迹丢失检测：撤回/取代状态一旦落进决定节，滚动合并只增不减——
+    # 空段省略的段头在场性是程序可判信号（旧带新无 = 对账纪律被违反）。
+    # 「该落没落」防不了（那是 P1-5 六段式的语义对照活），只防「落了又洗」。
+    lost = tuple(t for t in _RETRACT_TAGS if t in (prev or "") and t not in summary)
+    if lost:
+        logger.warning(
+            "[决定节轨迹丢失] 滚动合并洗掉了旧摘要已落的撤回/取代状态（%s）——"
+            "照用不阻断（ADR 077）", "、".join(lost),
         )
     logger.debug("摘要完成：%s", summary)   # 可观测性：摘要不再是黑箱，当场查验保真度
     return summary, start
