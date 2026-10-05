@@ -162,6 +162,59 @@ def test_summary_missing_decision_section_warns_but_passes(caplog):
     assert "摘要决定节缺失" in caplog.text   # 但留下了可观测信号
 
 
+# ── 077 决定节轨迹：撤回/取代状态只增不减（防「落了又洗」） ──
+
+
+def test_retraction_track_lost_in_rolling_merge_warns(caplog):
+    """ADR 077 主验收：旧摘要决定节已落「被取代」轨迹，新摘要把它洗掉——
+    warning 观测 + 照用不阻断（对账纪律的程序兑现，只防「落了又洗」）。"""
+    import logging as _logging
+
+    old = "会话摘要。\n【关键决定与约束】\n被取代：闪存档 → chat 档\n已撤回：周报自动生成"
+    washed = "会话摘要。\n【关键决定与约束】\n有效：用 chat 档"   # 轨迹整体被洗
+    llm = ScriptedLLM([assistant(washed)])
+    with caplog.at_level(_logging.WARNING):
+        summary, _ = maybe_compress(llm, _overdue_messages(), old, 1)
+    assert summary == washed                     # 宽容：照用不阻断
+    assert "决定节轨迹丢失" in caplog.text        # 洗掉的两个轨迹都报
+    assert "被取代" in caplog.text and "已撤回" in caplog.text
+
+
+def test_retraction_track_kept_is_silent(caplog):
+    """轨迹被滚动合并如实保留（对账纪律生效的正向路径）：零 warning。"""
+    import logging as _logging
+
+    old = "会话摘要。\n【关键决定与约束】\n被取代：闪存档 → chat 档"
+    kept = "新摘要。\n【关键决定与约束】\n有效：用 chat 档\n被取代：闪存档 → chat 档"
+    llm = ScriptedLLM([assistant(kept)])
+    with caplog.at_level(_logging.WARNING):
+        summary, _ = maybe_compress(llm, _overdue_messages(), old, 1)
+    assert summary == kept
+    assert "决定节轨迹丢失" not in caplog.text
+
+
+def test_retraction_track_newly_appeared_is_silent(caplog):
+    """轨迹无中生有（本批对话刚发生改主意）：合法新增，不是「丢失」。"""
+    import logging as _logging
+
+    old = "会话摘要。\n【关键决定与约束】\n有效：用闪存档"
+    fresh_track = "新摘要。\n【关键决定与约束】\n被取代：闪存档 → chat 档\n有效：用 chat 档"
+    llm = ScriptedLLM([assistant(fresh_track)])
+    with caplog.at_level(_logging.WARNING):
+        summary, _ = maybe_compress(llm, _overdue_messages(), old, 1)
+    assert summary == fresh_track
+    assert "决定节轨迹丢失" not in caplog.text
+
+
+def test_summary_prompt_carries_retraction_discipline():
+    """对账纪律与三段式必须长在 prompt 里（防后续改 prompt 顺手洗掉指令）：
+    段头词、逐条落位纪律、「洗成曾有个计划」的反面教材锚点。"""
+    from facta.memory.compressor import _SUMMARY_PROMPT
+
+    for anchor in ("被取代：", "已撤回：", "不许静默消失", "曾讨论过该计划"):
+        assert anchor in _SUMMARY_PROMPT, f"prompt 丢了 077 对账纪律锚点：{anchor}"
+
+
 # ── 孤儿清理 ──────────────────────────────────────────────
 
 def test_trim_incomplete_round_removes_orphan():
