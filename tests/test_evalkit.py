@@ -14,6 +14,7 @@ from facta.evalkit import (
     precision_at_k,
     recall_at_k,
     reciprocal_rank,
+    staleness_at_k,
 )
 
 # ---------- 指纹判定 ----------
@@ -57,6 +58,31 @@ def test_recall_at_k_empty_expected_is_zero():
 def test_reciprocal_rank():
     assert reciprocal_rank(["a", "b"], ["b"]) == pytest.approx(0.5)
     assert reciprocal_rank(["a"], ["b"]) == 0.0
+
+
+# ---------- 陈旧率（ADR 075 影子指标） ----------
+
+def test_staleness_at_k_ratio_of_checked():
+    # 分母＝实检候选数：3 条里 1 条旧 → 1/3
+    assert staleness_at_k([True, False, False], 3) == pytest.approx(1 / 3)
+
+
+def test_staleness_at_k_truncates_at_k():
+    # 只看前 k 个：第 3 位是旧条但 k=1 时不进分母
+    assert staleness_at_k([True, False, True], 1) == pytest.approx(1.0)
+
+
+def test_staleness_at_k_denominator_is_checked_not_k():
+    # 没检够 k 也按实检数算（不惩罚检索深度，与 recall_at_k 无期望=0 同款宽容）
+    assert staleness_at_k([True], 3) == pytest.approx(1.0)
+
+
+def test_staleness_at_k_empty_is_zero():
+    assert staleness_at_k([], 3) == 0.0
+
+
+def test_staleness_at_k_all_fresh_is_zero():
+    assert staleness_at_k([False, False], 2) == 0.0
 
 
 # ---------- miss 归因（022 判定件） ----------

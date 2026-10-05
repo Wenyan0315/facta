@@ -623,12 +623,16 @@ def test_make_plan_warns_despite_embellished_titles(tmp_path, monkeypatch):
 
 
 def _learned(tmp_path, monkeypatch, **buckets: str) -> None:
-    """把 learned 三桶指到 tmp；关键字参数名＝桶名，值＝该桶文件正文。"""
+    """把 learned 三桶指到 tmp；关键字参数名＝桶名，值＝该桶文件正文。
+
+    同时把 075 的 x-ray 台账也指到 tmp，防本文件的召回测试写真实仓库资产。
+    """
     d = tmp_path / "recall_learned"
     d.mkdir()
     for name, text in buckets.items():
         (d / f"{name}.md").write_text(text, encoding="utf-8")
     monkeypatch.setattr("facta.tools.plan._LEARNED_DIR", d)
+    monkeypatch.setattr("facta.tools.plan._XRAY_PATH", tmp_path / "recall_xray.jsonl")
 
 
 def _plan_echo(args: dict) -> str:
@@ -711,6 +715,49 @@ def test_recall_keeps_provenance_tags(tmp_path, monkeypatch):
     out = _plan_echo({"steps": [{"title": "甲"}], "tools": ["read_file"]})
     assert "[已验证]" in out
     assert "固化:sid-1" not in out
+
+
+# ---------- 075：recall x-ray（为什么召回 + 陈旧率影子指标） ----------
+
+
+def _read_xray(tmp_path) -> list[dict]:
+    path = tmp_path / "recall_xray.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_recall_xray_records_why_and_staleness(tmp_path, monkeypatch):
+    # 影子池（include_inactive=True）一起算 top-k：旧条进陈旧率，但不进注入
+    _learned(tmp_path, monkeypatch, constraints=(
+        "- [2026-09-01] [已过期:2026-09-20] spawn_step 旧条甲。\n"
+        "- [2026-09-02] spawn_subagent 在用乙。\n"))
+    out = _plan_echo({"steps": [{"title": "甲"}],
+                      "tools": ["spawn_step", "spawn_subagent"]})
+    assert "在用乙" in out                       # 在用条目照常注入
+    assert "旧条甲" not in out                   # 旧条被读侧过滤（074 照旧）
+    rows = _read_xray(tmp_path)
+    assert len(rows) == 1
+    rec = rows[0]
+    assert rec["keys"] == ["spawn_step", "spawn_subagent"]   # 为什么召回：键集合
+    assert rec["staleness"] == pytest.approx(0.5)            # 2 候选里 1 旧条
+    assert {c["category"] for c in rec["candidates"]} == {"constraints"}
+    stale = next(c for c in rec["candidates"] if c["status"] == "已过期")
+    assert stale["matched"] == ["spawn_step"]                 # 逐条记触发键
+
+
+def test_recall_xray_stale_excludes_retracted(tmp_path, monkeypatch):
+    # 陈旧＝已过期∪被取代；「已撤回」是人主动删，不算过时（ADR 075 乙）
+    _learned(tmp_path, monkeypatch, constraints=(
+        "- [2026-09-01] [已过期:2026-09-20] spawn_step 甲。\n"
+        "- [2026-09-02] [被取代:2026-09-21] spawn_step 乙。\n"
+        "- [2026-09-03] [已撤回:2026-09-22] spawn_step 丙。\n"
+        "- [2026-09-04] spawn_step 丁。\n"))
+    out = _plan_echo({"steps": [{"title": "甲"}], "tools": ["spawn_step"]})
+    assert "spawn_step 丁" in out                 # 只有在用条目进注入
+    assert "spawn_step 甲" not in out and "spawn_step 乙" not in out
+    rec = _read_xray(tmp_path)[0]
+    assert rec["staleness"] == pytest.approx(2 / 3)   # 过期+取代 2 旧条 / 3 影子候选
+    statuses = [c["status"] for c in rec["candidates"]]
+    assert statuses == ["已过期", "被取代", "已撤回"]
 
 
 # ---------- 062 收官回验（承诺漂移） ----------
