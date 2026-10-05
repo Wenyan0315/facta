@@ -35,6 +35,20 @@ def reciprocal_rank(retrieved: list[str], expected: list[str]) -> float:
     return 0.0
 
 
+def staleness_at_k(stale_flags: list[bool], k: int) -> float:
+    """前 k 个候选里「旧条」（已过期/被取代）的占比（ADR 075 影子指标）。
+
+    stale_flags[i] 为 True 表示第 i 个候选是旧条。分母 = 实检候选数
+    （min(k, len(stale_flags))）；无候选返回 0.0（与 recall_at_k 无期望返回
+    0.0 同款宽容）——「占比」按实检数算，不惩罚没检够的深度（陈旧率问的是
+    「检出来的有多旧」，不是「预算浪费了多少」）。
+    """
+    top = stale_flags[:k]
+    if not top:
+        return 0.0
+    return sum(1 for f in top if f) / len(top)
+
+
 def attribute_miss(prod_ok: bool, grep_ok: bool) -> str | None:
     """miss 归因（022 混合检索决策的判定件）。
 

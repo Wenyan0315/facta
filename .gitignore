@@ -26,6 +26,8 @@ data/worktrees/
 data/evals/
 # 060 失败台账：plan 归档的派生索引（真值源＝session.json），可删可重建
 data/plan_failures.jsonl
+# 075 召回 x-ray：召回事件的派生索引（真值源＝make_plan 召回），可删可重建
+data/recall_xray.jsonl
 servers/sandbox/
 
 # 外部公开基准（LongMemEval 等）：单文件数百 MB，可一键重下，不入库
