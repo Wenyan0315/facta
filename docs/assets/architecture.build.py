@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """按 docs/assets/architecture.prompt.md 规范重建 facta 架构图（纯 SVG，字号加大版）。"""
 import html
 from pathlib import Path
@@ -92,7 +91,8 @@ ml = ["Session：原文 · 滚动摘要 · PlanBoard",
       "项目记忆 + 用户记忆 → 主 Agent 上下文",
       "固化：萃取 → 枚举审查 → 硬校验",
       "Web 每轮重读记忆快照"]
-for i, s in enumerate(ml): text(88, MY+100+i*44, s, 22, TXT if i<2 else SUB)
+for i, s in enumerate(ml):
+    text(88, MY+100+i*44, s, 22, TXT if i<2 else SUB)
 add(f'<line x1="88" y1="{MY+286}" x2="732" y2="{MY+286}" stroke="{BORDER}" stroke-width="1.5"/>')
 text(88, MY+326, "sessions/*.json · learned/*.md", 20, SUB)
 text(88, MY+362, "~/.facta/user.md", 20, SUB)
@@ -106,7 +106,8 @@ rl = ["LLM 接口 · OpenAI 兼容供应商",
       "FallbackLLM：模型降级",
       "UsageLedger：调用用量记录",
       "用户链 / 内部链"]
-for i, s in enumerate(rl): text(1828, MY+100+i*44, s, 22, TXT if i<2 else SUB)
+for i, s in enumerate(rl):
+    text(1828, MY+100+i*44, s, 22, TXT if i<2 else SUB)
 add(f'<line x1="1828" y1="{MY+330}" x2="2472" y2="{MY+330}" stroke="{BORDER}" stroke-width="1.5"/>')
 text(1828, MY+370, "语义缓存默认关闭；场景路由可选", 20, SUB)
 
@@ -120,7 +121,7 @@ text(CX+28, CY+88, "Agent：系统提示 · 工具范围 · 轮次预算 · run_
 NW, NH, NY = 188, 62, CY+116
 nx = [CX+34, CX+250, CX+466, CX+682]
 labels4 = ["构建上下文", "模型决策", "执行工具", "回填结果"]
-for x, lb in zip(nx, labels4):
+for x, lb in zip(nx, labels4, strict=True):
     rect(x, NY, NW, NH, fill="#0E1830", stroke=AMBER, sw=2, rx=8)
     text(x+NW/2, NY+NH/2+8, lb, 21, TXT, "bold", anchor="middle")
 for i in range(3):
@@ -133,7 +134,8 @@ text(CX+CW/2+180, ry+34, "结果驱动下一轮决策", 19, AMBER)
 cl = ["计划审批 → 步骤执行 → 状态回写 → 收官",
       "可选场景路由：调整首轮工具菜单",
       "循环限制 · 协作式取消 · 事件回调"]
-for i, s in enumerate(cl): text(CX+28, CY+296+i*44, s, 22, TXT if i==0 else SUB)
+for i, s in enumerate(cl):
+    text(CX+28, CY+296+i*44, s, 22, TXT if i==0 else SUB)
 
 # 记忆 → 执行核心（虚线，上下文）
 line(760, MY+150, CX-8, MY+150, SUB, 2.5, dash="8 6")
@@ -153,7 +155,8 @@ text(88, TY+56, "ToolRegistry：参数校验 · 计划范围 · 操作确认 · 
 tl = ["内置工具：time / history / notes / files / terminal / web / todo / plan / spawn / graph",
       "子 Agent：复用 run_turn · 并行派发 · 可选 worktree 隔离",
       "MCP 客户端：stdio / HTTP → 外部工具服务器"]
-for i, s in enumerate(tl): text(88, TY+108+i*46, s, 22, SUB)
+for i, s in enumerate(tl):
+    text(88, TY+108+i*46, s, 22, SUB)
 text(88, TY+282, "文件访问围栏 · macOS seatbelt（其他平台无此后端）", 21, TEAL)
 
 # 知识检索（右卡）
@@ -163,7 +166,8 @@ kl = ["笔记 → 切块 → Embedding → 向量检索",
       "Chroma 持久化 · 内容指纹增量同步",
       "缺依赖或密钥：词袋 + 内存库",
       "知识图谱：抽取 · 同步 · 关系查询"]
-for i, s in enumerate(kl): text(1548, TY+100+i*44, s, 22, TXT if i<2 else SUB)
+for i, s in enumerate(kl):
+    text(1548, TY+100+i*44, s, 22, TXT if i<2 else SUB)
 add(f'<line x1="1548" y1="{TY+286}" x2="2472" y2="{TY+286}" stroke="{BORDER}" stroke-width="1.5"/>')
 text(1548, TY+326, "检索带出处；模型按需调用", 20, SUB)
 

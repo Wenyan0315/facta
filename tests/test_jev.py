@@ -124,16 +124,18 @@ def test_breaker_half_open_failure_reopens():
 
 
 class _MenuSpyLLM(LLM):
-    """记录每次 generate_stream 收到的 tools，按脚本吐回复。"""
+    """记录每次 generate_stream 收到的 tools 与投影 payload，按脚本吐回复。"""
 
     name = "spy"
 
     def __init__(self, script: list[Message]) -> None:
         self._script = list(script)
         self.menus: list[list[dict] | None] = []
+        self.payloads: list[list[Message]] = []   # 073：断言路由 stamp 进投影
 
     def generate(self, messages, tools=None):
         self.menus.append(tools)
+        self.payloads.append(list(messages))
         return self._script.pop(0) if self._script else Message(role="assistant", content="")
 
     def generate_stream(self, messages, tools=None):
@@ -210,6 +212,85 @@ def test_run_turn_router_failure_degrades_to_native():
     run_turn(session, "你好", agent=_agent_with_router(FakeJev([TimeoutError("x")]), reg), llm=llm)
 
     assert llm.menus[0] is not None and len(llm.menus[0]) == 1
+
+
+# ---------- 073 路由 stamp：决定显式化进投影（进投影不进底片） ----------
+
+
+def _stamps_in(messages: list[Message]) -> list[str]:
+    return [m.content for m in messages if "【场景路由】" in m.content]
+
+
+def test_route_stamp_single_tool_names_tool_and_keeps_escape():
+    # ⑦③ 漂移温床的补位：single_tool 决定显式进投影（点明工具+逃生门告知），
+    # 且绝不入底片（stamp 属于本轮视野，入史会堆垃圾）
+    reg = _reg("get_current_time", "add_todo")
+    llm = _MenuSpyLLM([
+        Message(role="assistant", content="", tool_calls=[
+            {"id": "c1", "name": "get_current_time", "arguments": "{}"}
+        ]),
+        Message(role="assistant", content="现在是下午三点"),
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+
+    run_turn(session, "几点了", agent=_agent_with_router(FakeJev(["get_current_time"]), reg), llm=llm)
+
+    stamps = _stamps_in(llm.payloads[0])
+    assert len(stamps) == 1
+    assert "get_current_time" in stamps[0]      # 决定的内容：选了哪个工具
+    assert "文字作答" in stamps[0]               # 028 决策 4：逃生门告知
+    assert _stamps_in(session.messages) == []   # 进投影不进底片
+
+
+def test_route_stamp_direct_declares_no_menu():
+    reg = _reg("get_current_time", "add_todo")
+    llm = _MenuSpyLLM([Message(role="assistant", content="直接回答")])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+
+    run_turn(session, "你好", agent=_agent_with_router(FakeJev(["direct"]), reg), llm=llm)
+
+    stamps = _stamps_in(llm.payloads[0])
+    assert len(stamps) == 1 and "直接回答" in stamps[0]
+    assert _stamps_in(session.messages) == []
+
+
+def test_route_stamp_complex_suggests_plan():
+    reg = _reg("get_current_time", "add_todo")
+    llm = _MenuSpyLLM([Message(role="assistant", content="好，我先规划")])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+
+    run_turn(session, "复杂任务", agent=_agent_with_router(FakeJev(["complex"]), reg), llm=llm)
+
+    stamps = _stamps_in(llm.payloads[0])
+    assert len(stamps) == 1 and "make_plan" in stamps[0]
+
+
+def test_route_stamp_absent_on_native_paths():
+    # 无 router / 降级 → 投影零 stamp（零开销等价：不注入任何东西）
+    reg = _reg("get_current_time")
+    llm = _MenuSpyLLM([Message(role="assistant", content="回答")])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+    agent = Agent(name="test", system_prompt="sys", registry=reg)
+
+    run_turn(session, "你好", agent=agent, llm=llm)
+    assert _stamps_in(llm.payloads[0]) == []
+
+
+def test_route_stamp_absent_when_tool_not_in_menu():
+    # single_tool 名字不在菜单 → 回退全量且决定作废（说收窄却给全量=骗模型）
+    reg = _reg("get_current_time")
+    llm = _MenuSpyLLM([Message(role="assistant", content="回答")])
+    session = Session()
+    session.messages.append(Message(role="system", content="sys"))
+
+    run_turn(session, "你好", agent=_agent_with_router(FakeJev(["add_todo"]), reg), llm=llm)
+
+    assert llm.menus[0] is not None and len(llm.menus[0]) == 1   # 回退全量
+    assert _stamps_in(llm.payloads[0]) == []
 
 
 # ---------- 装配条件（无 key 形态）----------

@@ -24,6 +24,7 @@ from dataclasses import replace
 from datetime import datetime
 from enum import Enum
 
+from facta.core.jev import RouteDecision
 from facta.core.llm import LLM, LLMUnavailableError, merge_stream_chunks
 from facta.core.types import Message
 from facta.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
@@ -300,28 +301,82 @@ def _time_stamp(now: datetime | None = None) -> Message:
     )
 
 
-def _route_first_menu(agent: Agent, user_text: str, schemas: list[dict]) -> list[dict] | None:
+def _route_first_menu(
+    agent: Agent, user_text: str, schemas: list[dict]
+) -> tuple[list[dict] | None, RouteDecision | None]:
     """M10 场景路由（轮首一针，只影响本轮第一次模型调用）。
 
-    direct      → None——省全部菜单 token，且纯聊天流量因此落进
+    返回 (菜单, 路由决定)：决定随菜单一起上浮给 run_turn 做投影注入
+    （073 路由 stamp——决定显式化，不再只以「菜单收窄」的间接信号存在）。
+
+    direct      → (None, decision)——省全部菜单 token，且纯聊天流量因此落进
                   SemanticCacheLLM 的命中区（它只在 tools=None 时生效，免费放大既有基建）
-    single_tool → 只递该工具 schema——选择权已由 Jev 行使，LLM 只填参数
+    single_tool → (只递该工具 schema, decision)——选择权已由 Jev 行使，LLM 只填参数
                   （单工具菜单即全部强制力，不用 tool_choice 强制——那会堵死
                   Jev 误判时模型直答的逃生门）；Jev 选的名字不在菜单 → 回退全量
-    complex     → 全量菜单——模型自己走 S5b make_plan
+                  且决定作废（stamp 不注入——说收窄却给全量等于骗模型）
+    complex     → (全量菜单, decision)——模型自己走 S5b make_plan
     无路由（无 key 装配缺席 / 故障降级 / 熔断跳过）→ 原生路径（v0.57 行为）
     """
     if agent.router is None:
-        return schemas or None
+        return schemas or None, None
     decision = agent.router.route(user_text)
     if decision is None:
-        return schemas or None
+        return schemas or None, None
     if decision.kind == "direct":
-        return None
+        return None, decision
     if decision.kind == "single_tool" and decision.tool is not None:
         single = [s for s in schemas if s["function"]["name"] == decision.tool]
-        return single or (schemas or None)
-    return schemas or None   # complex
+        if single:
+            return single, decision
+        return schemas or None, None   # 名字不在菜单：决定未生效，回退全量
+    return schemas or None, decision   # complex
+
+
+def _route_stamp(decision: RouteDecision | None) -> Message | None:
+    """路由决定注入投影（073，时间戳/计划 stamp 同款手法：进投影不进底片）。
+
+    Confidence Routing ⑦③：single_tool 的决定此前只以「菜单收窄」间接信号
+    存在（漂移温床）——主模型不知道路由器判了什么、也不知道收窄的菜单
+    在误判时可直答逃生。stamp 把决定显式写进本轮视野（谁做了决定、
+    决定是什么）；逃生门照 028 决策 4 保留（不强制 tool_choice）。
+    理由是程序从 kind+tool 推导的确定性文案——Jev choice 是一段式协议，
+    响应里没有理由字段可解析，不猜协议（伪造一个「Jev 的理由」反而失真）。
+    """
+    if decision is None:
+        return None
+    if decision.kind == "direct":
+        content = "【场景路由】本轮判定为直接回答：不挂工具菜单，用自身知识作答即可。"
+    elif decision.kind == "single_tool" and decision.tool is not None:
+        content = (
+            f"【场景路由】本轮判定为单工具任务，首轮菜单已收窄为 {decision.tool}。"
+            "若判定有误可直接文字作答；工具结果回灌后将恢复全量菜单。"
+        )
+    else:
+        content = (
+            "【场景路由】本轮判定为多步骤任务，全量工具菜单已挂载；"
+            "建议先用 make_plan 拆解步骤再逐个执行。"
+        )
+    return Message(role="system", content=content)
+
+
+def _prepend_stamps(
+    payload: list[Message], decision: RouteDecision | None, board: PlanBoard
+) -> None:
+    """投影头部三件 stamp 就位：时间锚点 → 路由决定 → 活跃计划（S2b/M10/073）。
+
+    三件共同契约：进投影不进底片、缺席不注入零开销、相互独立顺延补位
+    （动态游标——路由缺席时计划落到 2 号位而非留空洞）。
+    """
+    payload.insert(1, _time_stamp())
+    at = 2
+    route_msg = _route_stamp(decision)
+    if route_msg is not None:
+        payload.insert(at, route_msg)
+        at += 1
+    plan_msg = _plan_stamp(board)
+    if plan_msg is not None:
+        payload.insert(at, plan_msg)
 
 
 def _split_tool_batches(tool_calls: list[dict]) -> list[tuple[bool, list[dict]]]:
@@ -579,7 +634,7 @@ def run_turn(
     route_text = user_text if user_text is not None else next(
         (m.content for m in reversed(session.messages) if m.role == "user"), ""
     )
-    tools = _route_first_menu(agent, route_text, schemas)
+    tools, route_decision = _route_first_menu(agent, route_text, schemas)
 
     # 1) 用户这句话存进历史（底片照常全量生长，append-only 不变）
     #    续跑时不追加：底片里那句 user 消息已经在，再塞一条就是重复提问
@@ -598,14 +653,9 @@ def run_turn(
             summarizer, session.messages, session.summary, session.summarized_upto
         )
         payload = build_payload(session.messages, session.summary, session.summarized_upto)
-        # 时间锚点注入投影（不入底片）：位置固定在第 2 条（system 之后、
-        # 摘要/对话之前）；本轮工具循环共享同一个时间戳
-        payload.insert(1, _time_stamp())
-        # 活跃计划注入投影（S5b 针①，不入底片）：时间戳之后；无活跃计划
-        # 返回 None 不注入——简单任务上下文零开销
-        plan_msg = _plan_stamp(session.plan)
-        if plan_msg is not None:
-            payload.insert(2, plan_msg)
+        # 投影头部三件 stamp 就位（时间锚点/路由决定/活跃计划，不入底片；
+        # 语义与位置契约见 _prepend_stamps docstring）
+        _prepend_stamps(payload, route_decision, session.plan)
 
         # P0-6 无进展检测的状态：上一批点菜签名 + 连续重复计数（轮级局部，
         # 一轮对话结束即弃——检出的是「这一轮内原地踏步」，跨轮重复归人管）

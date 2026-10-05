@@ -125,6 +125,43 @@ def test_maybe_compress_triggers_and_advances():
     assert len(llm.calls) == 1
 
 
+# ── 073 摘要决定节：程序校验（宽容方向——缺失只 warning 照用不阻断） ──
+
+
+def _overdue_messages() -> list[Message]:
+    """攒一批窗口外积压（触发滚动摘要的量）。"""
+    messages = [Message(role="system", content="人设")]
+    for i in range(20):
+        messages.append(user(f"问{i}"))
+        messages.append(assistant(f"答{i}"))
+    return messages
+
+
+def test_summary_with_decision_section_no_warning(caplog):
+    """摘要带决定节：零 warning，小节文本随摘要原样进投影（结构化视野增益）。"""
+    import logging as _logging
+
+    good = "会话内容摘要。\n【关键决定与约束】用户要求改用闪存档。"
+    llm = ScriptedLLM([assistant(good)])
+    with caplog.at_level(_logging.WARNING):
+        summary, upto = maybe_compress(llm, _overdue_messages(), None, 1)
+    assert summary == good
+    assert "摘要决定节缺失" not in caplog.text
+
+
+def test_summary_missing_decision_section_warns_but_passes(caplog):
+    """摘要缺决定节：warning 观测信号，但照用不阻断（不为格式漂移付重试 token——
+    062 收官回验同款宽容方向；升级前落盘的旧缓存重组一次即自愈）。"""
+    import logging as _logging
+
+    bare = "会话内容摘要。"
+    llm = ScriptedLLM([assistant(bare)])
+    with caplog.at_level(_logging.WARNING):
+        summary, upto = maybe_compress(llm, _overdue_messages(), None, 1)
+    assert summary == bare                 # 摘要照用，不重生成
+    assert "摘要决定节缺失" in caplog.text   # 但留下了可观测信号
+
+
 # ── 孤儿清理 ──────────────────────────────────────────────
 
 def test_trim_incomplete_round_removes_orphan():
