@@ -23,6 +23,7 @@ import re
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 # 053 provenance：tag 词表是**闭集**，且单份真值（下面的正则由这几个常量拼出来，
@@ -37,14 +38,20 @@ VISIBLE_TAGS = ("[已验证]", "[手改]")
 HAND_EDITED_TAG = "[手改]"
 ORIGIN_TAG_PREFIX = "固化"
 
+# ADR 074：FR 四态状态 tag 前缀（在用 = 无状态 tag）。状态名 + 事件时间同落
+# 一个 tag（如 [已撤回:2026-10-05]），闭集词表与 VISIBLE_TAGS 同一纪律。
+STATUS_PREFIXES = ("已撤回", "已过期", "被取代")
+
 # 行格式：- [YYYY-MM-DD] [tag] [tag] 内容（consolidate._append 的落盘契约）。
 # tag 组可选（053）：P0-7 之前的存量行没有 tag，照旧解析、零迁移。
 # 三个捕获组 = 日期 / tag 串 / 纯正文——正文不含 tag，tag 单独成字段，
 # 否则「注入时剥掉某个 tag」就只能靠字符串切割（两处真值，会漂）。
 _TAG_NAMES = "|".join(re.escape(t[1:-1]) for t in VISIBLE_TAGS)
-_TAG_PATTERN = rf"\[(?:{_TAG_NAMES}|{ORIGIN_TAG_PREFIX}:[^\]]*)\]"
+_STATUS_NAMES = "|".join(re.escape(s) for s in STATUS_PREFIXES)
+_TAG_PATTERN = rf"\[(?:{_TAG_NAMES}|{ORIGIN_TAG_PREFIX}:[^\]]*|(?:{_STATUS_NAMES}):[^\]]*)\]"
 _LINE_RE = re.compile(rf"^- \[(\d{{4}}-\d{{2}}-\d{{2}})\] ((?:{_TAG_PATTERN} )*)(.*)$")
 _TAG_RE = re.compile(_TAG_PATTERN)
+_STATUS_TAG_RE = re.compile(rf"\[({_STATUS_NAMES}):([^\]]*)\]")
 # ADR 071：稳定 id 注释。HTML 注释不被 Markdown / 文本渲染器输出，落到行尾
 # 不影响人眼与 prompt 注入；老文件没这个注释 → read_learned 时 id=None。
 _ID_COMMENT_RE = re.compile(r"<!--id:([0-9a-f]{8})-->\s*$")
@@ -66,6 +73,11 @@ def origin_tag(sid: str) -> str:
     return f"[{ORIGIN_TAG_PREFIX}:{sid}]"
 
 
+def status_tag(status: str, day: str) -> str:
+    """状态名 + 事件时间 → 行内状态 tag（ADR 074）。status 须在 STATUS_PREFIXES。"""
+    return f"[{status}:{day}]"
+
+
 # 记忆文件的进程级互斥（S8a）：写入侧（consolidate 的 append）与编辑侧
 # （本模块的读改写整重写）共用同一批 LEARNED_DIR/*.md。整重写是「读全文
 # → 改 → 覆盖」，不锁就会把窗口期内固化刚 append 的行连旧内容一起抹掉
@@ -81,6 +93,8 @@ class LearnedLine:
     content: str       # 纯正文（不含 tag）；坏行为原行全文
     tags: tuple[str, ...] = ()   # 行内 tag（053）；老行与坏行为空
     id: str | None = None         # ADR 071：稳定 id；老文件/未启用=None
+    status: str | None = None     # ADR 074：状态（在 STATUS_PREFIXES）；在用=None
+    status_date: str | None = None  # ADR 074：事件时间（进入该态的那天）
 
 
 def format_line(date: str, tags: Sequence[str], content: str, id: str | None = None) -> str:
@@ -117,12 +131,34 @@ def render(entry: LearnedLine) -> str:
     return entry.content if entry.date is None else f"- [{entry.date}] {visible_text(entry)}"
 
 
-def read_learned(path: Path) -> list[LearnedLine]:
-    """读一个类别文件，返回全部非空行。空行跳过显示但重写时按行号保留。
+def _split_status_tags(tags_text: str) -> tuple[str | None, str | None, tuple[str, ...]]:
+    """把 tag 串里的状态 tag 与普通 tag 分开（ADR 074）。
+
+    状态 tag（[已撤回:…]/[已过期:…]/[被取代:…]）进 status/status_date，
+    其余（[已验证]/[手改]/[固化:sid]）进 tags。状态 tag 不在 VISIBLE_TAGS，
+    render/visible_text 天然滤掉；它在 read_learned 时从 tags 分离，避免
+    「状态」与「来源/背书」两类语义混在同一个 tuple 里。
+    """
+    status: str | None = None
+    status_date: str | None = None
+    regular: list[str] = []
+    for t in _TAG_RE.findall(tags_text):
+        m = _STATUS_TAG_RE.match(t)
+        if m:
+            status, status_date = m.group(1), m.group(2)
+        else:
+            regular.append(t)
+    return status, status_date, tuple(regular)
+
+
+def read_learned(path: Path, include_inactive: bool = False) -> list[LearnedLine]:
+    """读一个类别文件，返回非空行；空行跳过显示但重写时按行号保留。
 
     ADR 071：解析 `<!--id:xxx-->` 尾注释填进 id 字段；解析失败（坏行或
     老文件）→ id=None。读到的行与磁盘原文可能不一致：尾注释剥出后写入
     update_line_by_id 仍能正确回填（format_line 自动加新 id 注释）。
+    ADR 074：默认只回「在用」行（status=None）；include_inactive=True 才
+    带出被撤回/过期/取代的行——消费点零改动靠这个默认值一次过滤。
     """
     if not path.is_file():
         return []
@@ -136,15 +172,18 @@ def read_learned(path: Path) -> list[LearnedLine]:
             content_with_comment = m.group(3)
             cm = _ID_COMMENT_RE.search(content_with_comment)
             content = (content_with_comment[:cm.start()] if cm else content_with_comment).rstrip()
-            result.append(LearnedLine(
+            status, status_date, tags = _split_status_tags(m.group(2))
+            entry = LearnedLine(
                 line=i, date=m.group(1), content=content,
-                tags=tuple(_TAG_RE.findall(m.group(2))),
-                id=cm.group(1) if cm else None,
-            ))
+                tags=tags, id=cm.group(1) if cm else None,
+                status=status, status_date=status_date,
+            )
         else:
             cm = _ID_COMMENT_RE.search(raw)
             content = (raw[:cm.start()] if cm else raw).rstrip()
-            result.append(LearnedLine(line=i, date=None, content=content, id=cm.group(1) if cm else None))
+            entry = LearnedLine(line=i, date=None, content=content, id=cm.group(1) if cm else None)
+        if include_inactive or entry.status is None:
+            result.append(entry)
     return result
 
 
@@ -168,6 +207,34 @@ def _split_tags(text: str) -> tuple[list[str], str]:
         tags.append(m.group())
         text = text[m.end() + 1 :]
     return tags, text
+
+
+def _restamp_status(raw: str, status: str, day: str) -> str:
+    """给一行打/换状态 tag（ADR 074）：剥掉既有状态 tag，追加目标状态。
+
+    保留日期/可见 tag/来源 tag/正文/尾 id 注释。坏行（_LINE_RE 不匹配）
+    原样返回——它没日期没 tag，打不上状态。这是 delete_line（已撤回）、
+    consolidate 出口（已过期/被取代）共用的单份真值。
+    """
+    m = _LINE_RE.match(raw)
+    if not m:
+        return raw
+    cm = _ID_COMMENT_RE.search(m.group(3))
+    content = (m.group(3)[:cm.start()] if cm else m.group(3)).rstrip()
+    _, _, regular = _split_status_tags(m.group(2))
+    tags = [*regular, status_tag(status, day)]
+    return format_line(m.group(1), tags, content, id=cm.group(1) if cm else None)
+
+
+def set_statuses(path: Path, day: str, changes: dict[int, str]) -> None:
+    """批量按行号打状态 tag（ADR 074，供 consolidate 出口用）。单次读改写锁内完成。"""
+    if not changes:
+        return
+    with LEARNED_LOCK:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for line, status in changes.items():
+            lines[line] = _restamp_status(lines[line], status, day)
+        _rewrite(path, lines)
 
 
 def update_line(path: Path, line: int, content: str) -> None:
@@ -204,10 +271,18 @@ def update_line(path: Path, line: int, content: str) -> None:
 
 
 def delete_line(path: Path, line: int) -> None:
-    """删除一行（越界抛 IndexError）。删完的空文件保留（固化 append 的目标位）。"""
+    """撤回一行（ADR 074）：好行打 [已撤回:今天] 留 tombstone，坏行物理删。
+
+    越界抛 IndexError。tombstone 保留正文与 id——_load_known 读原行仍能看见
+    「这条被撤回了」，模型不再复活它；read_learned 默认过滤后消费点不再看见。
+    """
     with LEARNED_LOCK:
         lines = path.read_text(encoding="utf-8").splitlines()
-        del lines[line]
+        raw = lines[line]
+        if _LINE_RE.match(raw):
+            lines[line] = _restamp_status(raw, "已撤回", date.today().isoformat())
+        else:
+            del lines[line]
         _rewrite(path, lines)
 
 
@@ -243,7 +318,7 @@ def update_line_by_id(path: Path, line_id: str, content: str) -> None:
 
 
 def delete_line_by_id(path: Path, line_id: str) -> None:
-    """按稳定 id 删除一行（ADR 071）。id 不存在抛 KeyError。"""
+    """按稳定 id 撤回一行（ADR 071 + ADR 074）。好行打 [已撤回] 留 tombstone，坏行物理删；id 不存在抛 KeyError。"""
     with LEARNED_LOCK:
         lines = path.read_text(encoding="utf-8").splitlines()
         target = None
@@ -255,5 +330,9 @@ def delete_line_by_id(path: Path, line_id: str) -> None:
                 break
         if target is None:
             raise KeyError(f"id 不存在：{line_id!r}")
-        del lines[target]
+        raw = lines[target]
+        if _LINE_RE.match(raw):
+            lines[target] = _restamp_status(raw, "已撤回", date.today().isoformat())
+        else:
+            del lines[target]
         _rewrite(path, lines)
