@@ -17,6 +17,7 @@ from facta.memory.learned import (
     make_id,
     read_learned,
     render,
+    set_statuses,
     update_line,
     update_line_by_id,
     visible_text,
@@ -81,10 +82,39 @@ def test_line_out_of_range_raises(tmp_path):
         delete_line(path, 5)
 
 
-def test_delete_line_keeps_rest(tmp_path):
+def test_delete_line_leaves_tombstone(tmp_path):
     path = _write(tmp_path, "- [2026-09-13] 甲\n- [2026-09-14] 乙\n- [2026-09-15] 丙\n")
     delete_line(path, 1)
-    assert path.read_text(encoding="utf-8") == "- [2026-09-13] 甲\n- [2026-09-15] 丙\n"
+    raw = path.read_text(encoding="utf-8").splitlines()
+    # 好行打 [已撤回:今天] 留 tombstone，正文与其余行都在
+    assert raw[1].startswith("- [2026-09-14] [已撤回:")
+    assert "乙" in raw[1]
+    assert raw[0] == "- [2026-09-13] 甲"
+    assert raw[2] == "- [2026-09-15] 丙"
+    # 默认读侧过滤：只剩在用两行
+    assert [(e.line, e.content) for e in read_learned(path)] == [(0, "甲"), (2, "丙")]
+    # include_inactive 带出 tombstone，状态字段可解析
+    all_lines = read_learned(path, include_inactive=True)
+    assert [e.status for e in all_lines] == [None, "已撤回", None]
+    assert all_lines[1].status_date is not None
+
+
+def test_delete_bad_line_still_removes_physically(tmp_path):
+    # 坏行（无日期无 tag）打不上 tombstone，仍物理删
+    path = _write(tmp_path, "手写裸行\n- [2026-09-13] 好行\n")
+    delete_line(path, 0)
+    assert path.read_text(encoding="utf-8") == "- [2026-09-13] 好行\n"
+
+
+def test_set_statuses_roundtrip(tmp_path):
+    path = _write(tmp_path, "- [2026-09-13] 甲\n- [2026-09-14] 乙\n")
+    set_statuses(path, "2026-10-05", {1: "已过期"})
+    entries = read_learned(path, include_inactive=True)
+    assert entries[0].status is None and entries[0].content == "甲"
+    assert entries[1].status == "已过期" and entries[1].status_date == "2026-10-05"
+    assert entries[1].content == "乙"
+    # 默认过滤后只剩在用一行
+    assert [e.content for e in read_learned(path)] == ["甲"]
 
 
 # ---------- API 端点 ----------
@@ -199,7 +229,10 @@ def test_api_user_scope_roundtrip(monkeypatch, tmp_path):
     # 编辑保留日期前缀、删除按行号——与项目桶同一套协议（同一个 learned.py）
     assert client.put("/api/learned/user/0", json={"content": "行程提早两周提醒"}).status_code == 200
     assert client.delete("/api/learned/user/1").status_code == 200
-    assert user_md.read_text(encoding="utf-8") == "- [2026-09-20] [手改] 行程提早两周提醒\n"
+    # ADR 074：删除留 tombstone，正文仍在但默认 GET 已隐藏
+    raw = user_md.read_text(encoding="utf-8").splitlines()
+    assert raw[0] == "- [2026-09-20] [手改] 行程提早两周提醒"
+    assert raw[1].startswith("- [2026-09-21] [已撤回:")
     # 用户级操作不动项目桶（字节级）
     assert project.read_bytes() == before
 

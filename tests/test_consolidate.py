@@ -15,7 +15,7 @@ import json
 from facta.core.llm import ScriptedLLM
 from facta.core.types import Message
 from facta.memory.consolidate import consolidate
-from facta.memory.learned import ORIGIN_TAG_PREFIX, origin_tag
+from facta.memory.learned import ORIGIN_TAG_PREFIX, origin_tag, read_learned
 from facta.memory.store import Session
 
 
@@ -677,3 +677,73 @@ def test_duplicate_extract_id_dropped(tmp_path):
     assert "1 条萃取条目 id 重复，已弃" in report
     other = (tmp_path / "learned" / "other.md").read_text(encoding="utf-8")
     assert "正身" in other and "撞 id" not in other
+
+
+# ---------- ADR 074 出口闸门：过期（规则层）/ 取代（模型语义） ----------
+
+
+def test_expire_perishable_marks_existing(tmp_path):
+    """已入库的腐化条目命中 045 正则 → 打 [已过期]（纯规则层，零模型调用）；
+    正文仍在，默认读侧过滤后不再召回。"""
+    learned = tmp_path / "learned"
+    learned.mkdir(parents=True)
+    (learned / "other.md").write_text(
+        "- [2026-01-01] run_turn 在 loop.py 第 113 行\n", encoding="utf-8"
+    )
+    entries = json.dumps(
+        [{"category": "other", "content": "循环体在 loop.py"}], ensure_ascii=False
+    )
+    llm = ScriptedLLM([Message(role="assistant", content=entries)] * 2)
+
+    report, _ = consolidate(_session(_dialogue()), llm, learned)
+
+    raw = (learned / "other.md").read_text(encoding="utf-8")
+    assert "[已过期:" in raw
+    assert "run_turn 在 loop.py 第 113 行" in raw      # 正文仍在（tombstone）
+    assert "循环体在 loop.py" in raw
+    assert "1 条在用条目已过期" in report
+    assert [e.content for e in read_learned(learned / "other.md")] == ["循环体在 loop.py"]
+
+
+def test_supersede_marks_old_entry_via_model(tmp_path):
+    """被取代走模型语义检测：新条目 + 该作用域在用旧条目 → 模型回序号 → 打
+    [被取代]。旧正文仍在（tombstone），新条目照常入库。"""
+    learned = tmp_path / "learned"
+    learned.mkdir(parents=True)
+    (learned / "decisions.md").write_text(
+        "- [2026-01-01] 项目路径统一放 paths.py 管理\n", encoding="utf-8"
+    )
+    entries = json.dumps(
+        [{"category": "decisions", "content": "项目路径统一放 core/paths.py 管理"}],
+        ensure_ascii=False,
+    )
+    script = [
+        Message(role="assistant", content=entries),
+        Message(role="assistant", content=entries),
+        Message(role="assistant", content="[0]"),   # 取代旧条目序号 0
+    ]
+    llm = ScriptedLLM(script)
+
+    report, _ = consolidate(_session(_dialogue()), llm, learned)
+
+    raw = (learned / "decisions.md").read_text(encoding="utf-8")
+    assert "[被取代:" in raw
+    assert "项目路径统一放 paths.py 管理" in raw      # 旧条目正文仍在（tombstone）
+    assert "项目路径统一放 core/paths.py 管理" in raw
+    assert "1 条在用旧条目被新条目取代" in report
+    assert len(llm.calls) == 3                        # 萃取 + 审查 + 取代
+
+
+def test_supersede_skips_model_in_fresh_dir(tmp_path):
+    """省 token 触发条件：fresh 目录无存量 → 取代检测零模型调用（否则 ScriptedLLM
+    第三次会返回 [script exhausted]，报告不出现取代文案）。"""
+    entries = json.dumps(
+        [{"category": "other", "content": "某条新记忆"}], ensure_ascii=False
+    )
+    llm = ScriptedLLM([Message(role="assistant", content=entries)] * 2)
+
+    report, _ = consolidate(_session(_dialogue()), llm, tmp_path / "learned")
+
+    assert "新增 1 条" in report
+    assert "被取代" not in report
+    assert len(llm.calls) == 2                        # 萃取 + 审查，无第三次调用

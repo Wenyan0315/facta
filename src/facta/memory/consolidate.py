@@ -32,7 +32,14 @@ from pathlib import Path
 
 from facta.core.llm import LLM
 from facta.core.types import Message
-from facta.memory.learned import LEARNED_LOCK, format_line, origin_tag
+from facta.memory.learned import (
+    LEARNED_LOCK,
+    LearnedLine,
+    format_line,
+    origin_tag,
+    read_learned,
+    set_statuses,
+)
 from facta.memory.store import Session
 
 CATEGORIES = ("decisions", "constraints", "other")
@@ -128,6 +135,22 @@ REVIEW_TEMPLATE = """你是记忆档案的「审查员」。下面是候选记�
 [{{"id": "e1", "verdict": "keep"}}, {{"id": "e2", "verdict": "edit", "content": "改后全文"}}]
 （只有 edit 需要 content；一条都不留就输出 []；id 只能用候选清单里出现过的）"""
 
+SUPERSEDE_TEMPLATE = """你是记忆库的「去重员」。下面是本批即将入库的新记忆条目，以及
+该作用域下当前在用（active）的旧记忆条目（带序号）。
+
+任务：判断哪些旧条目已被新条目**取代**（同一事实的更新版本），返回这些
+旧条目的序号。取代判据：新旧讲的是同一件事，且新条目比旧条目更新、更准确
+（日期/状态/事实已变化）。只是「相关」或「同主题」不算取代；拿不准一律
+不取代（宁漏勿误删——误删会让已入库事实被标记废弃、退出召回）。
+
+新条目：
+{new_contents}
+
+在用旧条目（序号. 内容）：
+{active}
+
+只输出 JSON 整数数组（如 [1, 3]），没有取代就输出 []。序号只能用旧条目清单里出现过的。"""
+
 
 @dataclass
 class Entry:
@@ -204,6 +227,85 @@ def _is_perishable(content: str) -> bool:
     敏感是隐私泄漏，易腐是**污染用户资产且不可逆**（固化只追加、无过期），
     且模型会当真引用错答案——消融首轮就有一题因腐化条目答错方向。"""
     return any(p.search(content) for p in _PERISHABLE_PATTERNS)
+
+
+def _expire_perishable(learned_dir: Path, user_memory_path: Path | None) -> int:
+    """出口过期（ADR 074 丁）：规则层扫在用条目命中 045 易腐正则 → 打 [已过期]。
+
+    纯正则、零模型调用，与入口闸门复用同一份 _PERISHABLE_PATTERNS（单份真值）。
+    read_learned 默认只回在用行，天然跳过已撤回/已过期/被取代的旧行（不重复打标）。
+    """
+    today = date.today().isoformat()
+    paths: list[Path] = []
+    if learned_dir.is_dir():
+        paths.extend(sorted(learned_dir.glob("*.md")))
+    if user_memory_path is not None and user_memory_path.is_file():
+        paths.append(user_memory_path)
+    total = 0
+    for path in paths:
+        changes = {e.line: "已过期" for e in read_learned(path) if _is_perishable(e.content)}
+        if changes:
+            set_statuses(path, today, changes)
+            total += len(changes)
+    return total
+
+
+def _parse_int_list(text: str) -> list[int]:
+    """把模型回的序号清单解析成整数列表。宽容（剥围栏 + 抓所有数字），
+    非法文本 → 空列表（宁漏勿误删——序号在调用方再按范围过滤）。"""
+    stripped = text.strip().removeprefix("```").removesuffix("```").strip()
+    return [int(n) for n in re.findall(r"\d+", stripped)]
+
+
+def _supersede_scope(
+    new_contents: list[str],
+    active: list[tuple[Path, LearnedLine]],
+    llm: LLM,
+    today: str,
+) -> int:
+    """单作用域去重（ADR 074 戊）：本批新条目 vs 该作用域在用旧条目（带序号），
+    模型回要打 [被取代] 的旧条目序号。调用方保证 new_contents 与 active 均非空——
+    ponytail: 有存量才触发一次模型调用，fresh 目录零调用省 token。"""
+    prompt = SUPERSEDE_TEMPLATE.format(
+        new_contents="\n".join(f"- {c}" for c in new_contents),
+        active="\n".join(f"{i}. {e.content}" for i, (_, e) in enumerate(active)),
+    )
+    raw = llm.generate([Message(role="user", content=prompt)]).content
+    idxs = [i for i in _parse_int_list(raw) if 0 <= i < len(active)]
+    changes: dict[Path, dict[int, str]] = {}
+    for i in idxs:
+        path, entry = active[i]
+        changes.setdefault(path, {})[entry.line] = "被取代"
+    for path, per_path in changes.items():
+        set_statuses(path, today, per_path)
+    return sum(len(v) for v in changes.values())
+
+
+def _supersede_duplicates(
+    entries: list[Entry],
+    learned_dir: Path,
+    user_memory_path: Path | None,
+    llm: LLM,
+) -> int:
+    """出口取代（ADR 074 戊）：按作用域分桶做语义去重。project 桶扫全部类别
+    文件、user 桶扫 user.md，互不跨越（同一事实两边都记是双份噪音，入口闸门管）。"""
+    today = date.today().isoformat()
+    project_paths = sorted(learned_dir.glob("*.md")) if learned_dir.is_dir() else []
+    user_paths = (
+        [user_memory_path] if user_memory_path is not None and user_memory_path.is_file() else []
+    )
+    total = 0
+    project_new = [e.content for e in entries if e.scope == "project"]
+    if project_new:
+        active = [(p, e) for p in project_paths for e in read_learned(p)]
+        if active:
+            total += _supersede_scope(project_new, active, llm, today)
+    user_new = [e.content for e in entries if e.scope == "user"]
+    if user_new:
+        active = [(p, e) for p in user_paths for e in read_learned(p)]
+        if active:
+            total += _supersede_scope(user_new, active, llm, today)
+    return total
 
 
 def _mint_ids(items: list[dict]) -> tuple[list[dict], int]:
@@ -429,7 +531,7 @@ def _review_brief(edits: list[dict], counts: dict[str, int | bool], dup_ids: int
     return "".join(parts)
 
 
-def consolidate(
+def consolidate(  # noqa: PLR0912
     session: Session,
     llm: LLM,
     learned_dir: Path,
@@ -489,6 +591,10 @@ def consolidate(
     entries, candidates, perishable = _harden(kept_items)
     _log_edits(learned_dir, edits, sid)   # ADR 064 ③：改写留痕落盘
 
+    # ADR 074 丁：出口过期（规则层扫在用条目，零模型调用）——与本批条目无关，
+    # 独立清一次腐化库存，故放在有无新条目的分叉之前
+    expired = _expire_perishable(learned_dir, user_memory_path)
+
     # 各类拦截都报出原文（P0-7 缺背书候选 / ADR 045 易腐 / 064 对账计数），
     # 原因分开说不混报
     brief = (
@@ -506,10 +612,14 @@ def consolidate(
     if not entries:
         base = f"记忆固化：{len(raw)} 条候选全部被审查驳回（或未过硬校验），未写入"
         base += brief
+        if expired:
+            base += f"；{expired} 条在用条目已过期（已打 [已过期]）"
         if dropped_unplaced:
             base += f"；另有 {dropped_unplaced} 条用户级候选因未配置位置丢弃"
         return base, True
 
+    # ADR 074 戊：被取代走模型语义检测（有存量才触发）
+    superseded = _supersede_duplicates(entries, learned_dir, user_memory_path, llm)
     written = _append(entries, learned_dir, user_memory_path, sid)
     n_user = sum(1 for e in entries if e.scope == "user")
     n_verified = sum(1 for e in entries if e.verified)
@@ -521,6 +631,10 @@ def consolidate(
     if n_user:
         report += f"（其中用户级 {n_user} 条 → {user_memory_path}）"
     report += brief
+    if expired:
+        report += f"；{expired} 条在用条目已过期（已打 [已过期]）"
+    if superseded:
+        report += f"；{superseded} 条在用旧条目被新条目取代（已打 [被取代]）"
     if dropped_unplaced:
         report += f"；{dropped_unplaced} 条用户级候选因未配置位置丢弃"
     return report, True
