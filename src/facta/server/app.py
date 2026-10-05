@@ -224,6 +224,7 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
         # 终态判定：RunResult 枚举替代 None 二义性（S4 评审 #3）
         if result is RunResult.COMPLETED and reply is not None:
             run.preview = (reply.content or "")[:300]   # 任务视图的交付摘要
+            run.reply_text = reply.content or ""   # ADR 081：headless 同步端点的完整结果
             status = STATUS_COMPLETED
         elif result is RunResult.CANCELLED:
             status = STATUS_CANCELLED
@@ -289,6 +290,36 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         # daemon 线程：服务退出时不留阻塞；请求线程立即 202 返回
         threading.Thread(target=_run_worker, args=(ctx, run, body.text), daemon=True).start()
         return {"run_id": run.run_id, "session_id": sid}
+
+    @app.post("/api/runs/sync")
+    def create_run_sync(body: CreateRunRequest):
+        """Headless 同步提交（ADR 081）：一条往返拿结构化终态结果。
+
+        与 `POST /api/runs`（202 异步 + SSE 订阅）正交——这里是「提交 →
+        阻塞到终态 → 返回 JSON」。复用同一 `_run_worker` 与 `create_if_idle`，
+        唯一区别是请求线程 `wait` 在 `_settle_done`（076 的收官同步点，此前
+        生产只 set 不 wait）上。wait 返回时 Run 必已终态、settle 已收尾。
+
+        供外部自动化（Kimi Work 定时任务、CI）非交互驱动：它们要的是
+        `{status, text}`，不想维护 EventSource 长连接。阻塞不堵事件循环——
+        FastAPI 同步端点跑默认线程池。
+        """
+        sid = body.session_id
+        if sid is None:
+            sid = ctx.store.create(Session())   # 省略 session_id = 新开一段对话
+        else:
+            _require_session(sid)
+        run = store.create_if_idle(sid, title=body.text[:60])
+        if isinstance(run, str):
+            raise HTTPException(409, run)
+        threading.Thread(target=_run_worker, args=(ctx, run, body.text), daemon=True).start()
+        run._settle_done.wait()   # 阻塞到终态 + 收官（076 同步点）
+        return {
+            "run_id": run.run_id,
+            "session_id": sid,
+            "status": run.status,
+            "text": run.reply_text,   # 完整回复；失败/取消为空
+        }
 
     @app.get("/api/runs/{run_id}/events")
     def events(run_id: str, request: Request):
