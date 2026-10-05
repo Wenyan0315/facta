@@ -16,14 +16,17 @@ Agent 不持 llm（LLM 链是进程级资源，网关/缓存/账本挂链上，�
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from facta.core.jev import ScenarioRouter
-from facta.memory.consolidate import CATEGORIES
-from facta.memory.learned import read_learned, render
+from facta.memory.consolidate import CATEGORIES, memory_budget_units
+from facta.memory.learned import LearnedLine, read_learned, render
 from facta.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 # 主 agent 的行为定义素材（S5a 从 loop.py 搬家，一字未动——等价锁见
 # tests/test_agent.py 的 sha256 断言，013 决策记录拆分的同款手法）。
@@ -121,7 +124,23 @@ class Agent:
         )
 
 
-def _learned_block(learned_dir: Path) -> str:
+def _fit_entries(entries: list[LearnedLine], budget: int) -> tuple[list[LearnedLine], int]:
+    """新到旧装填到预算（单位=字符，ADR 078 硬上限）：返回 (按原序保留, 截断数)。
+
+    从最新往旧累计，装不下的那条起整批让位——新条目优先占位（更可能
+    相关，老条目已服务过多轮）。保留条目按原文件序输出：注入 prompt
+    字节稳定（P2-4 prefix-cache 的伏笔不被本案扰动）。
+    budget ≤ 0 且有货：全截（前桶吃满预算后桶拿零的账要算得清）。
+    """
+    acc = 0
+    for i in range(len(entries) - 1, -1, -1):
+        acc += len(render(entries[i]))
+        if acc > budget:
+            return entries[i + 1:], i + 1   # i 这条装不下：它与更老的共 i+1 条让位
+    return entries, 0
+
+
+def _learned_block(learned_dir: Path, budget: int) -> str:
     """三桶快照拼注入块；三桶全空返回 ""（调用方据此不加任何东西）。
 
     注入格式 = 落盘格式（零翻译层）：模型看到的行与 data/learned/*.md
@@ -131,15 +150,27 @@ def _learned_block(learned_dir: Path) -> str:
     053：行内 tag 只注入 learned.VISIBLE_TAGS（[已验证]/[手改]）——每轮
     全量注入的地方，[固化:sid] 这种排查用元数据就是纯噪音（渲染收口在
     learned.render，与 _user_memory_block / MCP 召回共用一份表达式）。
+    ADR 078 硬上限：桶间按 CATEGORIES 序领预算（decisions 优先级最高，
+    前桶吃满后桶吃零），桶内 _fit_entries 新到旧装填；截断只 warning
+    观测（被截条目对模型不可见是登记边界，见 ADR 078 触发信号）。
     """
     sections: list[str] = []
+    skipped = 0
+    remaining = budget
     for category in CATEGORIES:   # 单一真值源：consolidate.CATEGORIES（写读两侧同一份）
         entries = read_learned(learned_dir / f"{category}.md")
         if not entries:
             continue   # 空桶跳过——「decisions: 暂无」是给模型看的噪声
+        kept, n = _fit_entries(entries, remaining)
+        skipped += n
+        remaining -= sum(len(render(e)) for e in kept)
+        if not kept:
+            continue
         lines = [f"[{category}]"]
-        lines.extend(render(e) for e in entries)
+        lines.extend(render(e) for e in kept)
         sections.append("\n".join(lines))
+    if skipped:
+        logger.warning("[记忆注入截断] 预算 %s 字符已满，%s 条最老条目未注入（ADR 078）", budget, skipped)
     if not sections:
         return ""
     # 块头三件事：性质（等同亲历知识）+ 时效（日期在、过时不夺新指示）
@@ -154,18 +185,22 @@ def _learned_block(learned_dir: Path) -> str:
     return header + "\n" + "\n".join(sections)
 
 
-def _user_memory_block(path: Path) -> str:
-    """用户级记忆快照（M6.5）：单文件全量注入。
+def _user_memory_block(path: Path, budget: int) -> str:
+    """用户级记忆快照（M6.5）：单文件全量注入（ADR 078 起受预算约束）。
 
     与项目桶同款行格式（read_learned 直接复用，零翻译层）。量小（个人
-    偏好/习惯/行程）全量注入零压力——检索分层挂 032 裁定二 v2 信号。
+    偏好/习惯/行程）通常吃不满预算——真吃满时按桶内新到旧截断（同
+    _learned_block 的装填纪律）。
     块头三件事与 _learned_block 同构 + 一条它独有的：这是「关于用户本人」
     的记忆，用来说好这个用户是谁、怎么相处，不是任务素材。
     """
     entries = read_learned(path)
     if not entries:
         return ""
-    lines = [render(e) for e in entries]
+    kept, skipped = _fit_entries(entries, budget)
+    if skipped:
+        logger.warning("[用户记忆截断] 预算 %s 字符已满，%s 条最老条目未注入（ADR 078）", budget, skipped)
+    lines = [render(e) for e in kept]
     header = (
         "【用户记忆】以下是跨项目沉淀的用户级记忆（个人偏好、习惯、行程类信息），"
         "用来理解和服务这个用户，等同你的亲历知识。注意条目日期：过时偏好"
@@ -191,14 +226,20 @@ def build_default_agent(
     陪伴者，任务书自包含原则，见 spawn.py 头注记）。
     """
     prompt = DEFAULT_SYSTEM_PROMPT
-    if learned_dir is not None:
-        block = _learned_block(learned_dir)
-        if block:
-            prompt = f"{prompt}\n\n{block}"
-    if user_memory_path is not None:
-        user_block = _user_memory_block(user_memory_path)
-        if user_block:
-            prompt = f"{prompt}\n\n{user_block}"
+    # ADR 078 预算分账与拼接顺序解耦：分账 user 先领（相处知识，量小权重高，
+    # user_len 含块头算保守），learned 三桶吃剩余；拼接仍项目桶在前、用户
+    # 记忆殿后（既有顺序契约，test_user_memory_after_project_block 钉着）。
+    budget = memory_budget_units()
+    user_block = _user_memory_block(user_memory_path, budget) if user_memory_path is not None else ""
+    learned_block = (
+        _learned_block(learned_dir, max(0, budget - len(user_block)))
+        if learned_dir is not None
+        else ""
+    )
+    if learned_block:
+        prompt = f"{prompt}\n\n{learned_block}"
+    if user_block:
+        prompt = f"{prompt}\n\n{user_block}"
     return Agent(
         name="main",
         system_prompt=prompt,

@@ -25,6 +25,7 @@ learned 入 RAG→注入成本越阈值（032 裁定二 v2 信号）；审查升
 """
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -38,7 +39,9 @@ from facta.memory.learned import (
     format_line,
     origin_tag,
     read_learned,
+    render,
     set_statuses,
+    sweep_tombstones,
 )
 from facta.memory.store import Session
 
@@ -638,3 +641,61 @@ def consolidate(  # noqa: PLR0912
     if dropped_unplaced:
         report += f"；{dropped_unplaced} 条用户级候选因未配置位置丢弃"
     return report, True
+
+
+# ---------- ADR 078：记忆块硬上限 + sleep-time 整理 ----------
+
+# 墓碑保留期（天）：防复活可见性窗口（见 learned.sweep_tombstones 头注记）。
+# env 可配；测试另可用 maintain_memory 的 keep_days 参数直接注入
+TOMBSTONE_KEEP_DAYS = max(0, int(os.environ.get("FACTA_TOMBSTONE_KEEP_DAYS", "7")))
+
+
+def memory_budget_units() -> int:
+    """常驻注入预算（单位=字符，对中文 ≈ token 上界）：单一真值源——
+    注入侧（agent 的装填截断）与整理侧（maintain_memory 的触发判定）
+    同一份配置。0 = 摘要允许关闭（不截断、不整理）——不做，取 max(1,…)：
+    预算的语义是护栏，护栏没有「关」挡。调用时读 env（monkeypatch 可测）。"""
+    return max(1, int(os.environ.get("FACTA_MEMORY_BUDGET", "6000")))
+
+
+def memory_footprint(learned_dir: Path, user_memory_path: Path | None) -> int:
+    """常驻注入的当前总量（字符）：全部在用条目 render 尺寸和（user + 三桶）。
+    与 agent 注入的计量同式（len(render(e))），只求和不装填——超限判定
+    不需要模拟截断。"""
+    paths: list[Path] = []
+    if user_memory_path is not None:
+        paths.append(user_memory_path)
+    paths.extend(learned_dir / f"{c}.md" for c in CATEGORIES)
+    return sum(len(render(e)) for p in paths for e in read_learned(p))
+
+
+def maintain_memory(
+    learned_dir: Path,
+    user_memory_path: Path | None,
+    *,
+    keep_days: int | None = None,
+) -> str:
+    """sleep-time 整理 pass（ADR 078）：常驻注入超预算才跑，动作零模型——
+    物理回收超 keep_days 的老墓碑（074 边界点名的 P2-2 活）。
+
+    不到预算零动作（「超限触发」的字面）；超限时也只清墓碑——墓碑本来
+    就不注入（read_learned 默认过滤），回收的是文件臃肿与 _load_known
+    噪音；在用条目超限的正解是人工整理或检索分层（032 裁定二 v2 信号），
+    本案权限刻意止步。返回报告（空串 = 什么都没做）。
+    挂点在 settle_session 尾部：076 后 settle 是异步后台，天然
+    「会话结束后跑、不占在线延迟」。"""
+    budget = memory_budget_units()
+    total = memory_footprint(learned_dir, user_memory_path)
+    if total <= budget:
+        return ""
+    days = TOMBSTONE_KEEP_DAYS if keep_days is None else keep_days
+    paths: list[Path] = [user_memory_path] if user_memory_path is not None else []
+    paths.extend(learned_dir / f"{c}.md" for c in CATEGORIES)
+    swept = sum(sweep_tombstones(p, days) for p in paths)
+    report = (
+        f"记忆整理：常驻注入 {total} 字符已超预算 {budget}，"
+        f"物理回收 {swept} 条超 {days} 天的老墓碑"
+    )
+    if swept == 0:
+        report += "（无老墓碑可清——超限来自在用条目，请人工整理记忆面板）"
+    return report

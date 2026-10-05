@@ -35,6 +35,9 @@ def _isolate_disk_state(tmp_path, monkeypatch):
     """
     monkeypatch.setattr("facta.server.app.LEARNED_DIR", tmp_path / "learned")
     monkeypatch.setattr("facta.orchestrator.assemble.LEARNED_DIR", tmp_path / "learned")
+    # ADR 078：settle 尾部的 sleep-time 整理会读 user.md（不隔离会摸真 home
+    # 的隐私文件，超限时还会真 sweep 它的墓碑——测试副作用不可接受）
+    monkeypatch.setenv("FACTA_USER_MEMORY", str(tmp_path / "user.md"))
 
 
 def _make_ctx(reply: str = "你好！", llm=None, registry=None) -> AppContext:
@@ -374,6 +377,33 @@ def test_settle_cursor_holds_when_fresh_shrank(tmp_path, monkeypatch):
     asm.settle_session(session, sid, store, ScriptedLLM([]))
 
     assert store.load(sid).consolidated_upto == 0   # len(fresh)=5 < 目标 6 → 不推
+
+
+# ---------- ADR 078：sleep-time 整理挂点（settle 尾部，超限才跑） ----------
+
+
+def test_settle_runs_memory_maintenance_when_over_budget(tmp_path, monkeypatch):
+    """收官链尾接整理 pass：注入超预算时 settle 报告带「记忆整理」，
+    且老墓碑被物理回收（LEARNED_DIR/user.md 均由 fixture 隔离）。"""
+    store = SessionStore(tmp_path / "sessions")
+    session = _dialogue(1)
+    sid = store.create(Session())
+    store.save(sid, session)
+    monkeypatch.setattr(asm, "CONSOLIDATE_THRESHOLD", 10**9)   # 不走固化，只测整理
+
+    monkeypatch.setenv("FACTA_MEMORY_BUDGET", "1")   # 必超限（有内容即超）
+    learned = asm.LEARNED_DIR
+    learned.mkdir(parents=True, exist_ok=True)
+    (learned / "other.md").write_text(
+        "- [2026-09-01] [已撤回:2026-09-01] 老墓碑\n- [2026-09-02] 在用条目\n",
+        encoding="utf-8",
+    )
+
+    report = asm.settle_session(session, sid, store, ScriptedLLM([]))
+
+    assert "记忆整理" in report and "物理回收 1 条" in report
+    assert "在用条目" in (learned / "other.md").read_text(encoding="utf-8")
+    assert "老墓碑" not in (learned / "other.md").read_text(encoding="utf-8")
 
 
 # ---------- 语义 RAG 降级判定（P1-1 评审修复） ----------

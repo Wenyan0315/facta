@@ -23,7 +23,7 @@ import re
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 # 053 provenance：tag 词表是**闭集**，且单份真值（下面的正则由这几个常量拼出来，
@@ -235,6 +235,36 @@ def set_statuses(path: Path, day: str, changes: dict[int, str]) -> None:
         for line, status in changes.items():
             lines[line] = _restamp_status(lines[line], status, day)
         _rewrite(path, lines)
+
+
+def sweep_tombstones(path: Path, keep_days: int, today: date | None = None) -> int:
+    """物理回收老墓碑（ADR 078 sleep-time 整理）：事件时间早于 keep_days 天的
+    非在用行整行删除；较新的墓碑与在用行原样保留。返回删除条数。
+
+    保留期的语义：tombstone 的防复活价值在于被 _load_known 读到（固化时
+    模型看见「这条已撤回」才不复活），keep_days 是可见性窗口——超期物理
+    删不损失防复活性。这是 074「tombstone 会留盘」边界的延期兑现，
+    只清墓碑不动在用行。事件时间解析失败保守保留（坏日期不是删除理由）。
+    锁内单次读改写（set_statuses 同款）。today 参数留给测试注入固定日期。
+    """
+    if not path.is_file():
+        return 0
+    cutoff = (today or date.today()) - timedelta(days=keep_days)
+    with LEARNED_LOCK:
+        drop = set()
+        for e in read_learned(path, include_inactive=True):
+            if e.status is None or not e.status_date:
+                continue   # 在用行 / 无事件时间的裸状态——不碰
+            try:
+                if date.fromisoformat(e.status_date) < cutoff:
+                    drop.add(e.line)
+            except ValueError:
+                continue
+        if not drop:
+            return 0
+        lines = path.read_text(encoding="utf-8").splitlines()
+        _rewrite(path, [raw for i, raw in enumerate(lines) if i not in drop])
+        return len(drop)
 
 
 def update_line(path: Path, line: int, content: str) -> None:
