@@ -109,6 +109,7 @@ class Agent:
         arguments_json: str,
         confirm: Callable[[str, dict], bool] | None = None,
         on_event: Callable[[str, dict], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> str:
         """点菜执行：菜单外先拦（工具边界是行为定义的一部分，越界返回
         错误串让模型自纠——「错误也返回字符串」的 M5 反馈环惯例延伸到
@@ -116,11 +117,14 @@ class Agent:
         校验、异常兜底全在原路收口，一处不分叉。
         on_event（059）：事件缝与确认缝同款透传，只有 declares
         receives_event 的工具收得到（当前是 spawn 两件）。
+        should_cancel（082 ①）：取消缝同款透传，只有标了 receives_cancel
+        的工具收得到。
         """
         if self.allowed_tools is not None and name not in self.allowed_tools:
             return f"错误：工具 {name} 不在当前 agent 的工具清单里"
         return self.registry.execute(
-            name, arguments_json, confirm=confirm, on_event=on_event
+            name, arguments_json, confirm=confirm, on_event=on_event,
+            should_cancel=should_cancel,
         )
 
 

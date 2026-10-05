@@ -111,6 +111,9 @@ class Tool:
                                     # （spawn 把主循环的事件缝透传给子执行流——子 agent 的
                                     # 工具过程以 sub.* 命名空间进父事件流：隔离的是主 agent
                                     # 上下文，不是人的眼睛。默认 False，老工具零改动）
+    receives_cancel: bool = False   # 082 ① 编排工具标记：func 额外接收 should_cancel 参数
+                                    # （spawn 把主循环的取消缝透传给子 run_turn——子任务也
+                                    # 在协作式取消检查点上响应取消，取消不再只等主循环边界）
 
 
 class ToolRegistry:
@@ -175,6 +178,7 @@ class ToolRegistry:
         arguments_json: str,
         confirm: Callable[[str, dict], bool] | None = None,
         on_event: Callable[[str, dict], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> str:
         """执行模型点的菜。注意：错误也返回字符串，而不是抛异常。
 
@@ -186,6 +190,9 @@ class ToolRegistry:
         方案；无 confirm 通道按拒绝处理（保守默认）。批准与拒绝都落审，
         且**裁决结果两条路都回灌给模型**（054：批准原先静默，模型只能靠
         「结果回来了」反推「没弹框」，实测幻觉出不存在的白名单项）。
+
+        should_cancel（082 ① 取消缝）：标了 receives_cancel 的工具收到
+        主循环的协作式取消回调，透传进子执行流。默认 None=零行为差。
         """
         tool = self._tools.get(name)
         if tool is None:
@@ -229,14 +236,16 @@ class ToolRegistry:
             return result
 
         try:
-            # 编排缝注入（S5c confirm / 059 event）：作为关键字参数注入——
-            # 显式声明而非 registry 隐藏状态（接口演进老规矩：默认 False，
-            # 老工具零改动）。func 签名须有同名形参（spawn_subagent 两个都有）
+            # 编排缝注入（S5c confirm / 059 event / 082 ① cancel）：作为关键字参数
+            # 注入——显式声明而非 registry 隐藏状态（接口演进老规矩：默认 False，
+            # 老工具零改动）。func 签名须有同名形参（spawn_subagent 三个都有）
             extra: dict = {}
             if tool.receives_confirm:
                 extra["confirm"] = confirm
             if tool.receives_event:
                 extra["event"] = on_event
+            if tool.receives_cancel:
+                extra["should_cancel"] = should_cancel
             result = tool.func(**extra, **args)
         except TypeError as e:
             result = f"错误：参数不匹配（{e}）"

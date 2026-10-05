@@ -10,15 +10,15 @@ from facta.cli import EXIT_QUIT, run_chat
 from facta.core.llm import ScriptedLLM
 from facta.core.types import Message
 from facta.memory.plan import PlanBoard
-from facta.orchestrator.loop import _append_stamps, _time_stamp
+from facta.orchestrator.projection import _append_stamps, _time_stamp
 
 
 def test_time_stamp_format():
     fixed = datetime(2026, 9, 12, 15, 30)
     stamp = _time_stamp(fixed)
     assert stamp.role == "system"
-    # 格式：日期 + 星期 + 时分（相对时间说法"这周五""下午三点前"才有得算）
-    assert stamp.content == "今天：2026-09-12（周六）15:30"
+    # 格式：日期 + 星期 + 时段（082 ② 从分钟降为上午/下午/晚间，prefix 缓存友好）
+    assert stamp.content == "今天：2026-09-12（周六）下午"
 
 
 def test_stamp_in_payload_not_in_history(monkeypatch):

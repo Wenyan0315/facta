@@ -27,6 +27,11 @@
 所以恢复语义、评测轨迹口径都不受影响；并行 spawn 时兄弟事件会交织，
 每条带 task 摘要用于区分。
 
+取消透传（082 ①，receives_cancel 通道）：主循环的 should_cancel 回调
+透传进子 run_turn——子任务与主循环在同样的协作式取消检查点上响应取消，
+不再只等主循环边界（取消是 Run 级终态，子任务掐半截轮后按 CANCELLED
+回灌，主 agent 自纠）。
+
 失败语义走反馈环：子 run_turn FAILED/CANCELLED → 返回错误串，主 agent
 自纠（换方案或如实汇报），不炸主轮（M5「错误也返回字符串」惯例）。
 """
@@ -176,14 +181,15 @@ def spawn_subagent(
     max_rounds: int = DEFAULT_ROUNDS,
     confirm: Callable[[str, dict], bool] | None = None,
     on_event: Callable[[str, dict], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
     worktree: bool = False,
     ctx: ToolContext | None = None,
 ) -> str:
     """构造子 agent + 临时会话跑一轮，只回传结论（spawn 工具的本体）。
 
     单独导出为模块级函数（不是闭包）：测试可直接调，不经 registry 菜单。
-    confirm / on_event 由 registry.execute 的 receives_confirm /
-    receives_event 通道注入（见 registry.py）。
+    confirm / on_event / should_cancel 由 registry.execute 的 receives_confirm /
+    receives_event / receives_cancel 通道注入（见 registry.py）。
 
     worktree（S6a）：True = 子 agent 在独立 git worktree 里干活——文件
     改动不碰主工作区；跑完后 diff 经确认缝裁决（人审掌舵，与 make_plan
@@ -241,7 +247,8 @@ def spawn_subagent(
         # 事件缝透传（059）：过程事件改名进 sub.* 后写进父流；on_text 不透传
         # （子 agent 的流式正文不是给人看的成品，只回传结论这条边界不动）
         on_event=_sub_emitter(on_event, task),
-        # should_cancel 不透传：取消等主循环下一检查点（子任务通常几轮内完成）
+        should_cancel=should_cancel,   # 082 ①：取消缝透传——子任务同主循环一样
+        # 在协作式取消检查点上响应取消，不再只等主循环边界
     )
     if result is RunResult.COMPLETED and reply is not None:
         conclusion = reply.content or "（子任务完成，但未产出文本结论）"
@@ -263,11 +270,11 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     sub_llm = ctx.llm   # 局部窄化：闭包捕获局部变量（mypy 不认跨闭包的属性窄化）
 
     def _spawn(task: str, tools: list[str] | None = None, max_rounds: int = DEFAULT_ROUNDS,
-               worktree: bool = False, confirm=None, event=None) -> str:
+               worktree: bool = False, confirm=None, event=None, should_cancel=None) -> str:
         return spawn_subagent(
             task, llm=sub_llm, registry=registry,
             tools=tools, max_rounds=max_rounds, confirm=confirm, on_event=event,
-            worktree=worktree, ctx=ctx,
+            should_cancel=should_cancel, worktree=worktree, ctx=ctx,
         )
 
     registry.register(Tool(
@@ -299,6 +306,7 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         func=_spawn,
         receives_confirm=True,   # S5c：确认缝透传给子执行流（registry 注入 confirm 参数）
         receives_event=True,     # 059：事件缝透传（registry 注入 event 参数 → sub.* 进父流）
+        receives_cancel=True,    # 082 ①：取消缝透传（registry 注入 should_cancel → 子 run_turn）
     ))
 
     # ---- S6c spawn_step：计划步骤派发（真编排的焊缝）----
@@ -309,7 +317,7 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         board = ctx.session.plan
 
         def _spawn_step(step_id: int, task: str, worktree: bool = False,
-                        confirm=None, event=None) -> str:
+                        confirm=None, event=None, should_cancel=None) -> str:
             # 校验在 board.update_step 里统一做（薄包装原则，与 plan.py 工具同款）：
             # 无活跃计划 / step_id 不在计划 / 已终态，都 ValueError → 错误串回灌
             try:
@@ -317,10 +325,11 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             except ValueError as e:
                 return f"步骤派发被拒：{e}"
 
-            # 复用 spawn_subagent 全套（噪声隔离/工具子集/worktree 隔离/确认透传/事件透传）
+            # 复用 spawn_subagent 全套（噪声隔离/工具子集/worktree 隔离/确认透传/事件透传/取消透传）
             result = spawn_subagent(
                 task, llm=sub_llm, registry=registry,
                 worktree=worktree, ctx=ctx, confirm=confirm, on_event=event,
+                should_cancel=should_cancel,
             )
 
             # 成败回写：spawn 的失败是固定信号（_FAILURE_PREFIXES），其余皆视为
@@ -356,4 +365,5 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             func=_spawn_step,
             receives_confirm=True,   # worktree 合回确认透传（S6a 同款）
             receives_event=True,     # 059：子步骤过程同样以 sub.* 进父流
+            receives_cancel=True,    # 082 ①：子步骤取消透传（与 spawn_subagent 同款）
         ))
