@@ -55,6 +55,8 @@ class Run:
 
     title/preview 是任务视图的展示字段（人读的标签，不参与状态机）：
     title=创建时的用户消息截断，preview=最终回复截断（完成时回填）。
+    reply_text 是 headless 的完整回复文本（ADR 081）——preview 截 300 字
+    不够给外部自动化，二者并存：preview 喂任务视图，reply_text 喂同步端点。
     """
 
     run_id: str
@@ -64,6 +66,7 @@ class Run:
     status: str = STATUS_PENDING
     title: str = ""
     preview: str = ""
+    reply_text: str = ""   # ADR 081：完整最终回复（headless 同步端点原料）
     events: list[RunEvent] = field(default_factory=list)
     cancel_requested: bool = False
     confirm_pending: bool = False   # S4b：是否正挂着一个待裁决的 L2 确认（confirm 端点判据）

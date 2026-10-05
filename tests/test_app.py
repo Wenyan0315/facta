@@ -126,6 +126,45 @@ def test_run_without_session_id_opens_a_new_session():
     assert [s["id"] for s in client.get("/api/sessions").json()] == [sid]
 
 
+def test_sync_run_returns_structured_result():
+    # ADR 081：headless 同步提交——一条往返拿到 {run_id, session_id, status, text}
+    # 无需挂 SSE。text = 完整回复（脚本自动化的最终消费物）
+    client = _make_client(reply="你好！")
+    body = client.post("/api/runs/sync", json={"text": "你好"}).json()
+
+    assert body["status"] == "completed"
+    assert body["text"] == "你好！"
+    assert body["run_id"]
+    assert body["session_id"]
+    # 同一轮 Run 也进异步任务视图（preview 摘要）——两套协议共享一份 Run
+    runs = client.get("/api/runs").json()
+    assert runs[0]["run_id"] == body["run_id"]
+    assert runs[0]["preview"] == "你好！"
+
+
+def test_sync_run_preserves_full_reply_not_truncated():
+    # 关键验收：preview 截 300 字，但 headless 的 text 是完整回复，不截断
+    long_reply = "很" * 500
+    client = _make_client(reply=long_reply)
+    body = client.post("/api/runs/sync", json={"text": "长回复"}).json()
+
+    assert len(body["text"]) == 500
+    assert body["text"] == long_reply
+
+
+def test_sync_run_409_when_session_busy():
+    # 与异步同款准入：该会话已有 in-flight Run → 409，而不是挂起排队
+    from facta.server.run_store import STATUS_RUNNING, RunStore
+
+    ctx = _make_ctx()
+    sid = ctx.store.create(Session())
+    rs = RunStore()
+    rs.create_if_idle(sid).status = STATUS_RUNNING
+
+    client = TestClient(create_app(ctx, store=rs))
+    assert client.post("/api/runs/sync", json={"text": "再来一轮", "session_id": sid}).status_code == 409
+
+
 def test_messages_endpoint_filters_to_storyline():
     # 历史回放只讲故事线：system=人设、tool=中间产物、空 content 纯点菜轮都滤掉
     ctx = _make_ctx()

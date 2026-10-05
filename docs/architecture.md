@@ -1,6 +1,6 @@
 # Facta 架构图
 
-> 版本：v0.99（2026-10-05）｜随着里程碑推进持续迭代此文档
+> 版本：v0.100（2026-10-05）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [021](decisions/021-direction-decisions.md)）：个人执行助手——执行主轴 + 长期记忆 + 通用外延
 
@@ -277,6 +277,7 @@
 | [078-memory-budget-and-sleep-time-sweep](decisions/078-memory-budget-and-sleep-time-sweep.md) | P2-2 记忆块硬上限 | 常驻注入有界 + 墓碑离线回收：`FACTA_MEMORY_BUDGET`（默认 6000 字符）分账装填（user→decisions→constraints→other，桶内新到旧、超限截断最老）+ `maintain_memory` 挂 `settle_session` 尾部（超限才 `sweep_tombstones` 物理回收 7 天老墓碑、零模型、不动在用条目）；负决策=不做 Letta 式在线自写循环与模型自动删改 |
 | [079-extension-ecosystem-decision](decisions/079-extension-ecosystem-decision.md) | P2-3 扩展生态 | 扩展生态只开外部进程接口（MCP stdio 服务器族 + 未来 hooks 作为确定性外部闸门），不做 in-process Python 扩展 / hooks 槽位 / MCP 写升级 / API 稳定承诺；主论据=in-process 与「经模型之手调工具」是两种威胁模型（048-057 围栏对第三方代码零效力）、数据护城河不依赖 in-process、与 044「单份真值源」方向一致、零消费者 |
 | [080-prefix-cache-friendly-prompt](decisions/080-prefix-cache-friendly-prompt.md) | P2-4 Prefix-cache 友好的 prompt 组装 | 三件动态 stamp 从头部 `_prepend_stamps` 改尾部 `_append_stamps`（每轮必变内容插头会作废其后整段前缀缓存；后置后 system+摘要+原文前缀字节稳定、同会话连续轮次命中）；llm.py 两处 usage 采集 `prompt_cache_hit/miss_tokens`（getattr 兜底 None）、UsageLedger 加两字段 + record_llm 累加 + bill 命中率行（prefix_total 非零才显示）；负决策=不做时间戳降精度（归 P2-6 ②）、不把 session 内冻结记忆快照移出 system prompt、不新建 assemble.py |
+| [081-headless-json-output](decisions/081-headless-json-output.md) | P2-5 Headless JSON/RPC 模式 | `POST /api/runs/sync` 同步端点：复用 `_run_worker` + `create_if_idle`，请求线程 `run._settle_done.wait()` 阻塞到终态，返回 `{run_id, session_id, status, text}`（text=完整回复）；`Run` 加 `reply_text` 字段、worker 完成分支回填（preview 仍截 300 字）；负决策=不做完整 RPC 协议、不做 `?wait=true` 复用、不自动裁决 L2 确认、不设超时参数 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
