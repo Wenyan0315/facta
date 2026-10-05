@@ -35,8 +35,16 @@ _SUMMARY_PROMPT = (
     "禁止写入：对助手自身能力/表现的评价或建议（如'检索偶发不命中，需兜底'）、"
     "对用户意图的猜测（如'用户在测试边界'）、任何策略性元叙事。"
     "这类内容混进摘要会污染后续行为（自证预言）。"
-    "直接输出摘要正文，不要前言、标题或解释。"
+    "摘要末尾必须固定附加一个小节：先写「【关键决定与约束】」再逐条列出仍有效的"
+    "决定、承诺、约束（含旧摘要里仍有效的——摘要滚动合并，不许把上一轮的决定洗掉）；"
+    "确实没有这类内容时写「【关键决定与约束】无」。"
+    "小节是摘要正文的固定组成部分，不是可选装饰。"
+    "除该小节外直接输出摘要正文，不要前言、标题或解释。"
 )
+
+# 073 摘要决定节：摘要末尾的固定小节标记——程序校验的锚点（防摘要
+# 洗平决定：Confidence Routing ⑦④ 与 FR「滚动摘要洗平撤回」同族）。
+_DECISION_TAG = "【关键决定与约束】"
 
 
 def window_start(messages: list[Message], keep_last: int = KEEP_LAST) -> int:
@@ -108,6 +116,14 @@ def maybe_compress(
         return summary, summarized_upto        # 缓存复用：本轮零成本
     logger.debug("记忆压缩：窗口外积压 %s 条 → 滚动摘要（一次内部 LLM 调用）", len(fresh))
     summary = _summarize(llm, summary, fresh)
+    # 073 程序校验：决定节必须在场（指令层要求 + 程序检查兑现——062 同款
+    # 「谁检查兑现」补位）。宽容方向：缺失只记 warning 照用不阻断——观测
+    # 信号攒触发信号（见 073 边界），不为格式漂移付重试 token。
+    if _DECISION_TAG not in summary:
+        logger.warning(
+            "[摘要决定节缺失] 滚动摘要未携带「%s」小节（照用不阻断；升级前落盘的"
+            "旧缓存重组一次即自愈）", _DECISION_TAG,
+        )
     logger.debug("摘要完成：%s", summary)   # 可观测性：摘要不再是黑箱，当场查验保真度
     return summary, start
 
