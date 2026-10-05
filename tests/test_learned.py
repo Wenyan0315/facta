@@ -18,6 +18,7 @@ from facta.memory.learned import (
     read_learned,
     render,
     set_statuses,
+    sweep_tombstones,
     update_line,
     update_line_by_id,
     visible_text,
@@ -115,6 +116,37 @@ def test_set_statuses_roundtrip(tmp_path):
     assert entries[1].content == "乙"
     # 默认过滤后只剩在用一行
     assert [e.content for e in read_learned(path)] == ["甲"]
+
+
+# ---------- ADR 078：墓碑物理回收（sleep-time 整理的执行原语） ----------
+
+
+def test_sweep_tombstones_by_age(tmp_path):
+    """老墓碑物理删（事件时间超 keep_days），新墓碑与在用行原样保留。"""
+    from datetime import date
+
+    path = _write(
+        tmp_path,
+        "- [2026-09-01] 在用甲\n"
+        "- [2026-09-01] [已撤回:2026-09-02] 老墓碑\n"
+        "- [2026-10-01] [被取代:2026-10-01] 新墓碑\n"
+        "- [2026-09-22] 在用乙\n",
+    )
+    swept = sweep_tombstones(path, keep_days=7, today=date(2026, 10, 5))
+    assert swept == 1
+    assert [e.content for e in read_learned(path, include_inactive=True)] == [
+        "在用甲", "新墓碑", "在用乙",
+    ]
+
+
+def test_sweep_tombstones_keeps_bad_date_and_missing_file(tmp_path):
+    """事件时间解析失败的墓碑保守保留（坏日期不是删除理由）；缺席文件零动作。"""
+    from datetime import date
+
+    path = _write(tmp_path, "- [2026-09-01] [已撤回:哪天?] 坏日期墓碑\n- [2026-09-02] 在用\n")
+    assert sweep_tombstones(path, keep_days=0, today=date(2026, 10, 5)) == 0
+    assert len(read_learned(path, include_inactive=True)) == 2
+    assert sweep_tombstones(tmp_path / "nope.md", keep_days=7) == 0
 
 
 # ---------- API 端点 ----------

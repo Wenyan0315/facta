@@ -15,6 +15,7 @@ from facta.memory.store import Session
 from facta.orchestrator.agent import (
     DEFAULT_SYSTEM_PROMPT,
     Agent,
+    _fit_entries,
     build_default_agent,
 )
 from facta.orchestrator.loop import RunResult, run_turn
@@ -175,6 +176,54 @@ def test_user_memory_empty_or_missing_no_injection(tmp_path):
     empty.write_text("", encoding="utf-8")
     agent2 = build_default_agent(ToolRegistry(), None, user_memory_path=empty)
     assert agent2.system_prompt == DEFAULT_SYSTEM_PROMPT
+
+
+# ---------- ADR 078 硬上限：预算装填与分账 ----------
+
+
+def test_fit_entries_drops_oldest_first():
+    """装填纯函数：从新到旧累计，装不下的那条起整批让位；保留按原序输出。"""
+    from facta.memory.learned import LearnedLine
+
+    entries = [
+        LearnedLine(line=i, date="2026-09-01", content=f"条目{i:04d}abcdef")
+        for i in range(4)
+    ]   # 每条 render = "- [2026-09-01] 条目XXXXabcdef" = 27 字符
+    kept, skipped = _fit_entries(entries, 54)   # 恰好装最新 2 条
+    assert [e.content for e in kept] == ["条目0002abcdef", "条目0003abcdef"]
+    assert skipped == 2
+    assert _fit_entries(entries, 10**6) == (entries, 0)   # 预算充足零截断
+    assert _fit_entries(entries, 0) == ([], 4)            # 零预算全截
+
+
+def test_learned_block_truncates_oldest_when_over_budget(tmp_path, monkeypatch, caplog):
+    """超预算截最老保最新（桶内新到旧）；截断只 warning 观测，prompt 无提示行。"""
+    import logging
+
+    monkeypatch.setenv("FACTA_MEMORY_BUDGET", "25")   # 只装得下一条（render=19）
+    (tmp_path / "decisions.md").write_text(
+        "- [2026-09-01] 老决定甲\n- [2026-09-02] 新决定乙\n", encoding="utf-8"
+    )
+
+    with caplog.at_level(logging.WARNING):
+        p = build_default_agent(ToolRegistry(), tmp_path).system_prompt
+
+    assert "新决定乙" in p           # 新条目优先占位
+    assert "老决定甲" not in p       # 老条目让位
+    assert "记忆注入截断" in caplog.text
+
+
+def test_user_block_takes_budget_priority(tmp_path, monkeypatch):
+    """分账方向：user 优先（相处知识），user 吃满后 learned 拿零。"""
+    monkeypatch.setenv("FACTA_MEMORY_BUDGET", "25")
+    (tmp_path / "decisions.md").write_text("- [2026-09-01] 项目决定条目\n", encoding="utf-8")
+    user_md = tmp_path / "user.md"
+    user_md.write_text("- [2026-09-20] 用户偏好短回答\n", encoding="utf-8")
+
+    p = build_default_agent(ToolRegistry(), tmp_path, user_memory_path=user_md).system_prompt
+
+    assert "用户偏好短回答" in p     # user 全量进
+    assert "项目决定条目" not in p   # learned 剩余预算为负 → 零注入
 
 
 def test_subset_menu_filters():

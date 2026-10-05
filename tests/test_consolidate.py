@@ -747,3 +747,68 @@ def test_supersede_skips_model_in_fresh_dir(tmp_path):
     assert "新增 1 条" in report
     assert "被取代" not in report
     assert len(llm.calls) == 2                        # 萃取 + 审查，无第三次调用
+
+
+# ---------- ADR 078 硬上限 + sleep-time 整理：预算 / 计量 / 触发 ----------
+
+
+def test_memory_budget_env_overridable(monkeypatch):
+    """验收口径「有界且可配置」：env 覆写有效；0 折到 1——护栏没有「关」挡。"""
+    from facta.memory.consolidate import memory_budget_units
+
+    monkeypatch.setenv("FACTA_MEMORY_BUDGET", "123")
+    assert memory_budget_units() == 123
+    monkeypatch.setenv("FACTA_MEMORY_BUDGET", "0")
+    assert memory_budget_units() == 1
+    monkeypatch.delenv("FACTA_MEMORY_BUDGET")
+    assert memory_budget_units() == 6000
+
+
+def test_maintain_memory_noop_within_budget(tmp_path, monkeypatch):
+    """「超限触发」的字面：不到预算零动作、零文件写、返回空串。"""
+    from facta.memory.consolidate import maintain_memory
+
+    monkeypatch.setenv("FACTA_MEMORY_BUDGET", "9999")
+    learned = tmp_path / "learned"
+    learned.mkdir()
+    (learned / "other.md").write_text("- [2026-09-01] [已撤回:2026-09-01] 老墓碑\n", encoding="utf-8")
+    before = (learned / "other.md").read_text(encoding="utf-8")
+
+    assert maintain_memory(learned, None, keep_days=0) == ""
+    assert (learned / "other.md").read_text(encoding="utf-8") == before
+
+
+def test_maintain_memory_sweeps_old_tombstones_when_over_budget(tmp_path, monkeypatch):
+    """超预算 → 物理回收超 keep_days 的老墓碑（user 桶同扫），报告计数。"""
+    from facta.memory.consolidate import maintain_memory
+
+    monkeypatch.setenv("FACTA_MEMORY_BUDGET", "1")   # 必超限（有内容即超）
+    learned = tmp_path / "learned"
+    learned.mkdir()
+    (learned / "other.md").write_text(
+        "- [2026-09-01] [已撤回:2026-09-01] 老墓碑\n- [2026-09-02] 在用\n",
+        encoding="utf-8",
+    )
+    user_md = tmp_path / "user.md"
+    user_md.write_text("- [2026-09-01] [被取代:2026-09-01] 老墓碑\n", encoding="utf-8")
+
+    report = maintain_memory(learned, user_md, keep_days=7)
+
+    assert "记忆整理" in report and "物理回收 2 条" in report
+    assert [e.content for e in read_learned(learned / "other.md")] == ["在用"]
+    assert read_learned(user_md, include_inactive=True) == []
+
+
+def test_maintain_memory_reports_when_only_active_overflows(tmp_path, monkeypatch):
+    """超限但无老墓碑可清：如实报告（在用条目上不动刀——权限刻意止步）。"""
+    from facta.memory.consolidate import maintain_memory
+
+    monkeypatch.setenv("FACTA_MEMORY_BUDGET", "1")
+    learned = tmp_path / "learned"
+    learned.mkdir()
+    (learned / "other.md").write_text("- [2026-09-01] 在用条目\n", encoding="utf-8")
+
+    report = maintain_memory(learned, None, keep_days=7)
+
+    assert "无老墓碑可清" in report and "人工整理" in report
+    assert [e.content for e in read_learned(learned / "other.md")] == ["在用条目"]

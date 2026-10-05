@@ -37,7 +37,7 @@ from facta.knowledge.knowledge_base import (
 )
 from facta.knowledge.sync import sync_notes
 from facta.knowledge.vector_store import ChromaVectorStore
-from facta.memory.consolidate import consolidate
+from facta.memory.consolidate import consolidate, maintain_memory
 from facta.memory.store import Session, SessionStore, derive_title
 from facta.memory.title import summarize_title
 from facta.memory.todos import TodoStore
@@ -253,6 +253,12 @@ def settle_session(
             fresh.consolidated_upto = target
 
     store.update(sid, _merge)
+
+    # ADR 078 sleep-time 整理：常驻注入超预算才跑（平时零成本）；settle
+    # 本身已是异步后台（076），「会话结束后跑、不占在线延迟」由此成立。
+    tail = maintain_memory(LEARNED_DIR, user_memory_path())
+    if tail:
+        report = report + "\n" + tail
     return report
 
 

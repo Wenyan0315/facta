@@ -558,7 +558,8 @@ def test_r7_seeded_memory_is_recallable(tmp_path):
     assert fe._shell(str(scenario["setup"]), tmp_path).returncode == 0
 
     fingerprint = scenario["answer_contains"][0]
-    block = _user_memory_block(tmp_path / "data" / "user-memory.md")
+    # 预算给足（10^6）：本测试考「seed 能被读进 prompt」，不考截断（ADR 078）
+    block = _user_memory_block(tmp_path / "data" / "user-memory.md", 10**6)
     assert fingerprint in block and "用户记忆" in block
     # 任务文本不得自带指纹，否则不召回也能命中，断言又变平凡为真
     assert fingerprint not in str(scenario["task"])
