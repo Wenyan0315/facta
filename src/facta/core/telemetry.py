@@ -27,6 +27,10 @@ class UsageLedger:
     llm_cache_hits: int = 0 # 缓存直接命中（c 段启用）
     tokens_in: int = 0
     tokens_out: int = 0
+    # 080：prefix 缓存账目（DeepSeek 字节稳定前缀命中）——命中率纳入成本回归，
+    # 账单是「事后归因」的观测尺，不是精确结算账目（并发近似同本文件约定）
+    prompt_cache_hit_tokens: int = 0
+    prompt_cache_miss_tokens: int = 0
     llm_cost: float = 0.0
     llm_seconds: float = 0.0  # 累计耗时（含重试），可换算平均延迟
     embed_calls: int = 0
@@ -45,6 +49,8 @@ class UsageLedger:
         if usage:
             self.tokens_in += usage.get("prompt_tokens", 0)
             self.tokens_out += usage.get("completion_tokens", 0)
+            self.prompt_cache_hit_tokens += usage.get("prompt_cache_hit_tokens") or 0
+            self.prompt_cache_miss_tokens += usage.get("prompt_cache_miss_tokens") or 0
         self.llm_cost += cost
         self.llm_seconds += elapsed
 
@@ -90,6 +96,10 @@ class UsageLedger:
         ]
         if self.llm_calls:
             lines.insert(2, f"  平均耗时 : {self.llm_seconds / self.llm_calls:.2f}s/次")
+        prefix_total = self.prompt_cache_hit_tokens + self.prompt_cache_miss_tokens
+        if prefix_total:
+            rate = self.prompt_cache_hit_tokens / prefix_total
+            lines.insert(3, f"  prefix   : 命中 {rate:.1%}（{self.prompt_cache_hit_tokens:,} / {prefix_total:,} tokens）")
         if self.jev_calls or self.jev_degradations:
             deg = f"（降级 {self.jev_degradations} 次走原生路径）" if self.jev_degradations else ""
             lines.append(f"Jev 路由   : {self.jev_calls} 次{deg}")

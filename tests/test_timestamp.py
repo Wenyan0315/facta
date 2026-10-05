@@ -9,7 +9,8 @@ from datetime import datetime
 from facta.cli import EXIT_QUIT, run_chat
 from facta.core.llm import ScriptedLLM
 from facta.core.types import Message
-from facta.orchestrator.loop import _time_stamp
+from facta.memory.plan import PlanBoard
+from facta.orchestrator.loop import _append_stamps, _time_stamp
 
 
 def test_time_stamp_format():
@@ -34,3 +35,20 @@ def test_stamp_in_payload_not_in_history(monkeypatch):
     assert any("今天：" in m.content for m in script.calls[0])
     # 正常输入「退出」→ 退出原因 quit（S1 返回值契约）
     assert reason == EXIT_QUIT
+
+
+def test_stamps_appended_to_tail_not_head():
+    """080：三件 stamp 动态后置，为 prefix 缓存让路——头不动、尾追加。"""
+    payload = [
+        Message(role="system", content="人设"),
+        Message(role="user", content="hi"),
+    ]
+    # 空板 + 无路由决定：只追加时间戳（缺席不注入零开销）
+    _append_stamps(payload, None, PlanBoard())
+
+    # 头部不动：system/user 仍原位（前缀字节稳定，同会话连续轮次 prefix 命中）
+    assert payload[0].content == "人设"
+    assert payload[1].content == "hi"
+    # 时间戳被追加到尾部，而不是插在头部位置 1
+    assert "今天：" in payload[-1].content
+    assert "今天：" not in payload[0].content

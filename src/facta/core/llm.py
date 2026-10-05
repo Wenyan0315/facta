@@ -324,6 +324,14 @@ class OpenAICompatibleLLM(LLM):
             usage = {
                 "prompt_tokens": resp.usage.prompt_tokens,
                 "completion_tokens": resp.usage.completion_tokens,
+                # 080：prefix 缓存账目（DeepSeek 字节稳定前缀命中；极少数
+                # 中转商不回这两字段，getattr 兜底 None，防 KeyError）
+                "prompt_cache_hit_tokens": getattr(
+                    resp.usage, "prompt_cache_hit_tokens", None
+                ),
+                "prompt_cache_miss_tokens": getattr(
+                    resp.usage, "prompt_cache_miss_tokens", None
+                ),
             }
 
         # 模型"点菜"了：把 OpenAI 的对象结构转成我们的简化 dict 结构
@@ -398,6 +406,12 @@ class OpenAICompatibleLLM(LLM):
         return {
             "prompt_tokens": chunk.usage.prompt_tokens,
             "completion_tokens": chunk.usage.completion_tokens,
+            "prompt_cache_hit_tokens": getattr(
+                chunk.usage, "prompt_cache_hit_tokens", None
+            ),
+            "prompt_cache_miss_tokens": getattr(
+                chunk.usage, "prompt_cache_miss_tokens", None
+            ),
         }
 
 

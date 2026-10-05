@@ -360,23 +360,26 @@ def _route_stamp(decision: RouteDecision | None) -> Message | None:
     return Message(role="system", content=content)
 
 
-def _prepend_stamps(
+def _append_stamps(
     payload: list[Message], decision: RouteDecision | None, board: PlanBoard
 ) -> None:
-    """投影头部三件 stamp 就位：时间锚点 → 路由决定 → 活跃计划（S2b/M10/073）。
+    """投影尾部三件 stamp 就位：时间锚点 → 路由决定 → 活跃计划（S2b/M10/073）。
 
-    三件共同契约：进投影不进底片、缺席不注入零开销、相互独立顺延补位
-    （动态游标——路由缺席时计划落到 2 号位而非留空洞）。
+    080 从头部（`payload.insert(1, …)`）改为尾部（`payload.append`）：三个 stamp
+    是每轮必变的动态内容，插头部会把其后整段前缀缓存全部作废；后置后
+    `[system 人设] + [摘要] + [原文]` 前缀字节稳定，同会话连续轮次 prefix 命中
+    （system 消息任意位置均指令，后置不牺牲注入语义）。
+
+    三件共同契约：进投影不进底片、缺席不注入零开销、按 time→route→plan 顺序
+    追加（append 天然不留空洞，无需原来的动态游标）。
     """
-    payload.insert(1, _time_stamp())
-    at = 2
+    payload.append(_time_stamp())
     route_msg = _route_stamp(decision)
     if route_msg is not None:
-        payload.insert(at, route_msg)
-        at += 1
+        payload.append(route_msg)
     plan_msg = _plan_stamp(board)
     if plan_msg is not None:
-        payload.insert(at, plan_msg)
+        payload.append(plan_msg)
 
 
 def _split_tool_batches(tool_calls: list[dict]) -> list[tuple[bool, list[dict]]]:
@@ -653,9 +656,9 @@ def run_turn(
             summarizer, session.messages, session.summary, session.summarized_upto
         )
         payload = build_payload(session.messages, session.summary, session.summarized_upto)
-        # 投影头部三件 stamp 就位（时间锚点/路由决定/活跃计划，不入底片；
-        # 语义与位置契约见 _prepend_stamps docstring）
-        _prepend_stamps(payload, route_decision, session.plan)
+        # 投影尾部三件 stamp 就位（时间锚点/路由决定/活跃计划，不入底片；
+        # 080 后置为 prefix 缓存让路——语义与位置契约见 _append_stamps docstring）
+        _append_stamps(payload, route_decision, session.plan)
 
         # P0-6 无进展检测的状态：上一批点菜签名 + 连续重复计数（轮级局部，
         # 一轮对话结束即弃——检出的是「这一轮内原地踏步」，跨轮重复归人管）
