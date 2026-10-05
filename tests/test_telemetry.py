@@ -9,7 +9,7 @@
 import pytest
 
 from facta.core.gateway import GatewayConfig, RobustLLM
-from facta.core.llm import LLM, get_llm
+from facta.core.llm import LLM, OpenAICompatibleLLM, get_llm
 from facta.core.telemetry import UsageLedger
 from facta.core.types import Message
 
@@ -147,3 +147,79 @@ def test_get_llm_wraps_with_gateway():
     assert isinstance(llm, RobustLLM)
     reply = llm.generate([Message(role="user", content="hi")])
     assert reply.role == "assistant"
+
+
+# ---- 080：prefix 缓存账目 ----
+
+
+class _UsageChunk:
+    """带 usage 的假 chunk，字段可选（模拟不同中转商的 usage 形状）。"""
+
+    def __init__(self, hit=None, miss=None) -> None:
+        self.usage = type(
+            "Usage",
+            (),
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "prompt_cache_hit_tokens": hit,
+                "prompt_cache_miss_tokens": miss,
+            },
+        )()
+
+
+def test_usage_of_collects_prefix_cache():
+    usage = OpenAICompatibleLLM._usage_of(_UsageChunk(hit=30, miss=70))
+    assert usage is not None
+    assert usage["prompt_cache_hit_tokens"] == 30
+    assert usage["prompt_cache_miss_tokens"] == 70
+    assert usage["prompt_tokens"] == 100
+    assert usage["completion_tokens"] == 50
+
+
+def test_usage_of_prefix_cache_missing_is_none():
+    """中转商不回 prefix 字段：getattr 兜底 None，账本 `or 0` 消化。"""
+    usage = OpenAICompatibleLLM._usage_of(_UsageChunk())
+    assert usage is not None
+    assert usage["prompt_cache_hit_tokens"] is None
+    assert usage["prompt_cache_miss_tokens"] is None
+
+
+def test_record_llm_accumulates_prefix_cache():
+    ledger = UsageLedger()
+    ledger.record_llm(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "prompt_cache_hit_tokens": 60,
+            "prompt_cache_miss_tokens": 40,
+        }
+    )
+    # 无 prefix 字段的 usage（假模型）→ `or 0` 不炸也不误加
+    ledger.record_llm({"prompt_tokens": 100, "completion_tokens": 10})
+    assert ledger.prompt_cache_hit_tokens == 60
+    assert ledger.prompt_cache_miss_tokens == 40
+    assert ledger.tokens_in == 200
+
+
+def test_bill_renders_prefix_rate():
+    ledger = UsageLedger()
+    ledger.record_llm(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "prompt_cache_hit_tokens": 75,
+            "prompt_cache_miss_tokens": 25,
+        }
+    )
+    bill = ledger.bill()
+    assert "prefix" in bill
+    assert "命中 75.0%" in bill
+
+
+def test_bill_omits_prefix_when_no_cache_usage():
+    """无任何 prefix 账目（假模型全程）→ 不渲染 prefix 行。"""
+    ledger = UsageLedger()
+    ledger.record_llm({"prompt_tokens": 100, "completion_tokens": 10})
+    bill = ledger.bill()
+    assert "prefix" not in bill
