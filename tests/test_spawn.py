@@ -287,6 +287,30 @@ def test_registry_receives_event_channel():
     assert registry.execute("plain", json.dumps({"task": "t"}), on_event=sink) == "plain"
 
 
+def test_registry_receives_cancel_channel():
+    # 082 ①：receives_cancel 通道与 receives_confirm/event 同款——标记的工具
+    # 收到 should_cancel 参数，未标记的工具收不到
+    registry = ToolRegistry()
+    seen: dict = {}
+
+    def _probe(task: str, should_cancel=None) -> str:
+        seen["should_cancel"] = should_cancel
+        return "ok"
+
+    def _plain(task: str) -> str:
+        return "plain"
+
+    registry.register(Tool(
+        name="probe", description="", parameters={}, func=_probe, receives_cancel=True,
+    ))
+    registry.register(Tool(name="plain", description="", parameters={}, func=_plain))
+
+    sentinel = lambda: False   # noqa: E731
+    assert registry.execute("probe", json.dumps({"task": "t"}), should_cancel=sentinel) == "ok"
+    assert seen["should_cancel"] is sentinel   # 原样注入
+    assert registry.execute("plain", json.dumps({"task": "t"}), should_cancel=sentinel) == "plain"
+
+
 # ---------- 失败反馈环 ----------
 
 

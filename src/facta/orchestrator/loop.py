@@ -19,32 +19,26 @@ import logging
 import os
 import re
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime
 from enum import Enum
 
-from facta.core.jev import RouteDecision
 from facta.core.llm import LLM, LLMUnavailableError, merge_stream_chunks
 from facta.core.types import Message
 from facta.memory.compressor import build_payload, maybe_compress, trim_incomplete_round
-from facta.memory.plan import PlanBoard
 from facta.memory.store import Session
 from facta.orchestrator.agent import Agent
-from facta.tools.plan import format_view
+from facta.orchestrator.executor import _execute_tool_calls
+from facta.orchestrator.projection import _append_stamps, _route_first_menu
 
 logger = logging.getLogger(__name__)
-
-# S6b 并行 spawn：唯一「设计上可证明安全」的并行工具（独立 Session +
-# worktree 隔离、IO-bound）。普通工具保持串行——模型常期待「先读 A 再
-# 决定读 B」，并行会打乱它的预期顺序（保守默认，与 needs_confirmation 同哲学）
-_SPAWN_TOOL = "spawn_subagent"
 
 # （S5a）SYSTEM_PROMPT 已搬家：行为定义从引擎代码搬进 Agent 对象
 # （agent.py::DEFAULT_SYSTEM_PROMPT）——行为定义与执行引擎分离；
 # _MAX_TOOL_ROUNDS 同步退场，保险丝成为 Agent.max_tool_rounds 属性。
 
-_WEEKDAYS = "一二三四五六日"
+# P2-6 ③：投影装配（projection.py）与批执行器（executor.py）已拆出——
+# 本文件只留「一轮对话」的决策内核。_append_stamps/_route_first_menu 与
+# _execute_tool_calls 从两个新模块 import，行为不变（纯搬移）。
 
 # DSML 泄漏（S6c 实机验收抓到）：deepseek-flash 偶发把内部函数调用格式
 # 裸文本吐进 content，未被解析成合法 tool_calls——工具调用意图丢失
@@ -245,258 +239,6 @@ def _merge_with_leak_guard(
         if tools is None and fallback is not None:
             tools = fallback   # 066：出路不存在时重试多少次都不存在（056）
         payload.append(Message(role="system", content=_DSML_LEAK_HINT))
-
-
-def _plan_stamp(board: PlanBoard) -> Message | None:
-    """活跃计划注入投影（S5b 针①，时间戳同款手法：进投影不进底片）。
-
-    位置固定：时间戳之后、摘要/对话之前——「今天几号」和「任务进行到哪」
-    都属于本轮视野。无活跃计划返回 None：不注入任何东西，简单任务的
-    上下文零开销（轮首快照——同轮内多步导航靠 update_plan_step 的
-    工具结果回灌带最新视图，双视图分工）。
-    """
-    view = board.view()
-    if view is None:
-        return None
-
-    return Message(
-        role="system",
-        content=(
-            "【当前任务计划】以下任务正在进行，按计划继续执行；"
-            "步骤状态变化用 update_plan_step 回写（终态必带 note），"
-            "计划过时用 make_plan 修订（reason 必填），全部终态后 finish_plan 收官。\n"
-            + format_view(view)
-        ),
-    )
-
-
-def _forward_plan_events(board: PlanBoard, on_event: Callable[[str, dict], None] | None) -> None:
-    """drain 计划事件并转发（S5b 针②的函数体）。
-
-    无 on_event 也 drain——清队列防陈旧事件跨轮堆积（测试/纯文本场景
-    产生的 plan 事件不能攒到下次有监听时一起冒出来）。
-    """
-    events = board.drain()
-    if on_event is not None:
-        for ev in events:
-            on_event(ev.type, ev.data)
-
-
-def _time_stamp(now: datetime | None = None) -> Message:
-    """当前时间戳（投影专用，绝不入底片）。
-
-    为什么要它（真实使用经验逼出来的）：跨会话恢复时，模型没有「现在」的
-    概念，会拿上次对话的时间当锚点，安静地算错一切相对时间——"更新数据"
-    取到半个月前的日期还不报错。时间戳管「今天是哪天」这个锚点；
-    get_current_time 工具继续管秒级精度与未来时间点。
-
-    进投影不进底片的理由：时间属于「本轮视野」而非「对话内容」——
-    入底片会堆日期垃圾、被摘要吸收；投影每轮现切、随轮作废。
-    now 参数留给测试注入固定时刻。
-    """
-    now = now or datetime.now()
-    return Message(
-        role="system",
-        content=f"今天：{now:%Y-%m-%d}（周{_WEEKDAYS[now.weekday()]}）{now:%H:%M}",
-    )
-
-
-def _route_first_menu(
-    agent: Agent, user_text: str, schemas: list[dict]
-) -> tuple[list[dict] | None, RouteDecision | None]:
-    """M10 场景路由（轮首一针，只影响本轮第一次模型调用）。
-
-    返回 (菜单, 路由决定)：决定随菜单一起上浮给 run_turn 做投影注入
-    （073 路由 stamp——决定显式化，不再只以「菜单收窄」的间接信号存在）。
-
-    direct      → (None, decision)——省全部菜单 token，且纯聊天流量因此落进
-                  SemanticCacheLLM 的命中区（它只在 tools=None 时生效，免费放大既有基建）
-    single_tool → (只递该工具 schema, decision)——选择权已由 Jev 行使，LLM 只填参数
-                  （单工具菜单即全部强制力，不用 tool_choice 强制——那会堵死
-                  Jev 误判时模型直答的逃生门）；Jev 选的名字不在菜单 → 回退全量
-                  且决定作废（stamp 不注入——说收窄却给全量等于骗模型）
-    complex     → (全量菜单, decision)——模型自己走 S5b make_plan
-    无路由（无 key 装配缺席 / 故障降级 / 熔断跳过）→ 原生路径（v0.57 行为）
-    """
-    if agent.router is None:
-        return schemas or None, None
-    decision = agent.router.route(user_text)
-    if decision is None:
-        return schemas or None, None
-    if decision.kind == "direct":
-        return None, decision
-    if decision.kind == "single_tool" and decision.tool is not None:
-        single = [s for s in schemas if s["function"]["name"] == decision.tool]
-        if single:
-            return single, decision
-        return schemas or None, None   # 名字不在菜单：决定未生效，回退全量
-    return schemas or None, decision   # complex
-
-
-def _route_stamp(decision: RouteDecision | None) -> Message | None:
-    """路由决定注入投影（073，时间戳/计划 stamp 同款手法：进投影不进底片）。
-
-    Confidence Routing ⑦③：single_tool 的决定此前只以「菜单收窄」间接信号
-    存在（漂移温床）——主模型不知道路由器判了什么、也不知道收窄的菜单
-    在误判时可直答逃生。stamp 把决定显式写进本轮视野（谁做了决定、
-    决定是什么）；逃生门照 028 决策 4 保留（不强制 tool_choice）。
-    理由是程序从 kind+tool 推导的确定性文案——Jev choice 是一段式协议，
-    响应里没有理由字段可解析，不猜协议（伪造一个「Jev 的理由」反而失真）。
-    """
-    if decision is None:
-        return None
-    if decision.kind == "direct":
-        content = "【场景路由】本轮判定为直接回答：不挂工具菜单，用自身知识作答即可。"
-    elif decision.kind == "single_tool" and decision.tool is not None:
-        content = (
-            f"【场景路由】本轮判定为单工具任务，首轮菜单已收窄为 {decision.tool}。"
-            "若判定有误可直接文字作答；工具结果回灌后将恢复全量菜单。"
-        )
-    else:
-        content = (
-            "【场景路由】本轮判定为多步骤任务，全量工具菜单已挂载；"
-            "建议先用 make_plan 拆解步骤再逐个执行。"
-        )
-    return Message(role="system", content=content)
-
-
-def _append_stamps(
-    payload: list[Message], decision: RouteDecision | None, board: PlanBoard
-) -> None:
-    """投影尾部三件 stamp 就位：时间锚点 → 路由决定 → 活跃计划（S2b/M10/073）。
-
-    080 从头部（`payload.insert(1, …)`）改为尾部（`payload.append`）：三个 stamp
-    是每轮必变的动态内容，插头部会把其后整段前缀缓存全部作废；后置后
-    `[system 人设] + [摘要] + [原文]` 前缀字节稳定，同会话连续轮次 prefix 命中
-    （system 消息任意位置均指令，后置不牺牲注入语义）。
-
-    三件共同契约：进投影不进底片、缺席不注入零开销、按 time→route→plan 顺序
-    追加（append 天然不留空洞，无需原来的动态游标）。
-    """
-    payload.append(_time_stamp())
-    route_msg = _route_stamp(decision)
-    if route_msg is not None:
-        payload.append(route_msg)
-    plan_msg = _plan_stamp(board)
-    if plan_msg is not None:
-        payload.append(plan_msg)
-
-
-def _split_tool_batches(tool_calls: list[dict]) -> list[tuple[bool, list[dict]]]:
-    """把一轮 tool_calls 切成批：连续 spawn 段 = 可并行批（True），
-    其余逐个 = 串行批（False）。
-
-    只对「连续 spawn」开并行——穿插的普通工具拆成单元素串行批，保持
-    原顺序。结果按批顺序回填，模型看到的顺序与点菜顺序一致。
-    """
-    batches: list[tuple[bool, list[dict]]] = []
-    i = 0
-    n = len(tool_calls)
-    while i < n:
-        if tool_calls[i]["name"] == _SPAWN_TOOL:
-            j = i
-            while j < n and tool_calls[j]["name"] == _SPAWN_TOOL:
-                j += 1
-            batches.append((True, tool_calls[i:j]))
-            i = j
-        else:
-            batches.append((False, [tool_calls[i]]))
-            i += 1
-    return batches
-
-
-def _run_parallel(
-    tool_calls: list[dict],
-    agent: Agent,
-    on_confirm: Callable | None,
-    on_event: Callable | None,
-) -> list[str]:
-    """并行执行一批 spawn（线程池）；结果按提交顺序返回（点菜顺序=确定性）。
-
-    spawn 是 IO-bound（子 agent 大量时间等 LLM），GIL 不碍事——线程池
-    就够，不必上进程。f.result() 按 futures 提交序取，非完成序——
-    结果顺序与模型点菜顺序一致（它靠位置对应 tool_call_id）。
-
-    059：on_event 一并下发——各 worker 线程内的子 agent 事件会**交织**
-    写进同一条父流（谁先跑完谁先到），故子事件带 task 摘要用于区分兄弟；
-    emit 侧的序号原子性由 RunStore 的锁保证（共享收口点，一处修）。
-    """
-    with ThreadPoolExecutor(max_workers=len(tool_calls)) as ex:
-        futures = [
-            ex.submit(
-                agent.execute,
-                tc["name"],
-                tc["arguments"],
-                confirm=on_confirm,
-                on_event=on_event,
-            )
-            for tc in tool_calls
-        ]
-        results: list[str] = []
-        for f in futures:
-            try:
-                results.append(f.result())
-            except Exception as exc:  # agent.execute 已兜底（registry 返回错误串），这里是意外
-                results.append(f"错误：并行执行失败（{exc}）")
-        return results
-
-
-def _execute_tool_calls(
-    tool_calls: list[dict],
-    session: Session,
-    payload: list[Message],
-    agent: Agent,
-    on_confirm: Callable | None,
-    on_event: Callable | None,
-    should_cancel: Callable | None,
-) -> bool:
-    """执行一轮的全部工具调用（S6b 切批：连续 spawn 段并行，其余串行）。
-
-    结果按点菜顺序回填（tool 消息与 tool_call_id 一一对应，模型靠位置认）。
-    返回 False = 取消命中（已 trim 半截轮），调用方应返回 CANCELLED。
-    """
-    for parallel_ok, batch in _split_tool_batches(tool_calls):
-        # 协作式取消检查点②：每个批执行前（批粒度，非逐工具）
-        if should_cancel and should_cancel():
-            trim_incomplete_round(session.messages)
-            return False
-        # tool_started：并行批先全发（表示都开始了），串行批逐发
-        # id（P0-3）：tool_call id 随事件外发——checkpoint 账本靠它把
-        # 「点了什么菜」与「回了什么结果」配对，恢复时才能按 id 回注
-        for tc in batch:
-            if on_event:
-                on_event("tool_started", {
-                    "id": tc["id"], "name": tc["name"], "arguments": tc["arguments"],
-                })
-        # 执行：连续 spawn 段用线程池并行，其余串行
-        # 059：on_event 顺着 agent.execute 往下走，声明 receives_event 的
-        # 工具（spawn 两件）拿到父事件缝，把子 agent 过程以 sub.* 转出来
-        if parallel_ok and len(batch) > 1:
-            results = _run_parallel(batch, agent, on_confirm, on_event)
-        else:
-            results = [
-                agent.execute(
-                    tc["name"], tc["arguments"], confirm=on_confirm, on_event=on_event
-                )
-                for tc in batch
-            ]
-        # 按序回填（点菜顺序，确定性——模型靠位置对应 tool_call_id）
-        for tc, result in zip(batch, results, strict=True):
-            # 结果以 role="tool" 回填，tool_call_id 对应是哪次调用
-            tool_msg = Message(role="tool", tool_call_id=tc["id"], content=result)
-            session.messages.append(tool_msg)
-            payload.append(tool_msg)
-            # 入史必须早于事件外发（P0-3 不变量：事件一旦外发，底片里已经
-            # 有这件事）。checkpoint writer 挂在 on_event 缝上落盘 session，
-            # 顺序反了就会存出「缺最后一条 tool 消息」的底片，白丢一次结果。
-            #
-            # S5b 针②：工具执行后立刻 drain 计划事件——在 tool_result 之前
-            # 转发（plan.* 是这次执行的一部分，因果序在前）。事件走既有
-            # on_event 缝，零新缝；server 侧点分命名默认透传，前端免费收到
-            _forward_plan_events(session.plan, on_event)
-            if on_event:
-                on_event("tool_result", {"id": tc["id"], "name": tc["name"], "result": result})
-    return True
 
 
 def _close_out(

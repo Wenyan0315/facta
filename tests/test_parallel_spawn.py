@@ -15,7 +15,8 @@ from facta.core.llm import LLM
 from facta.core.types import Message
 from facta.memory.store import Session
 from facta.orchestrator.agent import Agent
-from facta.orchestrator.loop import _split_tool_batches, run_turn
+from facta.orchestrator.executor import _split_tool_batches
+from facta.orchestrator.loop import run_turn
 from facta.server.run_store import STATUS_RUNNING, Run
 from facta.tools.context import ToolContext
 from facta.tools.registry import ToolRegistry
