@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger(__name__)   # ADR 076：finish 后的异步收官失败无人在听事件流，落日志
 
 from facta.knowledge.extract import sync_graph
 from facta.knowledge.graph import GRAPH_LOCK
@@ -177,10 +178,16 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
     执行期间 CheckpointWriter 挂在 on_event 缝上：工具边界落盘底片、
     账本记 intent/result（细节见 orchestrator/checkpoint.py）。
 
-    收尾（settle_session：补标题 → 增量固化 → 落盘）放在 finally，且必须先于
-    run.finish：Web 壳是常驻进程，没有 CLI 的退出保存钩子，不收尾就在服务被杀
-    时丢掉这一整轮对话；而 finish 一推终态就释放准入，同会话的下一轮可能立刻
-    load——save 落在 finish 之后，新一轮就读到旧状态（lost update）。
+    收尾（settle_session：补标题 → 增量固化 → 落盘）在 finally 里拆两截
+    （ADR 076 reflect 全面异步化）：
+      ① **保底 save + run.settling 事件**留在 run.finish 之前——Web 壳是
+      常驻进程，没有 CLI 的退出保存钩子，不保底就在服务被杀时丢掉这一整
+      轮对话；「读到 run.completed 时盘上必有这轮对话」的验收不变。
+      ② 标题/固化的 LLM 重活挪到 run.finish **之后**（同线程继续跑）——
+      终态推送与准入释放不再被固化拖住，用户收完回复即可开下一轮。
+      代价是与「同会话的下一轮」失去准入串行：settle 的终态写因此改
+      store.update 窄写（见 assemble.settle_session 头注记），messages
+      的所有权仍在轮次 worker 手里，丢消息在结构上不可能。
     """
     run.status = STATUS_RUNNING
     run.emit("run.started", {})
@@ -223,15 +230,21 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
     except Exception as exc:   # 防御性兜底：run_turn 已捕获 LLMUnavailableError，这里是意外
         run.emit("error", {"message": str(exc)})
     finally:
-        if writer is not None:
-            writer.end(run.run_id, status)   # 人工排查时能看出这轮是正常结束还是中断
+        try:
+            if writer is not None:
+                writer.end(run.run_id, status)   # 人工排查时能看出这轮是正常结束还是中断
+            if session is not None:
+                run.emit("run.settling", {})   # 收尾可能几秒（标题/固化都要调 LLM），别让用户以为是卡死
+                ctx.store.save(run.session_id, session)   # ① 保底（毫秒级）：finish 前落盘
+        except Exception as exc:   # 保底失败不吞终态：告知用户，流照常收口
+            run.emit("error", {"message": f"会话保底落盘失败：{exc}"})
+        run.finish(status)   # ② 终态事件 + 释放准入——从这里起同会话可开下一轮
         if session is not None:
             try:
-                run.emit("run.settling", {})   # 收尾可能几秒（标题/固化都要调 LLM），别让用户以为是卡死
                 settle_session(session, run.session_id, ctx.store, ctx.internal_llm)
-            except Exception as exc:   # 收尾失败不吞终态：告知用户，流照常收口
-                run.emit("error", {"message": f"会话收尾失败：{exc}"})
-        run.finish(status)
+            except Exception:   # 对话本体已保底落盘，游标未推进下轮重烧（P2-7 兜底）
+                logger.warning("异步收官失败：游标未推进，下轮重烧", exc_info=True)
+        run._settle_done.set()   # 测试同步点（ADR 076），生产只 set 不 wait
 
 
 def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:

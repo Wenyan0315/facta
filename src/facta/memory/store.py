@@ -43,6 +43,7 @@ import re
 import shutil
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -196,7 +197,10 @@ class SessionStore:
     并发：同一段对话的并发写由上层的【准入】挡住——Web 是 RunStore 的会话内
     单锁 + 写操作对 in-flight 会话返 409（server/run_store.py、server/app.py），
     CLI 恒一个会话且单线程；用策略代替锁是因为临界区是一整轮对话（几十秒），
-    排队没有意义。**但 create 是例外（P1-6 评审修复）**：创建时还没有会话可让
+    排队没有意义。**ADR 076 例外：后台收尾（settle）落在准入窗口之外**，
+    它的终态写不走全量 save 而走 update() 窄写——per-sid 锁串行化「读改写」
+    与一切 save，字段所有权（messages 归轮次 worker，title/游标归收尾）代替
+    大锁。**但 create 是例外（P1-6 评审修复）**：创建时还没有会话可让
     RunStore 锁，Web 线程池里两个同秒请求会同时通过 _alloc_id 的「不存在」
     检查、拿到同一个 id、互踩 tmp（评审实测只落一个文件 + FileNotFoundError）。
     所以 create 全程持一把进程内 threading.Lock（锁域毫秒级，无排队压力）。
@@ -209,6 +213,11 @@ class SessionStore:
     def __init__(self, dir: Path) -> None:
         self._dir = dir
         self._create_lock = threading.Lock()
+        # ADR 076 per-sid 写锁：save / update 共用。会话删除后锁对象残留
+        # （一个 Lock ≈ 100 字节，教学规模不计）——物理回收等会话文件数
+        # 上量级再说（ponytail：故意砍的真拐角，升级路径=锁随 delete 清）
+        self._sid_locks: dict[str, threading.Lock] = {}
+        self._sid_locks_guard = threading.Lock()
         self._create_lockfile = self._dir / ".create.lock"
         # lockfile 不存在则创建——首次启动 _dir 可能尚未存在
         self._create_lockfile.parent.mkdir(parents=True, exist_ok=True)
@@ -276,7 +285,29 @@ class SessionStore:
         return load_session(path)
 
     def save(self, sid: str, session: Session) -> None:
-        save_session(session, self.path(sid))
+        with self._lock_for(sid):
+            save_session(session, self.path(sid))
+
+    def update(self, sid: str, apply: Callable[[Session], None]) -> None:
+        """窄写原语（ADR 076）：锁内 load → apply → save。
+
+        给「后台收尾只改少数字段」的场景一个不覆盖 messages 的通道——
+        异步固化（reflect 全面异步化）与下一轮 worker 并发时，全量 save
+        会用旧快照盖掉新消息（P1-5 的 lost update 变体），窄写只动
+        apply 碰的字段。锁与 save 同一把：读改写窗口内不允许并发落盘。
+        """
+        with self._lock_for(sid):
+            session = self.load(sid)   # 锁内读：缺席大声崩的语义沿用
+            apply(session)
+            save_session(session, self.path(sid))
+
+    def _lock_for(self, sid: str) -> threading.Lock:
+        with self._sid_locks_guard:
+            lock = self._sid_locks.get(sid)
+            if lock is None:
+                lock = threading.Lock()
+                self._sid_locks[sid] = lock
+            return lock
 
     def create(self, session: Session, now: datetime | None = None) -> str:
         """新建会话并立即落盘，返回 id。

@@ -8,13 +8,30 @@
 
 import logging
 import sys
+import threading
 
 from facta.cli import EXIT_NEW, run_chat
-from facta.memory.store import Session
+from facta.memory.store import Session, derive_title
 from facta.orchestrator.assemble import assemble, settle_session
 from facta.orchestrator.checkpoint import heal, ledger_path, read_ledger
 
 VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
+
+
+def _settle_async(session, sid, ctx) -> threading.Thread:
+    """收官丢后台（ADR 076 reflect 全面异步化）：标题+固化是 LLM 重活，
+    不挡 /new 开新会话——旧段与新段是不同 sid 文件，结构性无竞态。
+
+    非 daemon：退出前 main 的 finally 逐个 join，flush 语义（宁可退出慢
+    几秒不丢记忆）与账单完整性（固化 token 计入 bill）由此保住。
+    """
+
+    def _run() -> None:
+        print(settle_session(session, sid, ctx.store, ctx.internal_llm, flush=True))
+
+    t = threading.Thread(target=_run)
+    t.start()
+    return t
 
 
 def main() -> None:
@@ -50,13 +67,16 @@ def main() -> None:
     #    quit/interrupt → 收官；new → 收官后另起一段。
     #    拆链（评审第 2 条）：压缩器内部调用走 summary_llm=内部链
     #    MCP 客户端只在最终退出时关闭——多会话循环期间关了，下一轮工具全死
+    settles: list[threading.Thread] = []
     try:
         while True:
             session, reason = run_chat(ctx.llm, agent, session, summary_llm=ctx.internal_llm)
 
-            # 收官三步（补标题 → 增量固化 → 落盘）与 Web worker 共用一份实现。
-            # flush=True：退出与换新都没有「下一轮」了，阈值降到 1，剩下的全冲掉。
-            print(settle_session(session, sid, ctx.store, ctx.internal_llm, flush=True))
+            # 收官（补标题 → 增量固化 → 窄写落盘）与 Web worker 共用一份实现，
+            # 但已异步化（ADR 076）：保底 save 在此同步做（毫秒级，不挡 /new），
+            # LLM 重活丢后台——flush=True 的「剩下全冲掉」语义不变，报告稍后打印。
+            ctx.store.save(sid, session)
+            settles.append(_settle_async(session, sid, ctx))
             print(f"对话历史已保存：{len(session.messages)} 条 → sessions/{sid}.json")
 
             if reason != EXIT_NEW:
@@ -66,12 +86,17 @@ def main() -> None:
             # session.messages」那条纪律在这里自然消解：老口径原地清是为了迁就
             # 常驻 agent 的闭包（search_history 抓的是列表对象本身，rebind 即失明），
             # 现在闭包与会话同生共死。计划板重置与人设补种同样不再需要——
-            # 新 Session 天生空板，人设由工厂保证。
-            print(f"「{session.title or '未命名'}」已收进会话清单，新会话开始")
+            # 新 Session 天生空板，人设由工厂保证。标题用首句派生——LLM 提炼
+            # 还在后台跑，清单标签本就 fallback 首句（list_metas 同款口径）。
+            print(f"「{derive_title(session)}」已收进会话清单，新会话开始")
             sid = ctx.store.create(Session())
             session = ctx.store.load(sid)
             agent = ctx.build_agent(session)
     finally:
+        # 等“收尾中的会话”真正收完（flush 语义：宁可退出慢几秒不丢记忆），
+        # 再关 MCP——子进程一关，后台固化的工具若还想要就没了
+        for t in settles:
+            t.join()
         # MCP-b/r：无论正常退出还是异常崩掉，都关掉所有工具服务器——不留孤儿进程
         for client in ctx.mcp_clients:
             client.close()
