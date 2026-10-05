@@ -19,6 +19,7 @@ from facta.memory.todos import TodoStore
 from facta.orchestrator.agent import Agent
 from facta.orchestrator.assemble import AppContext, ensure_persona
 from facta.server.app import create_app
+from facta.server.run_store import RunStore
 from facta.tools.registry import ToolRegistry
 
 
@@ -77,7 +78,9 @@ def _read_events(client, run_id: str) -> list[dict]:
 
 
 def _run_to_completion(client, text: str) -> str:
-    """发一轮消息并读完事件流（= worker 已收官落盘），返回 session_id。"""
+    """发一轮消息并读完事件流（= 保底已落盘、run 终态已推；ADR 076 起
+    异步收官可能仍在跑——需要断言标题/游标时等 run._settle_done），
+    返回 session_id。"""
     body = client.post("/api/runs", json={"text": text}).json()
     _read_events(client, body["run_id"])
     return body["session_id"]
@@ -211,12 +214,17 @@ def test_worker_seeds_persona_into_session():
 def test_settle_sets_llm_title():
     # 收官补标题：internal_llm 第 1 次调用 = 提炼标题，写进会话文件
     #（清单读取零 LLM 调用，所以标签必须在收官时就落盘）
+    # ADR 076：settle 已挪到 run.completed 之后异步跑——读完事件流不再
+    # 等于收官完成，注入 RunStore 等 _settle_done 再断言
     ctx = _make_ctx()
     ctx.internal_llm = ScriptedLLM([Message(role="assistant", content="PHP 工具封装")])
-    client = TestClient(create_app(ctx))
-    sid = _run_to_completion(client, "PHP 结合 AI Agent 可以做什么")
+    rs = RunStore()
+    client = TestClient(create_app(ctx, store=rs))
+    body = client.post("/api/runs", json={"text": "PHP 结合 AI Agent 可以做什么"}).json()
+    _read_events(client, body["run_id"])
+    assert rs.get(body["run_id"])._settle_done.wait(timeout=10)
 
-    assert ctx.store.load(sid).title == "PHP 工具封装"   # 不是首句截断
+    assert ctx.store.load(body["session_id"]).title == "PHP 工具封装"   # 不是首句截断
 
 
 # ---------- 收官容错（P1-5/P2-7 评审修复：固化失败不拖死对话保存） ----------
@@ -235,11 +243,13 @@ def _dialogue(n: int = 3) -> Session:
 
 def test_settle_saves_dialog_even_if_consolidate_crashes(tmp_path, monkeypatch):
     """评审故障注入复现：固化抛异常曾把 store.save 一起拖死——已回答的
-    文本在刷新后消失。修复后对话本体先保底落盘，游标不动、报告异常。
+    文本在刷新后消失。ADR 076 后保底 save 归调用方（进场前落盘），
+    游标不动、报告异常。
     """
     store = SessionStore(tmp_path / "sessions")
     session = _dialogue()
     sid = store.create(Session())
+    store.save(sid, session)   # 调用方契约：保底落盘先于 settle
     monkeypatch.setattr(asm, "CONSOLIDATE_THRESHOLD", 1)
 
     def _boom(*args, **kwargs):
@@ -261,6 +271,7 @@ def test_settle_keeps_cursor_when_consolidate_reports_failure(tmp_path, monkeypa
     store = SessionStore(tmp_path / "sessions")
     session = _dialogue()
     sid = store.create(Session())
+    store.save(sid, session)   # 调用方契约：保底落盘先于 settle
     monkeypatch.setattr(asm, "CONSOLIDATE_THRESHOLD", 1)
     monkeypatch.setattr(asm, "consolidate", lambda *a, **k: ("记忆固化：坏 JSON，未写入", False))
 
@@ -274,6 +285,7 @@ def test_settle_advances_cursor_on_success(tmp_path, monkeypatch):
     store = SessionStore(tmp_path / "sessions")
     session = _dialogue()
     sid = store.create(Session())
+    store.save(sid, session)   # 调用方契约：保底落盘先于 settle
     monkeypatch.setattr(asm, "CONSOLIDATE_THRESHOLD", 1)
     monkeypatch.setattr(asm, "consolidate", lambda *a, **k: ("记忆固化：新增 1 条", True))
 
@@ -287,6 +299,7 @@ def test_settle_title_failure_falls_back_to_first_line(tmp_path, monkeypatch):
     store = SessionStore(tmp_path / "sessions")
     session = _dialogue(1)
     sid = store.create(Session())
+    store.save(sid, session)   # 调用方契约：保底落盘先于 settle
 
     def _boom(*args, **kwargs):
         raise RuntimeError("标题炸了")
@@ -296,6 +309,71 @@ def test_settle_title_failure_falls_back_to_first_line(tmp_path, monkeypatch):
     asm.settle_session(session, sid, store, ScriptedLLM([]))
 
     assert store.load(sid).title == derive_title(session)
+
+
+# ---------- ADR 076 窄写合并：异步收官不覆盖下一轮的新消息 ----------
+
+
+def test_settle_narrow_write_keeps_next_round_messages(tmp_path, monkeypatch):
+    # 主验收：settle 异步落盘时同会话下一轮已 append——终态写必须窄写合并。
+    # 若仍全量回写本轮快照，下一轮的新消息会被盖掉（P1-5 的 lost update 变体）
+    store = SessionStore(tmp_path / "sessions")
+    session = _dialogue(3)   # 本轮快照：6 条
+    sid = store.create(Session())
+    monkeypatch.setattr(asm, "CONSOLIDATE_THRESHOLD", 1)
+    monkeypatch.setattr(asm, "consolidate", lambda *a, **k: ("记忆固化：新增 1 条", True))
+
+    # 保底落盘后模拟下一轮进场 append（worker2 的 save 先落）
+    store.save(sid, session)
+    nxt = store.load(sid)
+    nxt.messages.append(Message(role="user", content="下一轮的新问题"))
+    nxt.messages.append(Message(role="assistant", content="下一轮的新回答"))
+    store.save(sid, nxt)
+
+    asm.settle_session(session, sid, store, ScriptedLLM([]))
+
+    saved = store.load(sid)
+    contents = [m.content for m in saved.messages]
+    assert "下一轮的新问题" in contents and "下一轮的新回答" in contents   # 新消息没丢
+    assert len(saved.messages) == 8
+    assert saved.consolidated_upto == len(session.messages)   # 游标推进到本轮快照末端（前缀共享）
+
+
+def test_settle_narrow_write_keeps_renamed_title(tmp_path):
+    # 用户 rename（title 非 None）后，settle 的 LLM 标题晚到也不覆盖——
+    # 「自动生成用于填空，不覆盖用户主动编辑」纪律在异步时序下依然成立
+    store = SessionStore(tmp_path / "sessions")
+    session = _dialogue(1)
+    sid = store.create(Session())
+    store.save(sid, session)
+    renamed = store.load(sid)
+    renamed.title = "用户改的名字"
+    store.save(sid, renamed)
+
+    asm.settle_session(session, sid, store, ScriptedLLM([Message(role="assistant", content="LLM 起的名字")]))
+
+    assert store.load(sid).title == "用户改的名字"
+
+
+def test_settle_cursor_holds_when_fresh_shrank(tmp_path, monkeypatch):
+    # fresh 已被下一轮压缩截短（位置语义撕裂）→ 游标不推，下轮重烧——
+    # 重复优于跳过（P2-7 语义）
+    store = SessionStore(tmp_path / "sessions")
+    session = _dialogue(3)   # 6 条
+    sid = store.create(Session())
+    monkeypatch.setattr(asm, "CONSOLIDATE_THRESHOLD", 1)
+    monkeypatch.setattr(asm, "consolidate", lambda *a, **k: ("记忆固化：新增 1 条", True))
+    store.save(sid, session)
+
+    # 模拟下一轮压缩：盘上 messages 比本轮快照短
+    shrunk = store.load(sid)
+    shrunk.messages = shrunk.messages[:4] + [Message(role="user", content="（摘要）")]
+    shrunk.consolidated_upto = 0
+    store.save(sid, shrunk)
+
+    asm.settle_session(session, sid, store, ScriptedLLM([]))
+
+    assert store.load(sid).consolidated_upto == 0   # len(fresh)=5 < 目标 6 → 不推
 
 
 # ---------- 语义 RAG 降级判定（P1-1 评审修复） ----------

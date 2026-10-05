@@ -188,22 +188,27 @@ def settle_session(
     *,
     flush: bool = False,
 ) -> str:
-    """收尾一段对话：补标题 → 增量固化 → 落盘。返回固化报告（CLI 打印，Web 忽略）。
+    """收尾一段对话的 LLM 重活：补标题 → 增量固化 → 窄写落盘。返回固化报告。
 
-    两个壳共用一份（与 ensure_persona 同一纪律）：顺序是正确性约束，复制两份
-    必然漂移。P1-5 评审修复后的顺序：**对话本体先保底落盘**，可失败的标题/
-    固化各自容错，终态再落一次——原顺序里固化抛异常会把 store.save 一起拖死，
-    已回答给用户的文本在刷新后消失（评审故障注入实测复现）。
+    **保底落盘不在本函数里（ADR 076）**：对话本体的 save 必须发生在
+    异步化的关键路径上（Web worker finally 在 run.finish 之前；CLI 在
+    /new 换新之前同步做）——本函数跑在终态之后，此刻同会话下一轮可能
+    已进场 append，任何全量 save 都会把新消息盖掉。P1-5 的教训
+    「可失败的标题/固化不得拖死对话保存」由此升格为分工：保底归主轴，
+    重活归后台。调用方契约：进场前盘上必须已有本轮对话。
 
     游标语义（P2-7）：consolidate 返回 (report, ok)，ok=False（坏 JSON 等
     可重试失败）不推进 consolidated_upto，下轮重烧同一批——宁可重复萃取，
-    不可静默丢记忆。游标只活在磁盘上：推进后必须再 save（终态落盘兜住）。
+    不可静默丢记忆。游标只活在磁盘上：推进后由终态窄写落盘兜住。
 
-    调用时机：Web 在 worker 的准入窗口内（run.finish 之前），因此与「同会话的
-    下一轮」天然串行；CLI 在退出 / `/new` 换新之前。
+    调用时机（ADR 076 起改为异步旁路）：Web 在 worker 的 finally 里、但已
+    挪到 run.finish **之后**——终态推送与准入释放不再等固化；CLI 在
+    /new 换新/退出的后台线程里跑，退出前 join。终态落盘是窄写合并
+    （store.update）：title 只在盘上仍为 None 时填（用户 rename 优先）；
+    游标单调推进且仅当前缀共享（len(fresh) ≥ 目标）时才推，否则
+    不动——下轮重烧，重复优于跳过（P2-7 语义）。
     flush=True → 阈值降到 1：没有「下一轮」了，把剩下的全冲掉。
     """
-    store.save(sid, session)   # ① 保底：后面任何一步失败，对话本体不丢
 
     # 标题（每段对话只提炼一次）：手工名优先——title 非空说明用户 rename 过，
     # 不用 LLM 顶掉（「自动生成用于填空，不覆盖用户主动编辑」，计划名/记忆标签同此原则）
@@ -236,7 +241,18 @@ def settle_session(
         if ok:
             session.consolidated_upto = len(session.messages)
 
-    store.save(sid, session)   # ② 终态：标题与游标的更新也要落盘
+    # ② 终态：窄写合并（ADR 076）——title 与游标落到盘上【最新】副本，
+    # messages 的所有权在轮次 worker 手里，这里绝不整包回写
+    def _merge(fresh: Session) -> None:
+        if fresh.title is None and session.title is not None:
+            fresh.title = session.title   # 用户 rename 过（非 None）就不动
+        target = session.consolidated_upto
+        if target > fresh.consolidated_upto and len(fresh.messages) >= target:
+            # 前缀共享（下一轮只 append）才安全推进；fresh 已被压缩截短
+            # → 位置语义撕裂 → 不动，下轮重烧
+            fresh.consolidated_upto = target
+
+    store.update(sid, _merge)
     return report
 
 

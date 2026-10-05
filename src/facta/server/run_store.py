@@ -81,6 +81,10 @@ class Run:
     # `self._seq += 1` 非原子，并发下会重号（seq 是排序/去重/重放的位置键，
     # 重号=客户端可能漏读一条）。修共享收口点一次，不在调用侧各自加锁。
     _emit_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # ADR 076 收官同步点：worker 的异步 settle 跑在 SSE 流 sentinel 收口
+    # 之后，测试无法再靠「读完事件流」推断收官完成——等这个 Event。
+    # 生产逻辑零参与（只 set 不 wait）。
+    _settle_done: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def _next_seq(self) -> int:
         self._seq += 1
