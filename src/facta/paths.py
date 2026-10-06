@@ -10,11 +10,8 @@ P1-3 先把 "data/notes" 收口到 __main__，但 evals 与 demo 是离线脚本
 
 S8a 边界①收口（2026-09-25）：data/ 全族锚到 WORKSPACE_ROOT（`__file__` 上两级），
 不再依赖「从仓库根启动」——VS Code 壳 / 常驻服务拉子进程时 cwd 不可控，相对路径
-会因找不到 `data/notes` 直接崩。**未加 env 覆盖**（039 原话是「`__file__` 锚定 +
-env 覆盖」，此处只兑现前半）：当前零消费者——测试隔离一律走 monkeypatch 消费方
-模块属性（app.NOTES_DIR / assemble.LEARNED_DIR 等），加了就是死旋钮（032「文件数
->10」死信号同款教训）。触发信号 = 数据目录需与代码目录分离时（S8b 常驻 / VS Code
-壳决定数据住哪），届时补 FACTA_DATA_DIR 并同步 files.py 围栏口径。
+会因找不到 `data/notes` 直接崩。env 覆盖 FACTA_DATA_DIR 后续已补（见下 WORKSPACE_ROOT
+注释）；ADR 090（R03）把装配层残余字面量与写入围栏也收到同一推导上。
 """
 from __future__ import annotations
 
@@ -92,10 +89,38 @@ WORKTREES_DIR = DATA_ROOT / "worktrees"
 # 知识资产进 git（与 vector_db 二进制缓存相反的判断）
 GRAPH_PATH = DATA_ROOT / "graph.json"
 
-# 052 记忆写围栏：只作用于「写」的清单（root 相对 posix）。与 files.py 的
-# _BLACKLIST_DIRS 分列——那份清单被 _resolve_in_workspace 用于读写两条路径，
-# 而 notes 是必须可读的语料资产（r1/i3/i4 的 verify 基准就是这 15 篇），
-# 塞进去等于当场产品回归。消费方两处同源 import：files.py（write_file 写侧拒）
-# 与 sandbox.py（deny file-write*）。记忆落盘唯一入口＝工具进程（write_note /
-# sync_graph / 记忆固化，都是进程内写，不经这两层）。
-MEMORY_WRITE_FENCE = ("data/notes", "data/learned", "data/graph.json")
+def _fence_entry(p: Path) -> str:
+    """围栏条目（ADR 090）：在 WORKSPACE_ROOT 内保持相对 posix（files.py 的
+    rel 比对与 sandbox 的 `root / d` 拼接两种消费姿势都吃得下）；根外给绝对
+    路径——files.py 臂够不着 workspace 外是无害空转，sandbox 臂靠 pathlib
+    「绝对右操作数返回其本身」恰好拿到真路径（tmp 族数据根补上写白名单缺口）。
+    """
+    try:
+        return p.relative_to(WORKSPACE_ROOT).as_posix()
+    except ValueError:
+        return str(p)
+
+
+# 052 记忆写围栏：只作用于「写」的清单（root 相对 posix；数据根迁出则绝对，
+# 见 _fence_entry）。与 files.py 的 BLACKLIST_DIRS 分列——那份清单被
+# _resolve_in_workspace 用于读写两条路径，而 notes 是必须可读的语料资产
+# （r1/i3/i4 的 verify 基准就是这 15 篇），塞进去等于当场产品回归。消费方两处
+# 同源 import：files.py（write_file 写侧拒）与 sandbox.py（deny file-write*）。
+# 记忆落盘唯一入口＝工具进程（write_note / sync_graph / 记忆固化，都是进程内写，
+# 不经这两层）。ADR 090 起由常量推导，默认布局输出与旧字面量逐字节一致。
+MEMORY_WRITE_FENCE = tuple(_fence_entry(p) for p in (NOTES_DIR, LEARNED_DIR, GRAPH_PATH))
+
+# 敏感目录黑名单（files.py 读+写双挡 / sandbox.py 写侧 deny 的唯一真值源，
+# ADR 090 合一——此前两模块各抄一份字面量，漂移即静默裸奔）。数据条目随
+# DATA_ROOT 走；servers/sandbox 与 .venv 是 workspace 静态项。
+BLACKLIST_DIRS = tuple(
+    _fence_entry(p)
+    for p in (
+        DATA_ROOT / "memory",
+        DATA_ROOT / "audit",
+        DATA_ROOT / "vector_db",
+        WORKSPACE_ROOT / "servers" / "sandbox",
+        WORKSPACE_ROOT / ".venv",
+        WORKTREES_DIR,
+    )
+)

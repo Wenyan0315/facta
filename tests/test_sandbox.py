@@ -144,6 +144,9 @@ def test_profile_blacklist_covers_files_py():
     # 目录黑名单：files.py 每一项都有对应 deny subpath
     for d in files_mod._BLACKLIST_DIRS:
         assert f'(deny file-write* (subpath "/ws/{d}"))' in profile, d
+    # ADR 090：黑名单唯一真值源收进 paths.py——两消费方拿的是同一对象
+    assert files_mod._BLACKLIST_DIRS is paths_mod.BLACKLIST_DIRS
+    assert sandbox._BLACKLIST_DIRS is paths_mod.BLACKLIST_DIRS
     # .env 语义对齐 files.py：根级前缀 + 任意深度文件/目录
     assert '/\\.env' in profile
     # .git 收窄是有意裁定（048 丙案）：files.py 管应用层读（全 .git 挡），

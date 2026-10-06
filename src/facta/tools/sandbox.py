@@ -31,16 +31,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+from facta.paths import BLACKLIST_DIRS as _BLACKLIST_DIRS
 from facta.paths import MEMORY_WRITE_FENCE
 
 ENV_SWITCH = "FACTA_SANDBOX"   # 执行隔离档（086）：none / workspace-write / container
 
-# 与 files.py 黑名单交叉同源的目录项（root 相对）——tests/test_sandbox.py
-# 断言 files.py 的每一项在这里都有对应 deny，漂移即红。
-_BLACKLIST_DIRS = (
-    "data/memory", "data/audit", "data/vector_db",
-    "servers/sandbox", ".venv", "data/worktrees",
-)
+# _BLACKLIST_DIRS 唯一真值源在 paths.py（ADR 090 合一，import-as 保持本地名）：
+# tests/test_sandbox.py 断言同一对象 + profile 逐项有对应 deny，漂移即红。
 
 
 def sandbox_level() -> str:
@@ -155,8 +152,10 @@ def build_seatbelt_profile(root: Path) -> str:
     # 目录黑名单（root 相对；子 agent root=副本时这些路径不存在，规则无害
     # 空转——零特判）。052 记忆围栏同形状追加：subpath 对普通文件
     # （graph.json）也生效，本机实测写/追加/rm 全 EPERM 而 cat 照常放行。
+    # ADR 090：Path join 拼接——数据根迁出后条目是绝对路径（pathlib 对绝对
+    # 右操作数返回其本身），tmp 族数据根的写白名单缺口由此补上。
     rules += [
-        f'(deny file-write* (subpath "{r}/{d}"))'
+        f'(deny file-write* (subpath "{root / d}"))'
         for d in (*_BLACKLIST_DIRS, *MEMORY_WRITE_FENCE)
     ]
     return "\n".join(rules)

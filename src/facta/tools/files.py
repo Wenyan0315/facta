@@ -27,6 +27,7 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
+from facta.paths import BLACKLIST_DIRS as _BLACKLIST_DIRS
 from facta.paths import MEMORY_WRITE_FENCE, WORKSPACE_ROOT
 from facta.tools.context import ToolContext
 from facta.tools.registry import Tool, ToolRegistry
@@ -39,8 +40,9 @@ MAX_DIFF_LINES = 40               # write_file 返回的 diff 行数上限
 # 敏感黑名单：路径 resolve 后命中即拒（读都不行）
 # 注意：本清单被 _resolve_in_workspace 用于读写两条路径——052 的记忆写围栏
 # （data/notes 等「可写要拒、可读必须放行」的资产）另列 paths.MEMORY_WRITE_FENCE。
+# ADR 090：_BLACKLIST_DIRS 唯一真值源收进 paths.BLACKLIST_DIRS（import-as 保持
+# 本地名，tests/test_sandbox.py 的漂移断言钉同一对象）。
 _BLACKLIST_PARTS = (".env", ".git")
-_BLACKLIST_DIRS = ("data/memory", "data/audit", "data/vector_db", "servers/sandbox", ".venv", "data/worktrees")   # 末项 S6a：worktree 沙箱区（search_code rglob 双扫+主 agent 读子沙箱都挡）
 
 
 def _resolve_in_workspace(path_str: str, *, root: Path = WORKSPACE_ROOT) -> Path:
