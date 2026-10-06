@@ -31,7 +31,13 @@ from facta.knowledge.extract import sync_graph
 from facta.knowledge.graph import GRAPH_LOCK
 from facta.knowledge.sync import file_hash, sync_notes
 from facta.memory.consolidate import CATEGORIES
-from facta.memory.learned import delete_line, read_learned, update_line, visible_text
+from facta.memory.learned import (
+    delete_line_by_id,
+    ensure_ids,
+    read_learned,
+    update_line_by_id,
+    visible_text,
+)
 from facta.memory.store import Session
 from facta.orchestrator.assemble import AppContext, settle_session
 from facta.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
@@ -145,9 +151,15 @@ class RenameSessionRequest(BaseModel):
 
 
 class LearnedUpdateRequest(BaseModel):
-    """记忆条目编辑的请求体（记忆面板 v1）：只改正文，日期归程序管。"""
+    """记忆条目编辑的请求体（089 起 by-id + 乐观锁）：只改正文，日期归程序管。
+
+    base_content 是乐观锁：客户端把 GET 拿到的 content（可见文本）原样带回，
+    服务端与磁盘现值比对，不一致 → 409。挡的事故＝旧页面在条目被别人改过后
+    仍提交，把别人的改动盲覆盖掉（089 与 042 notes 的 base_hash 同款先例）。
+    """
 
     content: str
+    base_content: str
 
 
 class NoteSaveRequest(BaseModel):
@@ -504,27 +516,31 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         return {"id": todo.id, "text": todo.text, "done": todo.done}
 
     # 记忆面板（021「护城河可视化」+ 041 用户级分栏）：learned 三桶 +
-    # 用户级 user.md 的读/改/删——固化管线的产出不再是黑箱。行号定位协议
-    # 见 memory/learned.py 模块注释，类别→路径的解析见 _learned_path。
+    # 用户级 user.md 的读/改/删——固化管线的产出不再是黑箱。089 起定位协议
+    # 从行号切到稳定 id（见 memory/learned.py 模块注释），类别→路径的解析见
+    # _learned_path。
     @app.get("/api/learned")
     def learned_list():
         out = []
         for category in PANEL_CATEGORIES:
-            for entry in read_learned(_learned_path(category)):
+            path = _learned_path(category)
+            # 懒迁移：旧文件无 id 注释 → 先补上，by-id 定位才有锚（幂等）
+            ensure_ids(path)
+            for entry in read_learned(path):
                 out.append({
                     "category": category,
-                    "line": entry.line,
+                    "id": entry.id,
                     "date": entry.date,
                     # 053：content = 可见 tag + 正文（前端契约不变：改完原样
-                    # PUT 回来，update_line 再把 tag 与正文拆开）。[固化:sid]
-                    # 属排查用元数据，不在 VISIBLE_TAGS 里 → 面板看不到它，
-                    # 要看就去磁盘上看原行。
+                    # PUT 回来，update_line_by_id 再把 tag 与正文拆开）。
+                    # [固化:sid] 属排查用元数据，不在 VISIBLE_TAGS 里 → 面板
+                    # 看不到它，要看就去磁盘上看原行。
                     "content": visible_text(entry),
                 })
         return out
 
-    @app.put("/api/learned/{category}/{line}")
-    def learned_update(category: str, line: int, body: LearnedUpdateRequest):
+    @app.put("/api/learned/{category}/{line_id}")
+    def learned_update(category: str, line_id: str, body: LearnedUpdateRequest):
         if category not in PANEL_CATEGORIES:
             raise HTTPException(400, "未知记忆类别")
         if not body.content.strip():
@@ -532,23 +548,27 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         path = _learned_path(category)
         if not path.is_file():
             raise HTTPException(404, "该类别暂无记忆")
-        try:
-            update_line(path, line, body.content.strip())
-        except IndexError:
-            raise HTTPException(404, "条目不存在") from None
+        ensure_ids(path)
+        current = next((e for e in read_learned(path) if e.id == line_id), None)
+        if current is None:
+            raise HTTPException(404, "条目不存在")
+        if visible_text(current) != body.base_content:
+            raise HTTPException(409, "条目已变化，请重新载入再改")
+        update_line_by_id(path, line_id, body.content.strip())
         return {"ok": True}
 
-    @app.delete("/api/learned/{category}/{line}")
-    def learned_delete(category: str, line: int):
+    @app.delete("/api/learned/{category}/{line_id}")
+    def learned_delete(category: str, line_id: str):
         if category not in PANEL_CATEGORIES:
             raise HTTPException(400, "未知记忆类别")
         path = _learned_path(category)
         if not path.is_file():
             raise HTTPException(404, "该类别暂无记忆")
-        try:
-            delete_line(path, line)
-        except IndexError:
-            raise HTTPException(404, "条目不存在") from None
+        ensure_ids(path)
+        # read_learned 默认过滤 inactive：已被撤回的条目再删 → 404（不重盖 tombstone）
+        if not any(e.id == line_id for e in read_learned(path)):
+            raise HTTPException(404, "条目不存在")
+        delete_line_by_id(path, line_id)
         return {"ok": True}
 
     # 知识语料面板（042）：notes 的列表/读取/保存 + 向量库同步。

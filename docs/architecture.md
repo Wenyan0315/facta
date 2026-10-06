@@ -1,6 +1,6 @@
 # Facta 架构图
 
-> 版本：v0.106（2026-10-06）｜随着里程碑推进持续迭代此文档
+> 版本：v0.107（2026-10-06）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [021](decisions/021-direction-decisions.md)）：个人执行助手——执行主轴 + 长期记忆 + 通用外延
 
@@ -285,6 +285,7 @@
 | [086-sandbox-profile-and-approval-policy](decisions/086-sandbox-profile-and-approval-policy.md) | P1-6 执行隔离档 × 确认策略正交 | 两个独立旋钮各自点用点读环境变量（不做构造参数透传）——执行隔离档 `sandbox_level()` 三档（none/workspace-write/container，container 后置、与 workspace-write 同走探测诚实降级不假装有容器）；确认策略 `approval_policy()` 三档（untrusted/on-request/never），确认判定抽成 `_needs_confirmation(tool,args)->(needs,guard)` 避开 execute() 的 ruff PLR0912 分支上限；untrusted 强制只读工具确认并审计 guard、never 免确认无 guard、on-request 保留工具级规则归因；负决策=不做构造参数透传、不在 container 假装有容器、不把档位写进 `Tool.sandboxed`/audit extra |
 | [087-project-review-and-next-priorities](decisions/087-project-review-and-next-priorities.md) | 项目评审与下一阶段优先级（待实施） | 基线 `510fb65`：记录待办 ID 复用、摘要误记被拒写入两项复现，以及记忆面板行号身份、数据目录覆盖、同步接口等待等缺口；R01–R09 按正确性 → 使用闭环 → 真实任务验收安排，附验收标准与本地检查结果；评审建议不等同功能已落地 |
 | [088-todo-id-reuse-and-durable-write](decisions/088-todo-id-reuse-and-durable-write.md) | R01 待办持久化 | 待办持久化递增 `next_id` 计数器（删除最大编号不复用旧 id）+ `_save` 原子写 + 坏 JSON 抛 `CorruptTodoFile` 保留原文件；旧格式迁移由 max+1 推导；推翻 016「损坏当空仓」口径 |
+| [089-learned-panel-stable-id-and-conflict](decisions/089-learned-panel-stable-id-and-conflict.md) | R02 记忆面板稳定 ID | 面板定位协议从行号切到稳定 id（接 071 的落盘能力）：GET 懒迁移 `ensure_ids` 为存量行补 `<!--id:-->`（seq 计数含已带 id 行 ⇒ 幂等且 append 后不撞），返回 `id` 移除 `line`；PUT 加 `base_content` 乐观锁（042 `base_hash` 先例）——内容已变 409、条目已撤回 404，旧页面不会改错条目；consolidate 写侧仍不写 id（Option A：id 唯一入口收敛在 `ensure_ids`）；DELETE 对已撤回条目再删 → 404 不重盖 tombstone；残留=seq 撞车极小概率残差 + 版本校验非事务（单用户量级可接受，触发信号在案） |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
