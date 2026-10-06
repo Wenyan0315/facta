@@ -22,6 +22,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,rag,web]"
 
+      - name: 安装 chromium（094：test_browser 的三条冒烟在 CI 恒跑）
+        run: python -m playwright install --with-deps chromium
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 前端构建（094：构建产物进 git，CI 重建比对防忘跑 npm run build）
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
+
+      - name: 构建产物一致性闸（094：重建后与入库产物有差异即失败）
+        run: git diff --exit-code src/facta/server/static/fw/
+
       - name: Lint（ruff，S4 评审 R6）
         run: ruff check src/ evals/ tests/
 
