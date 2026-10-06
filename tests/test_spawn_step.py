@@ -78,6 +78,20 @@ def test_spawn_step_failure_marks_failed():
     assert session.plan.view().steps[0].status is StepStatus.FAILED
 
 
+def test_spawn_step_conclusion_prefix_not_misjudged():
+    # 083 对抗性用例：子 agent 正常完成（COMPLETED），但结论恰好以
+    # 「子任务失败：」开头——改前 _FAILURE_PREFIXES 误判 failed，改后按
+    # RunResult 枚举判 → 标 done
+    sub_llm = ScriptedLLM([Message(role="assistant", content="子任务失败：旧方案，改用新方案后成功")])
+    registry, session = _setup(sub_llm)
+    _make_plan(session)
+
+    out = registry.execute("spawn_step", json.dumps({"step_id": 1, "task": "查资料"}))
+    assert "执行完成" in out
+    assert session.plan.view().steps[0].status is StepStatus.DONE
+    assert session.plan.view().steps[0].note == "子任务失败：旧方案，改用新方案后成功"
+
+
 # ---------- 校验（board 统一闸门） ----------
 
 

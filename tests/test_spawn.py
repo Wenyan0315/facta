@@ -345,7 +345,8 @@ def test_subagent_failure_returns_error_string():
 
 def test_empty_task_rejected():
     registry, _ = _setup(ScriptedLLM([]), "search_notes")
-    out = spawn_subagent("  ", llm=ScriptedLLM([]), registry=registry)
+    status, out = spawn_subagent("  ", llm=ScriptedLLM([]), registry=registry)
+    assert status is RunResult.FAILED   # 083：装配错误也归 FAILED（结构化返回）
     assert "task 不能为空" in out
 
 

@@ -32,8 +32,10 @@
 不再只等主循环边界（取消是 Run 级终态，子任务掐半截轮后按 CANCELLED
 回灌，主 agent 自纠）。
 
-失败语义走反馈环：子 run_turn FAILED/CANCELLED → 返回错误串，主 agent
-自纠（换方案或如实汇报），不炸主轮（M5「错误也返回字符串」惯例）。
+失败语义走反馈环（083 结构化）：spawn_subagent 返回 (RunResult, 结论串)，
+工具层只暴露结论串给主 agent 自纠（换方案或如实汇报），不炸主轮（M5
+「错误也返回字符串」惯例）；spawn_step 按 RunResult 回写 done/failed，
+不再靠字符串前缀（枚举 → 字符串 → 前缀匹配的中间态已删，详见 083）。
 """
 
 from __future__ import annotations
@@ -76,11 +78,6 @@ _FORBIDDEN = frozenset({
 
 DEFAULT_ROUNDS = 3
 MAX_ROUNDS = 10
-
-# spawn 的固定失败信号（spawn_subagent 造的，不可能是子 agent 正常结论）：
-# spawn_step 靠它判断步骤 done/failed——子 agent 正常结论是它自己写的摘要，
-# 不会恰好以这两个前缀开头。worktree 收尾把结论拼在前面，前缀判断稳定。
-_FAILURE_PREFIXES = ("子任务失败：", "子任务被取消")
 
 TASK_TEMPLATE = (
     "你是被派来执行一项具体任务的专项执行员。任务：{task}\n"
@@ -184,12 +181,16 @@ def spawn_subagent(
     should_cancel: Callable[[], bool] | None = None,
     worktree: bool = False,
     ctx: ToolContext | None = None,
-) -> str:
-    """构造子 agent + 临时会话跑一轮，只回传结论（spawn 工具的本体）。
+) -> tuple[RunResult, str]:
+    """构造子 agent + 临时会话跑一轮，回传结构化 (status, conclusion)。
 
     单独导出为模块级函数（不是闭包）：测试可直接调，不经 registry 菜单。
     confirm / on_event / should_cancel 由 registry.execute 的 receives_confirm /
     receives_event / receives_cancel 通道注入（见 registry.py）。
+
+    status 直接复用 run_turn 的 RunResult（COMPLETED / CANCELLED / FAILED），
+    供 spawn_step 按枚举回写 done/failed（083，不再靠字符串前缀）；工具层
+    （_spawn 闭包）解包只取 conclusion，对主 agent 仍是「只回传结论」。
 
     worktree（S6a）：True = 子 agent 在独立 git worktree 里干活——文件
     改动不碰主工作区；跑完后 diff 经确认缝裁决（人审掌舵，与 make_plan
@@ -197,11 +198,11 @@ def spawn_subagent(
     （保守默认：没有眼睛就不动手）。需要 ctx（重锚信息：notes_dir 等）。
     """
     if not task.strip():
-        return "错误：task 不能为空——说清楚要子任务做什么"
+        return RunResult.FAILED, "错误：task 不能为空——说清楚要子任务做什么"
     rounds = max(1, min(int(max_rounds), MAX_ROUNDS))
 
     if worktree and ctx is None:
-        return "错误：worktree 模式需要装配上下文（spawn 未接 ctx，检查注册路径）"
+        return RunResult.FAILED, "错误：worktree 模式需要装配上下文（spawn 未接 ctx，检查注册路径）"
 
     # S6a worktree 分支：先建沙箱，子 registry 重锚，跑完裁决合回/丢弃
     wt_dir: Path | None = None
@@ -209,7 +210,7 @@ def spawn_subagent(
     if worktree and ctx is not None:
         wt_dir, err = create_worktree()
         if err:
-            return f"错误：{err}"
+            return RunResult.FAILED, f"错误：{err}"
         effective_registry = _worktree_registry(registry, ctx, wt_dir)
 
     # 工具子集：默认全量；显式指定 ∩ 全量；一律过禁止单
@@ -220,8 +221,9 @@ def spawn_subagent(
             if wt_dir is not None:
                 discard_worktree(wt_dir)
             return (
+                RunResult.FAILED,
                 f"错误：指定的工具都不在可用清单里（可用：{sorted(available)}；"
-                "spawn_subagent 与计划工具不可派给子 agent）"
+                "spawn_subagent 与计划工具不可派给子 agent）",
             )
     else:
         wanted = available
@@ -259,8 +261,8 @@ def spawn_subagent(
 
     # S6a worktree 收尾（裁决细节在 _worktree_finalization）
     if wt_dir is not None:
-        return _worktree_finalization(wt_dir, task, conclusion, confirm)
-    return conclusion
+        return result, _worktree_finalization(wt_dir, task, conclusion, confirm)
+    return result, conclusion
 
 
 def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
@@ -271,11 +273,12 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
 
     def _spawn(task: str, tools: list[str] | None = None, max_rounds: int = DEFAULT_ROUNDS,
                worktree: bool = False, confirm=None, event=None, should_cancel=None) -> str:
-        return spawn_subagent(
+        _, conclusion = spawn_subagent(
             task, llm=sub_llm, registry=registry,
             tools=tools, max_rounds=max_rounds, confirm=confirm, on_event=event,
             should_cancel=should_cancel, worktree=worktree, ctx=ctx,
         )
+        return conclusion
 
     registry.register(Tool(
         name="spawn_subagent",
@@ -326,21 +329,24 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                 return f"步骤派发被拒：{e}"
 
             # 复用 spawn_subagent 全套（噪声隔离/工具子集/worktree 隔离/确认透传/事件透传/取消透传）
-            result = spawn_subagent(
+            result_status, conclusion = spawn_subagent(
                 task, llm=sub_llm, registry=registry,
                 worktree=worktree, ctx=ctx, confirm=confirm, on_event=event,
                 should_cancel=should_cancel,
             )
 
-            # 成败回写：spawn 的失败是固定信号（_FAILURE_PREFIXES），其余皆视为
-            # 完成（子 agent 的结论即步骤产出）
-            status, prefix = ("failed", "执行失败") if result.startswith(_FAILURE_PREFIXES) else ("done", "执行完成")
+            # 083：按 RunResult 枚举回写 done/failed，不再靠字符串前缀（撞前缀即误判）
+            step_status, prefix = (
+                ("failed", "执行失败")
+                if result_status is not RunResult.COMPLETED
+                else ("done", "执行完成")
+            )
             try:
-                board.update_step(step_id, status, note=result)
+                board.update_step(step_id, step_status, note=conclusion)
             except ValueError as e:   # 理论上不会（前面已校验 + 同步执行）
-                return f"步骤已派发但回写失败：{e}\n子任务结果：{result}"
+                return f"步骤已派发但回写失败：{e}\n子任务结果：{conclusion}"
             return (
-                f"步骤 #{step_id} {prefix}（子任务结论）：\n{result}\n\n"
+                f"步骤 #{step_id} {prefix}（子任务结论）：\n{conclusion}\n\n"
                 f"当前计划：\n{format_view(board.view())}"
             )
 
