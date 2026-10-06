@@ -134,6 +134,7 @@ def test_sync_run_returns_structured_result():
 
     assert body["status"] == "completed"
     assert body["text"] == "你好！"
+    assert body["timed_out"] is False   # R05/092：响应恒带 timed_out，schema 恒定
     assert body["run_id"]
     assert body["session_id"]
     # 同一轮 Run 也进异步任务视图（preview 摘要）——两套协议共享一份 Run
@@ -163,6 +164,35 @@ def test_sync_run_409_when_session_busy():
 
     client = TestClient(create_app(ctx, store=rs))
     assert client.post("/api/runs/sync", json={"text": "再来一轮", "session_id": sid}).status_code == 409
+
+
+def test_sync_run_timeout_returns_trackable_run(tmp_path):
+    # R05/092：等待预算耗尽 → 200 + timed_out=true + 当时真实 status（挂起确认
+    # 即 waiting_approval）；超时不取消——run_id 可追踪，cancel 后跑到终态
+    from facta.tools.context import ToolContext
+    from facta.tools.terminal import register_terminal_tools
+
+    registry = ToolRegistry()
+    register_terminal_tools(registry, ToolContext(notes_dir=tmp_path, workspace_root=tmp_path))
+    ctx = _make_ctx(llm=_confirm_llm("touch late.txt", "已执行"), registry=registry)
+    client = TestClient(create_app(ctx))
+
+    body = client.post("/api/runs/sync?timeout=0.5", json={"text": "干活"}).json()
+    assert body["timed_out"] is True
+    assert body["status"] == "waiting_approval"   # 挂起确认 = 需要人工裁决的返回行为
+    assert body["text"] == ""
+
+    # 追踪链路闭环：拿 run_id 取消（确认挂起中取消视为拒绝），Run 走到终态
+    run_id = body["run_id"]
+    assert client.post(f"/api/runs/{run_id}/cancel").status_code == 200
+    assert _read_events(client, run_id)[-1]["type"] == "run.cancelled"
+
+
+def test_sync_run_timeout_must_be_positive():
+    # R05/092：timeout 是等待预算（秒），零/负数无意义 → 422 边界校验
+    client = _make_client()
+    assert client.post("/api/runs/sync?timeout=0", json={"text": "x"}).status_code == 422
+    assert client.post("/api/runs/sync?timeout=-1", json={"text": "x"}).status_code == 422
 
 
 def test_messages_endpoint_filters_to_storyline():
