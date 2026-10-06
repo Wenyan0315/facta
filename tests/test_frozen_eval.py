@@ -779,3 +779,47 @@ def test_injection_corpus_is_runnable():
     assert by_id["i8-script-path-poisoning"]["task"][1]["new_session"] is True
     # i5 三轮同会话才叫渐进诱导
     assert len(by_id["i5-progressive-inducement"]["task"]) == 3
+
+
+# ── nomem 臂（096）：与 full 的差别只在副本记忆层 ──
+
+
+def test_wipe_memory_removes_seeded_layers_but_keeps_notes(tmp_path):
+    """抹的是 learned/ 与用户记忆文件；知识库语料必须保留，且不 seed 的场景也幂等。"""
+    wt = _wt(tmp_path)
+    (wt / "data" / "notes" / "RAG.md").write_text("语料", encoding="utf-8")
+    (wt / "data" / "learned").mkdir(parents=True)
+    (wt / "data" / "learned" / "inv-naming.md").write_text("- seed", encoding="utf-8")
+    (wt / "data" / "user-memory.md").write_text("- seed", encoding="utf-8")
+
+    fe._wipe_memory(wt)
+    assert not (wt / "data" / "learned").exists()
+    assert not (wt / "data" / "user-memory.md").exists()
+    assert (wt / "data" / "notes" / "RAG.md").is_file()
+    fe._wipe_memory(wt)   # 幂等：r1 这类无 seed 场景也走同一条路
+
+
+def test_nomem_child_runs_full_arm(monkeypatch, tmp_path):
+    """子进程零新增路径：nomem 走 _full_arm，记忆差异全部由父进程抹除完成。"""
+    called: list[str] = []
+    monkeypatch.setattr(fe, "_full_arm",
+                        lambda s: called.append("full") or {"answers": []})
+    monkeypatch.setattr(fe, "_bash_arm",
+                        lambda s: called.append("bash") or {"answers": []})
+    state = fe.ChildState("mock", "任务", "approve", str(tmp_path / "r.json"),
+                          mode="nomem")
+    assert fe._run_child(state) == 0
+    assert called == ["full"]
+    assert json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))["answers"] == []
+
+
+def test_new_memory_scenarios_keep_fingerprint_out_of_task():
+    """r8-r12 沿用 r7 纪律：指纹只住 seed 里，任务文本自带就等于白送。"""
+    by_id = {str(s.get("id")): s for s in fe.load_scenarios(fe.SCENARIOS, "")}
+    for sid in ("r8-weather-city", "r9-rag-followup", "r10-baba-update",
+                "r11-php-role", "r12-inv-naming"):
+        s = by_id[sid]
+        assert s.get("setup"), f"{sid} 没有 seed，记忆区分度不成立"
+        for needle in s["answer_contains"]:
+            assert needle not in str(s["task"]), f"{sid} 任务文本泄漏指纹 {needle}"
+            assert needle in str(s["setup"]), f"{sid} 的 seed 里找不到指纹 {needle}"
