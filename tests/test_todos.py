@@ -4,7 +4,11 @@
 跨会话资产，独立于 session（不随归档走）。
 """
 
-from facta.memory.todos import TodoStore
+import json
+
+import pytest
+
+from facta.memory.todos import CorruptTodoFile, TodoStore
 from facta.tools.registry import ToolRegistry
 from facta.tools.todo import register_todo_tools
 
@@ -52,6 +56,51 @@ def test_delete_removes_and_keeps_id_gaps(tmp_path):
     assert store.delete(99) is None               # 删不存在的返回 None
 
 
+def test_delete_max_id_does_not_reuse(tmp_path):
+    # 回归 087/R01：旧 max+1 实现删除最大编号后旧 id 会复用（悬垂引用）
+    store = _store(tmp_path)
+    assert store.add("第一条").id == 1
+    store.delete(1)
+    assert store.add("第二条").id == 2            # 不复用旧 id
+    assert [t.id for t in store.list()] == [2]
+
+
+def test_next_id_survives_reload(tmp_path):
+    store = _store(tmp_path)
+    store.add("第一条")
+    store.add("第二条")
+    store.delete(2)                                # 删最大编号
+
+    reloaded = _store(tmp_path)
+    assert reloaded.add("第三条").id == 3          # next_id 持久化，重读后仍不回退
+
+
+def test_save_is_atomic_and_persists_next_id(tmp_path):
+    store = _store(tmp_path)
+    store.add("第一条")
+
+    assert not (tmp_path / "todos.json.tmp").exists()   # 原子写后无 tmp 残留
+    raw = json.loads((tmp_path / "todos.json").read_text(encoding="utf-8"))
+    assert raw["version"] == 2 and raw["next_id"] == 2   # 计数随文件持久化
+
+
+def test_legacy_format_migrates_next_id(tmp_path):
+    # 旧格式（version 1，无 next_id）：存量保留，next_id 由 max+1 推导
+    path = tmp_path / "todos.json"
+    path.write_text(
+        json.dumps({
+            "version": 1,
+            "todos": [{"id": 1, "text": "旧", "done": False, "created": "", "done_at": None}],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    store = _store(tmp_path)
+    assert store.list()[0].text == "旧"
+    assert store.add("新").id == 2
+
+
+
 def test_update_text_keeps_status(tmp_path):
     store = _store(tmp_path)
     t = store.add("原文本")
@@ -75,9 +124,16 @@ def test_list_filters_pending(tmp_path):
     assert [t.text for t in store.list()] == ["没做的", "做了的"]   # 全量含完成
 
 
-def test_corrupt_file_treated_as_empty(tmp_path):
-    (tmp_path / "todos.json").write_text("{半截", encoding="utf-8")
-    assert _store(tmp_path).list() == []   # 损坏当空仓，不炸入口
+def test_corrupt_file_raises_and_preserves_original(tmp_path):
+    # 087/R01 重新裁定：坏 JSON 不再当空仓，明确报错并保留原文件，避免后续 add 静默覆盖
+    path = tmp_path / "todos.json"
+    path.write_text("{半截", encoding="utf-8")
+    original = path.read_bytes()
+
+    store = _store(tmp_path)
+    with pytest.raises(CorruptTodoFile):
+        store.list()
+    assert path.read_bytes() == original   # 原文件未被覆盖
 
 
 # ---------- 工具三件（agent 视角） ----------
