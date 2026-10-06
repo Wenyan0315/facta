@@ -19,7 +19,7 @@ from facta.orchestrator.executor import _split_tool_batches
 from facta.orchestrator.loop import run_turn
 from facta.server.run_store import STATUS_RUNNING, Run
 from facta.tools.context import ToolContext
-from facta.tools.registry import ToolRegistry
+from facta.tools.registry import Tool, ToolRegistry
 from facta.tools.spawn import register_spawn_tools
 
 
@@ -68,24 +68,61 @@ def _setup(sub_llm: LLM, main_script: list[Message]):
 # ---------- 切批（纯函数） ----------
 
 
+def _parallel_registry() -> ToolRegistry:
+    """切批测试专用 registry：只读 read_file / search_code / list_dir +
+    写类 write_file（不声明 is_readonly）。spawn_subagent 名字特判，无需注册。"""
+    registry = ToolRegistry()
+    for name in ("read_file", "search_code", "list_dir"):
+        registry.register(Tool(
+            name=name, description="", parameters={},
+            func=lambda **kwargs: "", is_readonly=True,
+        ))
+    registry.register(Tool(
+        name="write_file", description="", parameters={},
+        func=lambda **kwargs: "",
+    ))
+    return registry
+
+
 def test_split_tool_batches():
-    # [spawn, spawn, read_file, spawn] → [(并行,2), (串行,1), (并行但len1,1)]
-    # 第三个是单 spawn：标记 True（可并行）但 len==1，执行时走串行路径
+    # [spawn, spawn, read_file, spawn] → read_file 只读，并入同一可并行段
     tcs = [
         _call("spawn_subagent", {"task": "a"}, 0),
         _call("spawn_subagent", {"task": "b"}, 1),
         _call("read_file", {"path": "x"}, 2),
         _call("spawn_subagent", {"task": "c"}, 3),
     ]
-    assert [(ok, len(b)) for ok, b in _split_tool_batches(tcs)] == [
-        (True, 2), (False, 1), (True, 1),
+    assert [(ok, len(b)) for ok, b in _split_tool_batches(tcs, _parallel_registry())] == [
+        (True, 4),
     ]
 
 
 def test_split_tool_batches_single_spawn_stays_serial():
     # 单个 spawn：标记 True 但 len==1，执行层走串行（并行只对 len>1 生效）
     tcs = [_call("spawn_subagent", {"task": "a"})]
-    assert [(ok, len(b)) for ok, b in _split_tool_batches(tcs)] == [(True, 1)]
+    assert [(ok, len(b)) for ok, b in _split_tool_batches(tcs, _parallel_registry())] == [(True, 1)]
+
+
+def test_split_tool_batches_readonly_parallel():
+    # 并列只读点菜：决定已做完、无顺序依赖 → 并入一个可并行批（084）
+    tcs = [
+        _call("read_file", {"path": "a"}, 0),
+        _call("search_code", {"q": "b"}, 1),
+        _call("list_dir", {"path": "c"}, 2),
+    ]
+    assert [(ok, len(b)) for ok, b in _split_tool_batches(tcs, _parallel_registry())] == [(True, 3)]
+
+
+def test_split_tool_batches_mixed_readonly_write():
+    # 写类工具（write_file）插断只读段，写类保持串行（084）
+    tcs = [
+        _call("read_file", {"path": "a"}, 0),
+        _call("write_file", {"path": "b"}, 1),
+        _call("list_dir", {"path": "c"}, 2),
+    ]
+    assert [(ok, len(b)) for ok, b in _split_tool_batches(tcs, _parallel_registry())] == [
+        (True, 1), (False, 1), (True, 1),
+    ]
 
 
 # ---------- 并行耗时 + 按序回填 ----------
