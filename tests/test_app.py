@@ -591,6 +591,28 @@ def test_fork_session_endpoint():
     assert client.post("/api/sessions/20260913-101956/fork").status_code == 404
 
 
+def test_status_endpoint_reflects_env_levels(monkeypatch):
+    # ADR 093：配置档与实际后端分开展示——level/policy 跟环境变量走，
+    # backend 由探测给出；none 档下 backend 恒为 None（诚实降级可见）
+    monkeypatch.setenv("FACTA_SANDBOX", "none")
+    monkeypatch.setenv("FACTA_APPROVAL_POLICY", "untrusted")
+    body = _make_client().get("/api/status").json()
+    assert body == {
+        "sandbox_level": "none",
+        "sandbox_backend": None,
+        "approval_policy": "untrusted",
+    }
+
+    # 默认档：level 落 workspace-write，policy 落 on-request；
+    # backend 视机器而定（seatbelt/bwrap/None），只断言字段在三值闭集内
+    monkeypatch.delenv("FACTA_SANDBOX")
+    monkeypatch.delenv("FACTA_APPROVAL_POLICY")
+    body = _make_client().get("/api/status").json()
+    assert body["sandbox_level"] == "workspace-write"
+    assert body["approval_policy"] == "on-request"
+    assert body["sandbox_backend"] in (None, "seatbelt", "bwrap")
+
+
 def test_session_guards():
     client = _make_client()
     assert client.put("/api/sessions/20260913-101956", json={"text": "x"}).status_code == 404

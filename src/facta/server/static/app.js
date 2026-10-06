@@ -319,12 +319,26 @@ async function loadSessions() {
         timeEl.textContent = s.time;
         li.appendChild(timeEl);
       }
-      // 行内操作（2026-09-17 体验轮）：重命名、删除。S8a 起没有「active 不能删」
-      // 的特例，但在跑的会话后端会 409（worker 独占这段对话）⇒ 按钮直接不给。
-      // 按钮 stopPropagation，不触发 li 的切换
+      // 行内操作（2026-09-17 体验轮）：fork、重命名、删除。S8a 起没有
+      // 「active 不能删」的特例，但在跑的会话后端会 409（worker 独占这段
+      // 对话）⇒ 重命名/删除按钮直接不给；fork 只读源、快照安全（085），
+      // running 会话也给（ADR 093）。按钮 stopPropagation，不触发 li 的切换
+      const actions = document.createElement("div");
+      actions.className = "session-actions";
+      const forkBtn = document.createElement("button");
+      forkBtn.type = "button";
+      forkBtn.textContent = "⎇";
+      forkBtn.title = "fork 副本（换个思路重来）";
+      forkBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const resp = await fetch(`/api/sessions/${encodeURIComponent(s.id)}/fork`, { method: "POST" });
+        if (!resp.ok) return;   // 404/409 等：清单下次刷新自然跟上，不打扰
+        const { id } = await resp.json();
+        await loadSessions();
+        await selectSession(id);   // fork 是为了换思路，切过去才符合直觉
+      });
+      actions.appendChild(forkBtn);
       if (!s.running) {
-        const actions = document.createElement("div");
-        actions.className = "session-actions";
         const renameBtn = document.createElement("button");
         renameBtn.type = "button";
         renameBtn.textContent = "✎";
@@ -347,8 +361,8 @@ async function loadSessions() {
           loadSessions();
         });
         actions.appendChild(delBtn);
-        li.appendChild(actions);
       }
+      li.appendChild(actions);
       sessionListEl.appendChild(li);
     }
     return sessionMetas;
@@ -599,6 +613,16 @@ cancelEl.addEventListener("click", async () => {
 
 newSessionBtn.addEventListener("click", newSession);
 
+// 环境徽章（ADR 093）：配置档与实际后端分开展示；拉取失败静默——徽章是
+// 便利，不该挡聊天主流程
+async function loadEnvBadge() {
+  try {
+    const st = await (await fetch("/api/status")).json();
+    document.getElementById("env-badge").textContent =
+      `沙箱 ${st.sandbox_level}/${st.sandbox_backend ?? "无"} · 确认 ${st.approval_policy}`;
+  } catch (_) { /* 服务没起来或端点缺席：徽章留空 */ }
+}
+
 // 启动：默认落在最近改动的会话（清单已按最后修改时刻降序）——后端不再有
 // active 概念，「打开看到哪一段」纯粹是前端的选择。
 (async function init() {
@@ -606,4 +630,5 @@ newSessionBtn.addEventListener("click", newSession);
   if (sessions.length) await selectSession(sessions[0].id);
   else emptyHint("开始新的对话吧");
   loadTodos();
+  loadEnvBadge();
 })();

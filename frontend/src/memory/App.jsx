@@ -27,14 +27,18 @@ function Entry({ entry, onChanged }) {
   const [mode, setMode] = useState(null);
   const [draft, setDraft] = useState("");   // 编辑草稿（受控）
   const [busy, setBusy] = useState(false);  // 请求在途：按钮禁用防双击
+  const [err, setErr] = useState(null);     // 上一次写操作的失败（ADR 093）
 
   const save = async () => {
     setBusy(true);
+    setErr(null);
     try {
       // 089：按稳定 id 定位；base_content 是乐观锁（GET 时的可见文本原样带回）
       await updateEntry(entry.category, entry.id, draft, entry.content);
       setMode(null);
       await onChanged();   // 成功后由 App 重拉全量（新 id 从新数据来）
+    } catch (e) {
+      setErr(e);   // 失败不静默：文案来自后端 detail，留在编辑态让用户改/重试
     } finally {
       setBusy(false);
     }
@@ -42,13 +46,27 @@ function Entry({ entry, onChanged }) {
 
   const remove = async () => {
     setBusy(true);
+    setErr(null);
     try {
       await deleteEntry(entry.category, entry.id);
       await onChanged();
+    } catch (e) {
+      setErr(e);
     } finally {
       setBusy(false);
     }
   };
+
+  // 失败提示横幅（与 notes 同款）：409/404 都是「磁盘版本已变了」，
+  // 给一键重拉；其余文案如实展示
+  const errBanner = err && (
+    <div class="notes-banner notes-banner-err">
+      <span>{err.message}</span>
+      {(err.status === 409 || err.status === 404) && (
+        <button onClick={() => { setErr(null); setMode(null); onChanged(); }}>重新载入</button>
+      )}
+    </div>
+  );
 
   if (mode === "edit") {
     return (
@@ -62,6 +80,7 @@ function Entry({ entry, onChanged }) {
           <button onClick={save} disabled={busy || !draft.trim()}>保存</button>
           <button onClick={() => setMode(null)} disabled={busy}>取消</button>
         </div>
+        {errBanner}
       </div>
     );
   }
@@ -83,6 +102,7 @@ function Entry({ entry, onChanged }) {
           </>
         )}
       </span>
+      {errBanner}
     </div>
   );
 }
