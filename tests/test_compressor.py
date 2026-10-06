@@ -8,6 +8,7 @@ from facta.core.llm import ScriptedLLM
 from facta.core.types import Message
 from facta.memory.compressor import (
     build_payload,
+    collect_file_activity,
     maybe_compress,
     trim_incomplete_round,
     window_start,
@@ -213,6 +214,80 @@ def test_summary_prompt_carries_retraction_discipline():
 
     for anchor in ("被取代：", "已撤回：", "不许静默消失", "曾讨论过该计划"):
         assert anchor in _SUMMARY_PROMPT, f"prompt 丢了 077 对账纪律锚点：{anchor}"
+
+
+# ── ADR 085：六段式 + 确定性文件清单 ──────────────────────
+
+
+def test_summary_prompt_carries_six_sections():
+    """六段式段头必须长在 prompt 里（ADR 085，Pi 结构）。"""
+    from facta.memory.compressor import _SUMMARY_PROMPT
+
+    for section in ("【目标】", "【约束】", "【进展】", "【关键决定与约束】", "【下一步】", "【关键上下文】"):
+        assert section in _SUMMARY_PROMPT, f"prompt 丢了六段式段头：{section}"
+
+
+def _tc(name: str, args: dict) -> Message:
+    """造一条带指定 arguments 的纯点菜消息。"""
+    import json as _json
+
+    return Message(
+        role="assistant",
+        content="",
+        tool_calls=[{"id": "t", "name": name, "arguments": _json.dumps(args, ensure_ascii=False)}],
+    )
+
+
+def test_collect_file_activity_extracts_read_and_write():
+    """从 tool_calls 提取 read_file/write_file 的 path，去重保序。"""
+    messages = [
+        Message(role="system", content="人设"),
+        _tc("read_file", {"path": "a.py"}),
+        _tc("read_file", {"path": "b.py"}),
+        _tc("read_file", {"path": "a.py"}),        # 重复读 → 去重
+        _tc("write_file", {"path": "c.py"}),
+        _tc("search_code", {"pattern": "x"}),       # 非文件读写 → 忽略
+        _tc("read_file", {"offset": 10}),           # 缺 path → 忽略
+    ]
+    read, modified = collect_file_activity(messages)
+    assert read == ["a.py", "b.py"]
+    assert modified == ["c.py"]
+
+
+def test_collect_file_activity_no_calls_is_empty():
+    """无 tool_calls 的纯对话：清单为空，不影响下游。"""
+    messages = [Message(role="system", content="人设"), user("嗨"), assistant("好")]
+    assert collect_file_activity(messages) == ([], [])
+
+
+def test_build_payload_injects_file_list_after_summary():
+    """有 summary + 有文件活动时，摘要消息尾部带【已读文件】/【已改文件】块。"""
+    messages = [
+        Message(role="system", content="人设"),
+        user("读文件"),
+        _tc("read_file", {"path": "src/a.py"}),
+        _tc("write_file", {"path": "src/b.py"}),
+    ]
+    payload = build_payload(messages, "摘要：读过一个文件", summarized_upto=2, keep_last=2)
+    summary_msg = payload[1]
+    assert summary_msg.role == "system"
+    assert "【已读文件】" in summary_msg.content
+    assert "- src/a.py" in summary_msg.content
+    assert "【已改文件】" in summary_msg.content
+    assert "- src/b.py" in summary_msg.content
+
+
+def test_build_payload_no_file_list_when_no_activity():
+    """无文件活动时摘要消息不带清单块（零影响）。"""
+    messages = [
+        Message(role="system", content="人设"),
+        user("聊两句"),
+        assistant("好"),
+    ]
+    payload = build_payload(messages, "摘要：纯对话", summarized_upto=1, keep_last=2)
+    summary_msg = payload[1]
+    assert "【已读文件】" not in summary_msg.content
+    assert "【已改文件】" not in summary_msg.content
 
 
 # ── 孤儿清理 ──────────────────────────────────────────────

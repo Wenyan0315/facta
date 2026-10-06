@@ -333,6 +333,16 @@ class SessionStore:
                 if _HAS_FCNTL and self._lock_fd is not None:
                     fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
 
+    def fork(self, sid: str, *, now: datetime | None = None) -> str:
+        """fork 会话（ADR 085）：head-fork = create(load(sid))。
+
+        load 从 JSON 重建返回全新 Session（天然深拷贝，含底片/摘要/游标/标题/
+        计划棋盘），create 已含 id 分配 + 落盘 + 进程内锁 + flock 跨进程锁——
+        fork 不搬文件、不重写分配逻辑，只复用两个现成原语。新 id 是独立物理
+        文件，与源会话解耦，互不影响。
+        """
+        return self.create(self.load(sid), now=now)
+
     def delete(self, sid: str) -> bool:
         path = self.path(sid)
         if not path.is_file():

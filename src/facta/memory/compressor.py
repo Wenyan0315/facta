@@ -13,6 +13,7 @@
    回答再触发摘要"的无限递归（与 search_and_summarize 同款防线）
 """
 
+import json
 import logging
 
 from facta.core.llm import LLM
@@ -36,16 +37,21 @@ _SUMMARY_PROMPT = (
     "禁止写入：对助手自身能力/表现的评价或建议（如'检索偶发不命中，需兜底'）、"
     "对用户意图的猜测（如'用户在测试边界'）、任何策略性元叙事。"
     "这类内容混进摘要会污染后续行为（自证预言）。"
-    "摘要末尾必须固定附加一个小节：先写「【关键决定与约束】」，内分三段、"
-    "无内容的段整段省略——「有效：」列仍有效的决定、承诺、约束"
-    "（含旧摘要里仍有效的）；「被取代：」列被本次对话推翻的旧决定，"
-    "写明旧 → 新的取代关系；「已撤回：」列用户明确收回且无替代的。"
+    "摘要按六段式组织（ADR 085，Pi 结构），无内容的段整段省略："
+    "「【目标】」用户本次任务要达成的结果；"
+    "「【约束】」必须遵守的限制（环境、偏好、硬性要求）；"
+    "「【进展】」已完成的步骤与结论；"
+    "「【关键决定与约束】」内分三段，无内容的段整段省略——"
+    "「有效：」列仍有效的决定、承诺、约束（含旧摘要里仍有效的）；"
+    "「被取代：」列被本次对话推翻的旧决定，写明旧 → 新的取代关系；"
+    "「已撤回：」列用户明确收回且无替代的。"
     "滚动合并纪律：旧摘要决定节里的每一条必须在新小节三段之一落位，"
     "不许静默消失——「不做了」这类改主意绝不能洗成「曾讨论过该计划」，"
     "必须以「被取代/已撤回」留痕；"
-    "确实没有任何决定类内容时写「【关键决定与约束】无」。"
-    "小节是摘要正文的固定组成部分，不是可选装饰。"
-    "除该小节外直接输出摘要正文，不要前言、标题或解释。"
+    "确实没有任何决定类内容时写「【关键决定与约束】无」；"
+    "「【下一步】」待办与下一步行动；"
+    "「【关键上下文】」后续轮次必须知道、否则会走弯路的上下文。"
+    "除这六段外直接输出摘要正文，不要前言、标题或解释。"
 )
 
 # 073 摘要决定节：摘要末尾的固定小节标记——程序校验的锚点（防摘要
@@ -99,13 +105,60 @@ def build_payload(
     head = messages[:1] if messages and messages[0].role == "system" else []
     if not summary:
         return head + messages[start:]
-    summary_msg = Message(
-        role="system",
-        # 措辞即语义：说"本会话较早内容"而非"更早对话"——后者会被模型
-        # 误读成"上一次对话"（4.0 验收翻车点：同会话压缩区≠另一个会话）
-        content=f"以下是本会话较早内容的摘要（原文已压缩，逐字原话可用 search_history 检索）：\n{summary}",
+    # 措辞即语义：说"本会话较早内容"而非"更早对话"——后者会被模型
+    # 误读成"上一次对话"（4.0 验收翻车点：同会话压缩区≠另一个会话）
+    summary_text = (
+        "以下是本会话较早内容的摘要（原文已压缩，逐字原话可用 search_history 检索）：\n"
+        f"{summary}"
     )
+    # ADR 085 文件清单：确定性拼接在摘要消息尾部（不经 LLM），让模型
+    # 「压缩后别再重复读已读文件」有据可依。无清单时零影响。
+    read, modified = collect_file_activity(messages)
+    if read or modified:
+        lines: list[str] = []
+        if read:
+            lines.append("【已读文件】")
+            lines.extend(f"- {p}" for p in read)
+        if modified:
+            lines.append("【已改文件】")
+            lines.extend(f"- {p}" for p in modified)
+        summary_text += "\n\n" + "\n".join(lines)
+    summary_msg = Message(role="system", content=summary_text)
     return head + [summary_msg] + messages[start:]
+
+
+def collect_file_activity(messages: list[Message]) -> tuple[list[str], list[str]]:
+    """从完整底片的 tool_calls 提取（已读文件, 已改文件）清单（ADR 085）。
+
+    已读 = `read_file` 的 `arguments.path`；已改 = `write_file` 的 `arguments.path`。
+    确定性提取、去重保序（按首现顺序）——文件路径是精确数据，交给 LLM 必漏写；
+    「累计」由每次扫描全量底片现算，与底片永远一致（无第二份真值可漂移）。
+    """
+    read: list[str] = []
+    modified: list[str] = []
+    seen_read: set[str] = set()
+    seen_modified: set[str] = set()
+    for m in messages:
+        for tc in m.tool_calls or []:
+            name = tc.get("name")
+            if name not in ("read_file", "write_file"):
+                continue
+            try:
+                args = json.loads(tc.get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(args, dict):
+                continue
+            path = args.get("path")
+            if not isinstance(path, str) or not path:
+                continue
+            if name == "read_file" and path not in seen_read:
+                seen_read.add(path)
+                read.append(path)
+            elif name == "write_file" and path not in seen_modified:
+                seen_modified.add(path)
+                modified.append(path)
+    return read, modified
 
 
 def maybe_compress(

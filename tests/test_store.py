@@ -146,3 +146,65 @@ def _child_create(sessions_dir, barrier):
     store = SessionStore(sessions_dir)
     barrier.wait()
     store.create(Session())
+
+
+# ---------- ADR 085：fork = create(load(sid)) ----------
+
+def test_fork_copies_session_to_new_id(tmp_path):
+    """fork 出完整副本：新 id ≠ 源 id、新文件独立、内容与源一致。"""
+    from datetime import datetime
+
+    from facta.memory.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    src = store.create(
+        Session(
+            messages=[
+                Message(role="system", content="人设"),
+                Message(role="user", content="暗号=海星"),
+            ],
+            summary="摘要：用户住海边",
+            summarized_upto=2,
+            title="原会话",
+        ),
+        now=datetime(2026, 9, 30, 10, 0, 0),
+    )
+
+    new_sid = store.fork(src, now=datetime(2026, 9, 30, 11, 0, 0))
+    assert new_sid != src
+
+    forked = store.load(new_sid)
+    assert forked.messages == store.load(src).messages
+    assert forked.summary == "摘要：用户住海边"
+    assert forked.summarized_upto == 2
+    assert forked.title == "原会话"
+
+
+def test_fork_is_independent_from_source(tmp_path):
+    """fork 是深拷贝：改新会话不影响源会话（各自独立物理文件）。"""
+    from datetime import datetime
+
+    from facta.memory.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    src = store.create(
+        Session(messages=[Message(role="user", content="起点")]),
+        now=datetime(2026, 9, 30, 10, 0, 0),
+    )
+    new_sid = store.fork(src, now=datetime(2026, 9, 30, 11, 0, 0))
+
+    forked = store.load(new_sid)
+    forked.messages.append(Message(role="assistant", content="fork 里新走的路"))
+    store.save(new_sid, forked)
+
+    assert len(store.load(src).messages) == 1   # 源纹丝不动
+    assert len(store.load(new_sid).messages) == 2
+
+
+def test_fork_missing_session_raises(tmp_path):
+    """fork 不存在的会话：load 缺席大声崩（与 load 同语义）。"""
+    from facta.memory.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    with pytest.raises(FileNotFoundError):
+        store.fork("20260930-100000")
