@@ -542,6 +542,25 @@ def test_rename_and_delete_session():
     assert client.get("/api/sessions").json() == []
 
 
+def test_fork_session_endpoint():
+    # ADR 085：fork 只读源、建新会话——新 id 独立、内容与源一致；源不存在 404
+    ctx = _make_ctx()
+    client = TestClient(create_app(ctx))
+    sid = client.post("/api/sessions").json()["id"]
+    ctx.store.update(sid, lambda s: s.messages.append(Message(role="user", content="起点")))
+
+    resp = client.post(f"/api/sessions/{sid}/fork")
+    assert resp.status_code == 201
+    new_sid = resp.json()["id"]
+    assert new_sid != sid
+    assert [s["id"] for s in client.get("/api/sessions").json()] == [new_sid, sid]
+    assert ctx.store.load(new_sid).messages == ctx.store.load(sid).messages
+
+    # 非法 id 400、缺席 404（与其它会话端点同款守卫）
+    assert client.post("/api/sessions/abc/fork").status_code == 400
+    assert client.post("/api/sessions/20260913-101956/fork").status_code == 404
+
+
 def test_session_guards():
     client = _make_client()
     assert client.put("/api/sessions/20260913-101956", json={"text": "x"}).status_code == 404

@@ -413,6 +413,16 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         """
         return {"id": ctx.store.create(Session())}
 
+    @app.post("/api/sessions/{sid}/fork", status_code=201)
+    def fork_session(sid: str):
+        """fork 会话（ADR 085）：从源会话 copy 出完整副本，换个思路重来不丢上下文。
+
+        只读源、建新会话——fork 不写源会话，故不走 _require_writable；源正被
+        worker 独占时 fork 也安全（读到的是当刻落盘的快照）。
+        """
+        _require_session(sid)
+        return {"id": ctx.store.fork(sid)}
+
     @app.put("/api/sessions/{sid}")
     def rename_session(sid: str, body: RenameSessionRequest):
         """重命名（2026-09-17 体验轮）：改的是 title 标签，身份（文件名）不动。"""
