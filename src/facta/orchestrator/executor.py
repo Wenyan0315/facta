@@ -14,10 +14,12 @@ from facta.memory.compressor import trim_incomplete_round
 from facta.memory.plan import PlanBoard
 from facta.memory.store import Session
 from facta.orchestrator.agent import Agent
+from facta.tools.registry import ToolRegistry
 
 # S6b 并行 spawn：唯一「设计上可证明安全」的并行工具（独立 Session +
-# worktree 隔离、IO-bound）。普通工具保持串行——模型常期待「先读 A 再
-# 决定读 B」，并行会打乱它的预期顺序（保守默认，与 needs_confirmation 同哲学）
+# worktree 隔离、IO-bound）。084 起扩展到只读工具——「模型常期待先读 A 再
+# 决定读 B」对同一轮并列点菜不成立（决定已做完，无顺序依赖），只读工具
+# 无副作用、无顺序依赖，与 spawn 一样可并行（可并行判定见 _split_tool_batches）
 _SPAWN_TOOL = "spawn_subagent"
 
 
@@ -33,20 +35,31 @@ def _forward_plan_events(board: PlanBoard, on_event: Callable[[str, dict], None]
             on_event(ev.type, ev.data)
 
 
-def _split_tool_batches(tool_calls: list[dict]) -> list[tuple[bool, list[dict]]]:
-    """把一轮 tool_calls 切成批：连续 spawn 段 = 可并行批（True），
-    其余逐个 = 串行批（False）。
+def _split_tool_batches(
+    tool_calls: list[dict], registry: ToolRegistry,
+) -> list[tuple[bool, list[dict]]]:
+    """把一轮 tool_calls 切成批：连续可并行段（spawn 或只读）并一批
+    （True），其余逐个 = 串行批（False）。
 
-    只对「连续 spawn」开并行——穿插的普通工具拆成单元素串行批，保持
-    原顺序。结果按批顺序回填，模型看到的顺序与点菜顺序一致。
+    可并行 = 名字 == `_SPAWN_TOOL` 或 `registry.get(name).is_readonly`
+    （084）：只读工具无副作用、无顺序依赖，同一轮并列点菜可并行。
+    未注册/未声明只读的工具按写类串行（保守方向）。结果按批顺序回填，
+    模型看到的顺序与点菜顺序一致。
     """
+
+    def _parallel(name: str) -> bool:
+        if name == _SPAWN_TOOL:
+            return True
+        tool = registry.get(name)
+        return tool is not None and tool.is_readonly
+
     batches: list[tuple[bool, list[dict]]] = []
     i = 0
     n = len(tool_calls)
     while i < n:
-        if tool_calls[i]["name"] == _SPAWN_TOOL:
+        if _parallel(tool_calls[i]["name"]):
             j = i
-            while j < n and tool_calls[j]["name"] == _SPAWN_TOOL:
+            while j < n and _parallel(tool_calls[j]["name"]):
                 j += 1
             batches.append((True, tool_calls[i:j]))
             i = j
@@ -105,12 +118,12 @@ def _execute_tool_calls(
     on_event: Callable | None,
     should_cancel: Callable | None,
 ) -> bool:
-    """执行一轮的全部工具调用（S6b 切批：连续 spawn 段并行，其余串行）。
+    """执行一轮的全部工具调用（S6b 切批：连续 spawn/只读段并行，其余串行）。
 
     结果按点菜顺序回填（tool 消息与 tool_call_id 一一对应，模型靠位置认）。
     返回 False = 取消命中（已 trim 半截轮），调用方应返回 CANCELLED。
     """
-    for parallel_ok, batch in _split_tool_batches(tool_calls):
+    for parallel_ok, batch in _split_tool_batches(tool_calls, agent.registry):
         # 协作式取消检查点②：每个批执行前（批粒度，非逐工具）
         if should_cancel and should_cancel():
             trim_incomplete_round(session.messages)
