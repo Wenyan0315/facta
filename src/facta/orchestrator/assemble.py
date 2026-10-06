@@ -43,6 +43,7 @@ from facta.memory.title import summarize_title
 from facta.memory.todos import TodoStore
 from facta.orchestrator.agent import DEFAULT_SYSTEM_PROMPT, Agent, build_default_agent
 from facta.paths import (
+    DATA_ROOT,
     GRAPH_PATH,
     LEARNED_DIR,
     NOTES_DIR,
@@ -67,13 +68,13 @@ from facta.tools.todo import register_todo_tools
 from facta.tools.web import get_web_search, register_web_tools
 from facta.tools.worktree import cleanup_stale_worktrees
 
-# 组装层唯一真值源：CLI / Web 都从这里拿路径，不在各自入口重定义
-# 四个都锚 WORKSPACE_ROOT（S8a 边界①收口同款）：换 cwd 启动时相对路径会静默
-# 指错——迁移源找不到（老会话「消失」）、审计/待办/向量库写到别处
-MEMORY_PATH = WORKSPACE_ROOT / "data/memory/session.json"   # S8a 退役为「一次性迁移源」：老 active 固定位，启动时 move 进 SESSIONS_DIR
-VECTOR_DB_DIR = WORKSPACE_ROOT / "data/vector_db"           # M7：向量库落盘位置（运行时数据，.gitignore 已排除）
-TODOS_PATH = WORKSPACE_ROOT / "data/todos.json"             # 个人待办（2026-09-17）：跨会话资产，独立于 session
-AUDIT_DIR = WORKSPACE_ROOT / "data/audit"                   # S3 审计日志（2026-09-17）：工具调用 append-only jsonl 按天滚动
+# 组装层唯一真值源：CLI / Web 都从这里拿路径，不在各自入口重定义。
+# ADR 090（R03）：运行时数据路径统一从 DATA_ROOT 推导（FACTA_DATA_DIR 覆盖时
+# 全部跟着走，不往默认目录产生新数据）；唯一的例外是 MEMORY_PATH——
+MEMORY_PATH = WORKSPACE_ROOT / "data/memory/session.json"   # S8a 退役为「一次性迁移源」：锚死默认旧位，FACTA_DATA_DIR 不跟随——旧布局只可能存在于仓库内安装，env 覆盖=全新数据根，启动不做跨根搬迁（090）
+VECTOR_DB_DIR = DATA_ROOT / "vector_db"           # M7：向量库落盘位置（运行时数据，.gitignore 已排除）
+TODOS_PATH = DATA_ROOT / "todos.json"             # 个人待办（2026-09-17）：跨会话资产，独立于 session
+AUDIT_DIR = DATA_ROOT / "audit"                   # S3 审计日志（2026-09-17）：工具调用 append-only jsonl 按天滚动
 
 # 增量固化阈值（S8a）：距上次固化攒够这么多条消息才跑一次复盘。
 # 老口径是「归档/退出时全量固化一次」——S8a 没有归档动作了，触发点必须换成
