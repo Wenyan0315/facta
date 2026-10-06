@@ -1,6 +1,6 @@
 # Facta 架构图
 
-> 版本：v0.108（2026-10-06）｜随着里程碑推进持续迭代此文档
+> 版本：v0.109（2026-10-06）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [021](decisions/021-direction-decisions.md)）：个人执行助手——执行主轴 + 长期记忆 + 通用外延
 
@@ -287,6 +287,7 @@
 | [088-todo-id-reuse-and-durable-write](decisions/088-todo-id-reuse-and-durable-write.md) | R01 待办持久化 | 待办持久化递增 `next_id` 计数器（删除最大编号不复用旧 id）+ `_save` 原子写 + 坏 JSON 抛 `CorruptTodoFile` 保留原文件；旧格式迁移由 max+1 推导；推翻 016「损坏当空仓」口径 |
 | [089-learned-panel-stable-id-and-conflict](decisions/089-learned-panel-stable-id-and-conflict.md) | R02 记忆面板稳定 ID | 面板定位协议从行号切到稳定 id（接 071 的落盘能力）：GET 懒迁移 `ensure_ids` 为存量行补 `<!--id:-->`（seq 计数含已带 id 行 ⇒ 幂等且 append 后不撞），返回 `id` 移除 `line`；PUT 加 `base_content` 乐观锁（042 `base_hash` 先例）——内容已变 409、条目已撤回 404，旧页面不会改错条目；consolidate 写侧仍不写 id（Option A：id 唯一入口收敛在 `ensure_ids`）；DELETE 对已撤回条目再删 → 404 不重盖 tombstone；残留=seq 撞车极小概率残差 + 版本校验非事务（单用户量级可接受，触发信号在案） |
 | [090-data-root-unification](decisions/090-data-root-unification.md) | R03 统一数据目录 | 运行时路径（todos/audit/vector_db）统一从 `DATA_ROOT` 推导，FACTA_DATA_DIR 覆盖时不往默认目录写新数据；迁移源 MEMORY_PATH 锚死默认旧位不跟随 env（旧布局只存在于仓库内安装，env=全新数据根不跨根搬迁）；围栏同源：两份 `_BLACKLIST_DIRS` 字面量收成 `paths.BLACKLIST_DIRS`，`MEMORY_WRITE_FENCE` 改由常量推导——`_fence_entry` 根内相对/根外绝对，seatbelt 拼接改 Path join 补 tmp 族数据根的写白名单缺口；默认布局输出逐字节不变 |
+| [091-summary-file-activity-result-pairing](decisions/091-summary-file-activity-result-pairing.md) | R04 摘要文件清单核对结果 | `collect_file_activity` 从「只盘点菜」改为按 `tool_call_id` 配对 tool 结果消息（first-wins）+ 白名单成败判定——files.py 自带 `read_file_succeeded`/`write_file_succeeded`（文案生产者同文件=单一真值源，先例=learned.STATUS_PREFIXES）：只认成功文案固有格式（`{path}（` / `已新建 /已覆盖 `），失败/拒绝/闸门（错误：）/崩溃补位（[崩溃恢复]）自动排除，fail-closed 不维护黑名单词表；结果缺席（取消/崩溃/M5 前无 id 底片）= 未知不冒充成功，退化为无清单（085 前行为）；负决策=不统一各失败出口文案、不加结构化标记（str 子类/Message 字段）、清单不扩到 read/write 以外工具；对账测试用真实 _read_file/_write_file 输出钉住词表漂移 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
