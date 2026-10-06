@@ -19,7 +19,7 @@ import re
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -304,16 +304,20 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         return {"run_id": run.run_id, "session_id": sid}
 
     @app.post("/api/runs/sync")
-    def create_run_sync(body: CreateRunRequest):
-        """Headless 同步提交（ADR 081）：一条往返拿结构化终态结果。
+    def create_run_sync(body: CreateRunRequest, timeout: float | None = Query(default=None, gt=0)):
+        """Headless 同步提交（ADR 081；R05/092 起支持等待预算）：一条往返拿结果。
 
         与 `POST /api/runs`（202 异步 + SSE 订阅）正交——这里是「提交 →
         阻塞到终态 → 返回 JSON」。复用同一 `_run_worker` 与 `create_if_idle`，
-        唯一区别是请求线程 `wait` 在 `_settle_done`（076 的收官同步点，此前
-        生产只 set 不 wait）上。wait 返回时 Run 必已终态、settle 已收尾。
+        唯一区别是请求线程 `wait` 在 `_settle_done`（076 的收官同步点）上。
 
-        供外部自动化（Kimi Work 定时任务、CI）非交互驱动：它们要的是
-        `{status, text}`，不想维护 EventSource 长连接。阻塞不堵事件循环——
+        `?timeout=<秒>` 是调用方自报的等待预算（默认 None = 无限等，081
+        原契约）。预算耗尽返回 200 + `timed_out: true` + 当时真实 `status`
+        （`running`/`waiting_approval`——后者即「在等人工确认」）——
+        **超时不取消**：后台 Run 继续跑，调用方拿 `run_id` 自行决定去路
+        （订阅 events / cancel / confirm）。
+
+        供外部自动化（Kimi Work 定时任务、CI）非交互驱动。阻塞不堵事件循环——
         FastAPI 同步端点跑默认线程池。
         """
         sid = body.session_id
@@ -325,12 +329,13 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         if isinstance(run, str):
             raise HTTPException(409, run)
         threading.Thread(target=_run_worker, args=(ctx, run, body.text), daemon=True).start()
-        run._settle_done.wait()   # 阻塞到终态 + 收官（076 同步点）
+        settled = run._settle_done.wait(timeout=timeout)   # 阻塞到终态 + 收官（076 同步点）
         return {
             "run_id": run.run_id,
             "session_id": sid,
             "status": run.status,
-            "text": run.reply_text,   # 完整回复；失败/取消为空
+            "text": run.reply_text,   # 完整回复；失败/取消/未完成为空
+            "timed_out": not settled,   # R05/092：等待预算耗尽 ≠ 任务取消
         }
 
     @app.get("/api/runs/{run_id}/events")
