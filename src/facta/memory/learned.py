@@ -192,6 +192,37 @@ def _rewrite(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
+def ensure_ids(path: Path) -> int:
+    """给无 id 注释的存量行补稳定 id（ADR 089 懒迁移）。返回补写条数。
+
+    consolidate 写侧（089 之前）不写 id 注释，旧文件整库 id=None。面板切
+    by-id 后 GET 先调这里：复用 read_learned(include_inactive=True) 的解析，
+    把「同 (date, content) 的第 seq 次出现」喂给 make_id，只为 id=None 的行
+    补尾注释，已带 id 的行原样不动（幂等）。seq 计数含已带 id 的行，保证
+    append 后补 id 不撞既有行、重复跑不漂。
+    """
+    if not path.is_file():
+        return 0
+    with LEARNED_LOCK:
+        entries = read_learned(path, include_inactive=True)
+        if not any(e.id is None for e in entries):
+            return 0
+        lines = path.read_text(encoding="utf-8").splitlines()
+        seen: dict[tuple[str, str], int] = {}
+        changed = 0
+        for e in entries:
+            key = (e.date or "", e.content)
+            seq = seen.get(key, 0)
+            seen[key] = seq + 1
+            if e.id is not None:
+                continue
+            lines[e.line] = lines[e.line].rstrip() + f"<!--id:{make_id(key[0], key[1], seq)}-->"
+            changed += 1
+        if changed:
+            _rewrite(path, lines)
+        return changed
+
+
 def _split_tags(text: str) -> tuple[list[str], str]:
     """剥出开头的 tag 串：`[已验证] 正文` → (["[已验证]"], "正文")。
 

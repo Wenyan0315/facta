@@ -31,9 +31,10 @@ function Entry({ entry, onChanged }) {
   const save = async () => {
     setBusy(true);
     try {
-      await updateEntry(entry.category, entry.line, draft);
+      // 089：按稳定 id 定位；base_content 是乐观锁（GET 时的可见文本原样带回）
+      await updateEntry(entry.category, entry.id, draft, entry.content);
       setMode(null);
-      await onChanged();   // 成功后由 App 重拉全量（新行号从新数据来）
+      await onChanged();   // 成功后由 App 重拉全量（新 id 从新数据来）
     } finally {
       setBusy(false);
     }
@@ -42,7 +43,7 @@ function Entry({ entry, onChanged }) {
   const remove = async () => {
     setBusy(true);
     try {
-      await deleteEntry(entry.category, entry.line);
+      await deleteEntry(entry.category, entry.id);
       await onChanged();
     } finally {
       setBusy(false);
@@ -117,7 +118,7 @@ export default function App() {
               <p class="muted">暂无条目</p>
             ) : (
               items.map((entry) => (
-                <Entry key={`${entry.category}:${entry.line}`} entry={entry} onChanged={load} />
+                <Entry key={`${entry.category}:${entry.id}`} entry={entry} onChanged={load} />
               ))
             )}
           </section>

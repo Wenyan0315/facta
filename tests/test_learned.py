@@ -1,10 +1,11 @@
 """记忆面板验收（2026-09-19，025）：learned 读/改/删原语 + 三端点。
 
 不变量：
-- 行号定位协议：GET 返回的 line 原样传回 PUT/DELETE，操作后行号仍对
+- 089 起稳定 id 定位协议：GET 返回的 id 原样传回 PUT/DELETE；旧文件读时
+  懒迁移补 id；base_content 乐观锁挡旧页面提交（409），已删条目 404
 - 好行编辑保留日期前缀（时间戳归程序管）；坏行（手写行）原样替换可删
 - 空行/文件尾换行在重写后原样保留（append-only 固化的兼容前提）
-- category 白名单挡路径穿越，line 越界 404，空内容 400
+- category 白名单挡路径穿越，id 查无 404，空内容 400
 - 053：人工编辑过的行必须与程序固化的行可辨（[手改]），且原 tags 不丢
 """
 
@@ -13,6 +14,7 @@ import pytest
 from facta.memory.learned import (
     delete_line,
     delete_line_by_id,
+    ensure_ids,
     format_line,
     make_id,
     read_learned,
@@ -196,24 +198,28 @@ def test_api_roundtrip_edit_and_delete(monkeypatch, tmp_path):
     )
 
     listed = client.get("/api/learned").json()
-    assert [(e["category"], e["line"], e["date"]) for e in listed] == [
-        ("constraints", 0, "2026-09-13"),
-        ("constraints", 1, "2026-09-14"),
+    # 089：GET 返回稳定 id（不再返回行号），旧文件无 id 注释 → 读时懒迁移
+    assert [(e["category"], e["date"]) for e in listed] == [
+        ("constraints", "2026-09-13"),
+        ("constraints", "2026-09-14"),
     ]
+    ids = [e["id"] for e in listed]
+    assert all(isinstance(i, str) and len(i) == 8 for i in ids)
 
-    # 编辑保留日期
+    # 编辑按 id + base_content 乐观锁
     assert client.put(
-        "/api/learned/constraints/0", json={"content": "甲改"}
+        f"/api/learned/constraints/{ids[0]}",
+        json={"content": "甲改", "base_content": "甲"},
     ).status_code == 200
-    # 删除按行号
-    assert client.delete("/api/learned/constraints/1").status_code == 200
+    # 删除按 id
+    assert client.delete(f"/api/learned/constraints/{ids[1]}").status_code == 200
 
     after = client.get("/api/learned").json()
     assert len(after) == 1
     # 053：面板的 content = 可见 tag + 正文（前端零改动：改完原样 PUT 回来）
     assert after[0]["date"] == "2026-09-13" and after[0]["content"] == "[手改] 甲改"
-    # 被删行后，剩余行号已变（0）——前端 refresh 后用新行号，协议自洽
-    assert after[0]["line"] == 0
+    # 编辑保留原 id（id 不因内容改而重算）
+    assert after[0]["id"] == ids[0]
 
 
 def test_api_guards(monkeypatch, tmp_path):
@@ -222,9 +228,15 @@ def test_api_guards(monkeypatch, tmp_path):
 
     # 路径穿越被挡（httpx 客户端侧即归一化 → 405；即便构造原始请求，
     # category 白名单也会拦）——断言只认「没成功写入」
-    assert client.put("/api/learned/../etc/0", json={"content": "x"}).status_code >= 400
-    assert client.put("/api/learned/other/9", json={"content": "x"}).status_code == 404
-    assert client.put("/api/learned/other/0", json={"content": "  "}).status_code == 400
+    assert client.put(
+        "/api/learned/../etc/0", json={"content": "x", "base_content": "y"}
+    ).status_code >= 400
+    assert client.put(
+        "/api/learned/other/deadbeef", json={"content": "x", "base_content": "唯一"}
+    ).status_code == 404
+    assert client.put(
+        "/api/learned/other/0", json={"content": "  ", "base_content": "唯一"}
+    ).status_code == 400
     assert client.delete("/api/learned/decisions/0").status_code == 404   # 类别文件不存在
 
 
@@ -248,22 +260,26 @@ def test_api_user_scope_roundtrip(monkeypatch, tmp_path):
     )
     project = tmp_path / "constraints.md"
     project.write_text("- [2026-09-13] 项目甲\n", encoding="utf-8")
-    before = project.read_bytes()
     monkeypatch.setenv("FACTA_USER_MEMORY", str(user_md))
     client = _client(monkeypatch, tmp_path)
 
     listed = client.get("/api/learned").json()
-    assert [(e["category"], e["line"], e["date"]) for e in listed if e["category"] == "user"] == [
-        ("user", 0, "2026-09-20"),
-        ("user", 1, "2026-09-21"),
-    ]
+    # 089：GET 会对所有桶做懒迁移（项目桶也被补 id）——迁移属设计内动作；
+    # 「用户级操作不动项目桶」的不变量钉在迁移完成之后的字节级快照上
+    before = project.read_bytes()
+    user_items = [e for e in listed if e["category"] == "user"]
+    assert [(e["date"]) for e in user_items] == ["2026-09-20", "2026-09-21"]
+    uid0, uid1 = user_items[0]["id"], user_items[1]["id"]
 
-    # 编辑保留日期前缀、删除按行号——与项目桶同一套协议（同一个 learned.py）
-    assert client.put("/api/learned/user/0", json={"content": "行程提早两周提醒"}).status_code == 200
-    assert client.delete("/api/learned/user/1").status_code == 200
-    # ADR 074：删除留 tombstone，正文仍在但默认 GET 已隐藏
+    # 编辑/删除按 id——与项目桶同一套协议（同一个 learned.py）
+    assert client.put(
+        f"/api/learned/user/{uid0}",
+        json={"content": "行程提早两周提醒", "base_content": "行程提早一周提醒"},
+    ).status_code == 200
+    assert client.delete(f"/api/learned/user/{uid1}").status_code == 200
+    # ADR 074：删除留 tombstone，正文仍在但默认 GET 已隐藏；089 起行尾带 id 注释
     raw = user_md.read_text(encoding="utf-8").splitlines()
-    assert raw[0] == "- [2026-09-20] [手改] 行程提早两周提醒"
+    assert raw[0].startswith("- [2026-09-20] [手改] 行程提早两周提醒")
     assert raw[1].startswith("- [2026-09-21] [已撤回:")
     # 用户级操作不动项目桶（字节级）
     assert project.read_bytes() == before
@@ -275,11 +291,15 @@ def test_api_user_scope_missing_file_and_guards(monkeypatch, tmp_path):
 
     # 新用户：固化管线还没写出 user.md → 空栏，不是错误
     assert client.get("/api/learned").json() == []
-    assert client.put("/api/learned/user/0", json={"content": "x"}).status_code == 404
-    assert client.delete("/api/learned/user/0").status_code == 404
+    assert client.put(
+        "/api/learned/user/deadbeef", json={"content": "x", "base_content": "y"}
+    ).status_code == 404
+    assert client.delete("/api/learned/user/deadbeef").status_code == 404
     # 白名单外的类别仍 400（含看起来像目录名的），穿越防线没被 user 撑开
-    assert client.put("/api/learned/preferences/0", json={"content": "x"}).status_code == 400
-    assert client.delete("/api/learned/notes/0").status_code == 400
+    assert client.put(
+        "/api/learned/preferences/deadbeef", json={"content": "x", "base_content": "y"}
+    ).status_code == 400
+    assert client.delete("/api/learned/notes/deadbeef").status_code == 400
 
 
 # ---------- 053：provenance（来源侧）----------
@@ -416,4 +436,73 @@ def test_tag_copied_into_content_self_heals(tmp_path):
     (e,) = read_learned(path)
     assert e.content == "用 BGE-M3"
     assert render(e) == "- [2026-09-13] [已验证] 用 BGE-M3"
+
+
+# ---------- ADR 089：面板 by-id 切换（懒迁移 + 乐观锁 + 删后 404） ----------
+
+
+def test_ensure_ids_migrates_legacy_and_is_idempotent(tmp_path):
+    """懒迁移：无 id 存量行补尾注释；重复跑零动作；append 同内容新行不撞旧 id。"""
+    assert ensure_ids(tmp_path / "nope.md") == 0          # 缺席文件零动作
+    path = _write(tmp_path, "- [2026-09-13] 甲\n- [2026-09-14] 乙\n")
+
+    assert ensure_ids(path) == 2
+    raw = path.read_text(encoding="utf-8").splitlines()
+    assert all("<!--id:" in line for line in raw)
+    ids = [e.id for e in read_learned(path)]
+    assert all(isinstance(i, str) and len(i) == 8 for i in ids)
+
+    snapshot = path.read_bytes()
+    assert ensure_ids(path) == 0                          # 幂等：第二遍零改写
+    assert path.read_bytes() == snapshot
+
+    # 089 边界：append 一条与既有行同 (date, content) 的新行——seq 计数含
+    # 已带 id 的行 ⇒ 新行补到的 id 不与旧行撞
+    with path.open("a", encoding="utf-8") as f:
+        f.write("- [2026-09-13] 甲\n")
+    assert ensure_ids(path) == 1
+    new_ids = [e.id for e in read_learned(path)]
+    assert len(set(new_ids)) == 3                         # 三个 id 互不相同
+
+
+def test_api_update_conflict_returns_409(monkeypatch, tmp_path):
+    """乐观锁：base_content 与当前可见文本不符 → 409 且一字不写；对齐后放行。"""
+    client = _client(monkeypatch, tmp_path)
+    md = tmp_path / "constraints.md"
+    md.write_text("- [2026-09-13] 甲\n", encoding="utf-8")
+
+    (entry,) = client.get("/api/learned").json()
+    before = md.read_bytes()                              # GET 已完成懒迁移
+
+    resp = client.put(
+        f"/api/learned/constraints/{entry['id']}",
+        json={"content": "旧页面提交的改法", "base_content": "已被别人改过的版本"},
+    )
+    assert resp.status_code == 409
+    assert md.read_bytes() == before                      # 冲突一字不写
+
+    # 拿当前内容再来一次 → 放行（冲突闸不是永久锁）
+    assert client.put(
+        f"/api/learned/constraints/{entry['id']}",
+        json={"content": "甲改", "base_content": "甲"},
+    ).status_code == 200
+
+
+def test_api_update_after_delete_returns_404(monkeypatch, tmp_path):
+    """删后旧页面提交：条目已撤回 → PUT/DELETE 都 404，不重盖 tombstone。"""
+    client = _client(monkeypatch, tmp_path)
+    md = tmp_path / "constraints.md"
+    md.write_text("- [2026-09-13] 甲\n", encoding="utf-8")
+
+    (entry,) = client.get("/api/learned").json()
+    assert client.delete(f"/api/learned/constraints/{entry['id']}").status_code == 200
+    after_delete = md.read_bytes()
+
+    # 旧页面还拿着删前的 id + base_content 提交 → 404（不是 409：条目没了）
+    assert client.put(
+        f"/api/learned/constraints/{entry['id']}",
+        json={"content": "改它", "base_content": "甲"},
+    ).status_code == 404
+    assert client.delete(f"/api/learned/constraints/{entry['id']}").status_code == 404
+    assert md.read_bytes() == after_delete                # tombstone 不被重盖
 
