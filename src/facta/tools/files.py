@@ -286,6 +286,23 @@ def _write_file(path: str, content: str, *, root: Path = WORKSPACE_ROOT) -> str:
     return f"已{action} {path}（{len(content)} 字）{shrink_note}{diff_note}"
 
 
+# ---- 结果判定（R04/091：compressor 摘要清单消费；与上方文案同文件，单一真值源）----
+
+
+def read_file_succeeded(result: str, path: str) -> bool:
+    """read_file 结果是否成功：成功出口恒以「{path}（」开头（空文件 / 共 N 行 /
+    offset 超范围三变体同格式）；失败文案、registry 闸门（错误：/操作被确认闸门
+    拒绝）、崩溃补位（[崩溃恢复]）均不以路径开头。白名单 fail-closed：未来新增
+    失败文案自动归入失败，无需改这里。"""
+    return result.startswith(f"{path}（")
+
+
+def write_file_succeeded(result: str) -> bool:
+    """write_file 结果是否成功：唯一成功返回以「已新建 /已覆盖 」开头
+    （diff/缩减注记在后缀，不影响前缀）。拒绝、失败、未知一律不算已改。"""
+    return result.startswith(("已新建 ", "已覆盖 "))
+
+
 def register_file_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     """注册文件四件。恒注册（无外部依赖）——workspace 围栏即安全边界。
 

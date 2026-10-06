@@ -227,31 +227,98 @@ def test_summary_prompt_carries_six_sections():
         assert section in _SUMMARY_PROMPT, f"prompt 丢了六段式段头：{section}"
 
 
-def _tc(name: str, args: dict) -> Message:
+def _tc(name: str, args: dict, call_id: str = "t") -> Message:
     """造一条带指定 arguments 的纯点菜消息。"""
     import json as _json
 
     return Message(
         role="assistant",
         content="",
-        tool_calls=[{"id": "t", "name": name, "arguments": _json.dumps(args, ensure_ascii=False)}],
+        tool_calls=[{"id": call_id, "name": name, "arguments": _json.dumps(args, ensure_ascii=False)}],
     )
 
 
 def test_collect_file_activity_extracts_read_and_write():
-    """从 tool_calls 提取 read_file/write_file 的 path，去重保序。"""
+    """配对成功结果后：read_file 进已读、write_file 进已改，去重保序。"""
     messages = [
         Message(role="system", content="人设"),
-        _tc("read_file", {"path": "a.py"}),
-        _tc("read_file", {"path": "b.py"}),
-        _tc("read_file", {"path": "a.py"}),        # 重复读 → 去重
-        _tc("write_file", {"path": "c.py"}),
-        _tc("search_code", {"pattern": "x"}),       # 非文件读写 → 忽略
-        _tc("read_file", {"offset": 10}),           # 缺 path → 忽略
+        _tc("read_file", {"path": "a.py"}, "r1"),
+        tool_result("a.py（共 10 行，显示第 1~10 行）：\n...", "r1"),
+        _tc("read_file", {"path": "b.py"}, "r2"),
+        tool_result("b.py（空文件）", "r2"),
+        _tc("read_file", {"path": "a.py"}, "r3"),        # 重复读 → 去重
+        tool_result("a.py（共 10 行，显示第 1~10 行）：\n...", "r3"),
+        _tc("write_file", {"path": "c.py"}, "w1"),
+        tool_result("已新建 c.py（20 字）", "w1"),
+        _tc("search_code", {"pattern": "x"}, "s1"),       # 非文件读写 → 忽略
+        tool_result("命中 3 处", "s1"),
+        _tc("read_file", {"offset": 10}, "r4"),           # 缺 path → 忽略
+        tool_result("错误：参数校验失败", "r4"),
     ]
     read, modified = collect_file_activity(messages)
     assert read == ["a.py", "b.py"]
     assert modified == ["c.py"]
+
+
+# ── R04/091：清单只认成功，不冒充 ──────────────────────────
+
+
+def test_collect_file_activity_rejected_write_not_listed():
+    """被拒/失败的写入不进「已改文件」——尝试不是成果（087 复现的造谣场景）。"""
+    messages = [
+        _tc("write_file", {"path": "package.json"}, "w1"),
+        tool_result("操作被确认闸门拒绝（触发规则：workspace 外写入需确认），未执行。", "w1"),
+        _tc("write_file", {"path": "x.py"}, "w2"),
+        tool_result("错误：工具执行失败（OSError: No space left on device）", "w2"),
+    ]
+    assert collect_file_activity(messages) == ([], [])
+
+
+def test_collect_file_activity_failed_read_not_listed():
+    """失败的读取不进「已读文件」。"""
+    messages = [
+        _tc("read_file", {"path": "ghost.txt"}, "r1"),
+        tool_result("文件不存在：ghost.txt", "r1"),
+        _tc("read_file", {"path": "bin.dat"}, "r2"),
+        tool_result("不是文本文件（或非 UTF-8），拒绝读取：bin.dat", "r2"),
+    ]
+    assert collect_file_activity(messages) == ([], [])
+
+
+def test_collect_file_activity_missing_result_not_listed():
+    """结果缺席（取消/崩溃/无 id 的远古底片）= 未知，不冒充成功。"""
+    messages = [
+        _tc("read_file", {"path": "a.py"}, "r1"),
+        _tc("write_file", {"path": "b.py"}, "w1"),
+        Message(  # 无 id 的远古点菜：退化为未知
+            role="assistant",
+            content="",
+            tool_calls=[{"name": "read_file", "arguments": '{"path": "c.py"}'}],
+        ),
+    ]
+    assert collect_file_activity(messages) == ([], [])
+
+
+def test_collect_file_activity_crash_recovery_placeholder_not_listed():
+    """崩溃恢复补位文案（[崩溃恢复]…）不算成功。"""
+    messages = [
+        _tc("write_file", {"path": "a.py"}, "w1"),
+        tool_result("[崩溃恢复] 工具调用 write_file 因会话中断未执行，未产生任何效果。", "w1"),
+    ]
+    assert collect_file_activity(messages) == ([], [])
+
+
+def test_collect_file_activity_retry_after_failure_listed():
+    """同一路径先失败后重试成功：成功的入列，失败的排除。"""
+    messages = [
+        _tc("write_file", {"path": "a.py"}, "w1"),
+        tool_result("错误：工具执行失败（OSError: 磁盘满）", "w1"),
+        _tc("write_file", {"path": "a.py"}, "w2"),
+        tool_result("已覆盖 a.py（10 字）", "w2"),
+    ]
+    read, modified = collect_file_activity(messages)
+    assert read == []
+    assert modified == ["a.py"]
 
 
 def test_collect_file_activity_no_calls_is_empty():
@@ -265,8 +332,10 @@ def test_build_payload_injects_file_list_after_summary():
     messages = [
         Message(role="system", content="人设"),
         user("读文件"),
-        _tc("read_file", {"path": "src/a.py"}),
-        _tc("write_file", {"path": "src/b.py"}),
+        _tc("read_file", {"path": "src/a.py"}, "r1"),
+        tool_result("src/a.py（共 5 行，显示第 1~5 行）：\n...", "r1"),
+        _tc("write_file", {"path": "src/b.py"}, "w1"),
+        tool_result("已覆盖 src/b.py（30 字）", "w1"),
     ]
     payload = build_payload(messages, "摘要：读过一个文件", summarized_upto=2, keep_last=2)
     summary_msg = payload[1]

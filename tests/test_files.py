@@ -13,7 +13,9 @@ from facta.tools.files import (
     _read_file,
     _search_code,
     _write_file,
+    read_file_succeeded,
     register_file_tools,
+    write_file_succeeded,
 )
 from facta.tools.registry import ToolRegistry
 
@@ -187,3 +189,31 @@ def test_builtin_split_menu_unchanged():
     assert set(registry.names()) == {
         "get_current_time", "list_notes", "read_notes", "write_note",
     }
+
+
+# ---------- R04/091 成败判定对账：真实输出喂判定函数，文案漂移先红 ----------
+
+
+def test_read_success_predicate_matches_real_outputs(tmp_path):
+    """read_file_succeeded 认下 _read_file 全部成功变体、拒掉真实失败输出。"""
+    (tmp_path / "a.txt").write_text("第一行\n第二行\n", encoding="utf-8")
+    assert read_file_succeeded(_read_file("a.txt", root=tmp_path), "a.txt")
+    # 空文件变体
+    (tmp_path / "empty.txt").write_text("", encoding="utf-8")
+    assert read_file_succeeded(_read_file("empty.txt", root=tmp_path), "empty.txt")
+    # offset 超范围变体（模型视角的「读完了」，仍算读过）
+    assert read_file_succeeded(_read_file("a.txt", offset=99, root=tmp_path), "a.txt")
+    # 失败：不存在 / 二进制拒绝
+    assert not read_file_succeeded(_read_file("ghost.txt", root=tmp_path), "ghost.txt")
+    (tmp_path / "bin.dat").write_bytes(b"\x00\xff\xfe")  # 非法 UTF-8 = 二进制
+    assert not read_file_succeeded(_read_file("bin.dat", root=tmp_path), "bin.dat")
+
+
+def test_write_success_predicate_matches_real_outputs(tmp_path):
+    """write_file_succeeded 认下新建/覆盖（含 diff 注记后缀）、拒掉真实失败输出。"""
+    assert write_file_succeeded(_write_file("b.txt", "第一版", root=tmp_path))
+    assert write_file_succeeded(_write_file("b.txt", "第二版改了内容", root=tmp_path))
+    # 失败：内容相同未写入 / 二进制拒绝覆盖
+    assert not write_file_succeeded(_write_file("b.txt", "第二版改了内容", root=tmp_path))
+    (tmp_path / "bin.dat").write_bytes(b"\x00\xff\xfe")  # 非法 UTF-8 = 二进制
+    assert not write_file_succeeded(_write_file("bin.dat", "文本", root=tmp_path))

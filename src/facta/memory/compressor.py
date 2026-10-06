@@ -19,6 +19,7 @@ import logging
 from facta.core.llm import LLM
 from facta.core.types import Message
 from facta.memory.learned import STATUS_PREFIXES
+from facta.tools.files import read_file_succeeded, write_file_succeeded
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +129,19 @@ def build_payload(
 
 
 def collect_file_activity(messages: list[Message]) -> tuple[list[str], list[str]]:
-    """从完整底片的 tool_calls 提取（已读文件, 已改文件）清单（ADR 085）。
+    """从完整底片提取（已读文件, 已改文件）清单（ADR 085；R04/091 起核对结果）。
 
-    已读 = `read_file` 的 `arguments.path`；已改 = `write_file` 的 `arguments.path`。
-    确定性提取、去重保序（按首现顺序）——文件路径是精确数据，交给 LLM 必漏写；
-    「累计」由每次扫描全量底片现算，与底片永远一致（无第二份真值可漂移）。
+    配对：M5 起 tool 结果消息带 tool_call_id，按 id 把点菜和结果对上
+    （first-wins）。成败：委托 files.py 的白名单判定（文案生产者自带判定，
+    单一真值源）——只认成功文案固有格式，失败/拒绝/闸门/崩溃补位自动排除。
+    缺席：结果消息不存在（取消、崩溃、M5 前无 id 的远古底片）= 未知，
+    一律不冒充成功，退化为无清单（085 前行为）。
+    去重保序（按首现顺序）；「累计」由每次扫描全量底片现算，与底片永远一致。
     """
+    results: dict[str, str] = {}
+    for m in messages:
+        if m.role == "tool" and m.tool_call_id and m.tool_call_id not in results:
+            results[m.tool_call_id] = m.content or ""
     read: list[str] = []
     modified: list[str] = []
     seen_read: set[str] = set()
@@ -143,6 +151,9 @@ def collect_file_activity(messages: list[Message]) -> tuple[list[str], list[str]
             name = tc.get("name")
             if name not in ("read_file", "write_file"):
                 continue
+            result = results.get(tc.get("id") or "")
+            if result is None:
+                continue  # 结果缺席 = 未知，不冒充成功
             try:
                 args = json.loads(tc.get("arguments") or "{}")
             except (json.JSONDecodeError, TypeError):
@@ -152,13 +163,18 @@ def collect_file_activity(messages: list[Message]) -> tuple[list[str], list[str]
             path = args.get("path")
             if not isinstance(path, str) or not path:
                 continue
-            if name == "read_file" and path not in seen_read:
-                seen_read.add(path)
-                read.append(path)
-            elif name == "write_file" and path not in seen_modified:
-                seen_modified.add(path)
-                modified.append(path)
+            if name == "read_file":
+                _record(path, read_file_succeeded(result, path), read, seen_read)
+            else:
+                _record(path, write_file_succeeded(result), modified, seen_modified)
     return read, modified
+
+
+def _record(path: str, ok: bool, target: list[str], seen: set[str]) -> None:
+    """判定成功且首次出现才入清单（去重保序）。"""
+    if ok and path not in seen:
+        seen.add(path)
+        target.append(path)
 
 
 def maybe_compress(
