@@ -263,6 +263,42 @@ def settle_session(
     return report
 
 
+def _sync_notes_and_graph(kb: KnowledgeBase, graph_llm: LLM | None) -> GraphStore:
+    """启动时的知识库 + 图谱增量同步（抽自 assemble：分支预算 092 同款 PLR0912）。
+
+    ADR 095（R09）：env 覆盖 = 全新数据根（090 口径）——wheel 用户没有仓库内
+    data/notes 语料，notes 缺失或没有 .md 都是「还没写过笔记」的正常状态：
+    补建目录、同步跳过（对空库同步零篇本无意义；判空与 scan_notes 同款 glob
+    口径）。默认仓库布局不动 loader 两道防线——缺失/空目录仍炸：
+    那是误删/目录漂移的真异常，不静默吞。
+
+    图谱（S7a）是 notes 的结构化投影——向量管模糊相似，图管精确关系。
+    指纹差集增量：笔记没改不重抽（省 LLM 的钱）；教学路径（假模型）
+    不抽不记指纹（切真模型自动补抽）。graph.json 是知识资产进 git
+    ——只在真有变更时落盘（extracted/removed>0），避免每次启动把
+    git 工作区弄脏。
+    """
+    skip = False
+    if os.environ.get("FACTA_DATA_DIR"):
+        NOTES_DIR.mkdir(parents=True, exist_ok=True)
+        skip = not any(NOTES_DIR.glob("*.md"))
+    if skip:
+        logger.info("数据根 notes 尚无笔记：知识库/图谱同步跳过（095）")
+    else:
+        report = sync_notes(kb, NOTES_DIR)
+        logger.info("知识库同步：新增 %s / 删除 %s / 不变 %s", report.added, report.removed, report.unchanged)
+    graph = GraphStore.load(GRAPH_PATH)
+    if not skip:
+        g_report = sync_graph(graph, NOTES_DIR, graph_llm)
+        logger.info(
+            "图谱同步：抽取 %s / 不变 %s / 删除 %s / 跳过 %s / 失败 %s",
+            g_report.extracted, g_report.unchanged, g_report.removed, g_report.skipped, g_report.failed,
+        )
+        if g_report.extracted or g_report.removed:
+            graph.save(GRAPH_PATH)
+    return graph
+
+
 def assemble(provider: str) -> AppContext:
     """按 provider 组装全部依赖，返回 CLI / Web 共用的运行上下文。
 
@@ -325,23 +361,10 @@ def assemble(provider: str) -> AppContext:
         kb = KnowledgeBase(embedder)   # 教学组合 / 降级路径：内存库，不碰 Chroma
     else:
         kb = KnowledgeBase(embedder, ChromaVectorStore(VECTOR_DB_DIR))
-    report = sync_notes(kb, NOTES_DIR)
-    logger.info("知识库同步：新增 %s / 删除 %s / 不变 %s", report.added, report.removed, report.unchanged)
-
-    # 3.5) 知识图谱（S7a）：notes 的结构化投影——向量管模糊相似，图管精确关系。
-    #      指纹差集增量：笔记没改不重抽（省 LLM 的钱）；教学路径（假模型）
-    #      不抽不记指纹（切真模型自动补抽）。graph.json 是知识资产进 git
-    #      ——只在真有变更时落盘（extracted/removed>0），避免每次启动把
-    #      git 工作区弄脏
-    graph = GraphStore.load(GRAPH_PATH)
+    # 3.5) 知识库 + 图谱（S7a）启动同步：抽成 _sync_notes_and_graph
+    #      （分支预算 + 095 的 env 覆盖判空口径都收在那一个函数里）
     graph_llm = None if provider in ("mock", "echo", "repeat") else internal_llm
-    g_report = sync_graph(graph, NOTES_DIR, graph_llm)
-    logger.info(
-        "图谱同步：抽取 %s / 不变 %s / 删除 %s / 跳过 %s / 失败 %s",
-        g_report.extracted, g_report.unchanged, g_report.removed, g_report.skipped, g_report.failed,
-    )
-    if g_report.extracted or g_report.removed:
-        graph.save(GRAPH_PATH)
+    graph = _sync_notes_and_graph(kb, graph_llm)
 
     # 4) 会话仓库（S8a）：启动时不再载入「那一个」会话——身份=文件名，
     #    载入动作下沉到真正要用它的时候（Web：worker 每轮进场 load、出场 save；

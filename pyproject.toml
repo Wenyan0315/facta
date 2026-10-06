@@ -44,6 +44,12 @@ web = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# ADR 095（R09）：wheel 分发验证发现静态页全丢——vanilla 聊天页 + fw 四页
+# 构建产物是「代码旁的数据文件」，不打进 wheel 则 pip 安装后网页全 404。
+# setuptools glob 不跨目录，逐层枚举；static/ 新增子目录时这里要跟着加。
+[tool.setuptools.package-data]
+"facta.server" = ["static/*", "static/fw/*", "static/fw/assets/*", "static/vendor/*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]   # ".": evals/ 在仓库根目录，接线测试需要 import 它
 testpaths = ["tests"]
