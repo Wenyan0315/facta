@@ -159,7 +159,8 @@ class ChildState:
     task: str | list[dict]   # str = 单轮；list = 多轮 turn（049，见 _turns）
     policy: str          # approve | deny：确认闸门的两种用户人格
     result_path: str
-    mode: str = "full"   # full = 完整装配；bash = bash-only 基线臂（--baseline）
+    mode: str = "full"   # full = 完整装配；nomem = 同装配但副本记忆层已抹除
+    #（096，--nomem）；bash = bash-only 基线臂（--baseline）
 
     def dump(self, path: Path) -> None:
         path.write_text(json.dumps(self.__dict__, ensure_ascii=False), encoding="utf-8")
@@ -503,6 +504,19 @@ def _prepare_copy(wt: Path) -> None:
     (wt / "data" / "mcp-disabled.json").write_text('{"servers": []}', encoding="utf-8")
 
 
+def _wipe_memory(wt: Path) -> None:
+    """nomem 臂（096）：抹掉副本的记忆层——learned 目录 + 用户级记忆文件。
+
+    时点卡在 setup 之后、spawn 之前：setup 照跑（staging 与 full 臂逐字节
+    同源），seed 落了也一并抹掉——「哪些 setup 算记忆 seed」不该由评测器
+    逐题判断。notes/向量库/图谱保留：那是知识库语料，不是记忆（096 口径）。
+    运行中的固化写回不关：两臂同一套机制，被隔离的变量只是起跑线上的
+    记忆资产。
+    """
+    shutil.rmtree(wt / "data" / "learned", ignore_errors=True)
+    (wt / "data" / "user-memory.md").unlink(missing_ok=True)
+
+
 def _child_env(wt: Path) -> dict[str, str]:
     """子进程环境：PYTHONPATH 换被测代码，两个记忆/工具入口锚进副本。
 
@@ -697,7 +711,7 @@ def _stage_scenario(
     return server, hits, staged, ""
 
 
-def run_scenario(scenario: dict, provider: str, judge, skip_judge: bool, keep: bool,
+def run_scenario(scenario: dict, provider: str, judge, skip_judge: bool, keep: bool,  # noqa: PLR0912
                  mode: str = "full") -> dict:
     """一个场景 = 导出副本里跑完「setup → 子进程 → 判分 → 焚副本」。"""
     sid = str(scenario.get("id", "?"))
@@ -727,6 +741,8 @@ def run_scenario(scenario: dict, provider: str, judge, skip_judge: bool, keep: b
             if stage_err:
                 record["fails"].append(stage_err)
                 return record
+            if mode == "nomem":
+                _wipe_memory(wt)   # 096：staging 同源之后、spawn 之前抹记忆层
 
             result_path = tmp / "result.json"
             state = ChildState(
@@ -770,7 +786,8 @@ def run_scenario(scenario: dict, provider: str, judge, skip_judge: bool, keep: b
                 record["answers"] = [a[:800] for a in answers]
             _grade(scenario, wt, child, child_out, hits, record,
                    real_model=provider not in _MOCK_PROVIDERS,
-                   check_mechanism=mode == "full")
+                   # 096：nomem 只缺记忆，计划/确认缝/工具族全在——机制断言照常判
+                   check_mechanism=mode in ("full", "nomem"))
 
             rubric = scenario.get("judge")
             if rubric and judge is not None and not skip_judge:
@@ -818,13 +835,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keep", action="store_true", help="保留导出副本现场不删（排查用）")
     parser.add_argument("--baseline", action="store_true",
                         help="跑 bash-only 基线臂：同副本同 setup 同判分，只有执行体不同")
+    parser.add_argument("--nomem", action="store_true",
+                        help="跑无记忆臂（096）：完整装配不变，spawn 前抹除副本 learned/用户记忆")
+    parser.add_argument("--budget", type=float, default=0.0,
+                        help="整批花费硬顶（¥，含 judge 账本，096）；0 = 不限")
     parser.add_argument("--child", type=Path, help=argparse.SUPPRESS)   # 内部：子进程入口
     args = parser.parse_args(argv)
 
     if args.child is not None:
         return _run_child(ChildState.load(args.child))
+    if args.baseline and args.nomem:
+        parser.error("--baseline 与 --nomem 互斥（三臂一次只跑一臂）")
 
-    mode = "bash" if args.baseline else "full"
+    mode = "bash" if args.baseline else "nomem" if args.nomem else "full"
 
     load_dotenv()   # 密钥进环境变量，再由 env 继承给子进程（不落副本 .env）
     scenarios = load_scenarios(args.scenarios, args.only)
@@ -833,8 +856,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     judge = None
+    judge_ledger = UsageLedger()   # 预算硬顶（096）要连裁判开销一起算
     if not args.skip_judge:
-        judge_ledger = UsageLedger()
         # with_mock_fallback=False：裁判挂了要大声抛，不能被 mock 顶替打出假分数
         judge = get_llm(JUDGE_MODEL, ledger=judge_ledger, with_mock_fallback=False)
 
@@ -849,6 +872,11 @@ def main(argv: list[str] | None = None) -> int:
             record = {"id": sid, "kind": scenario.get("kind", "real"), "arm": mode,
                       "passed": False, "score": None, "fails": [f"异常：{exc}"]}
         results.append(record)
+        spent = sum(float(r.get("cost") or 0) for r in results) + judge_ledger.llm_cost
+        if args.budget and spent > args.budget:
+            print(f"预算硬顶触达：已花 ¥{spent:.4f} > ¥{args.budget:.2f}，"
+                  f"批次中断（096），已跑读数保留落盘", flush=True)
+            break
         mark = "pass" if record["passed"] else "FAIL"
         detail = "；".join(record["fails"])[:220]
         score = f" 质量 {record['score']}/5" if record.get("score") is not None else ""
@@ -865,7 +893,7 @@ def main(argv: list[str] | None = None) -> int:
     total_secs = sum(float(r.get("seconds") or 0) for r in results)
     interventions = sum(int(r.get("confirms") or 0) for r in results)
     quality = f"{sum(scored) / len(scored):.2f}/5（{len(scored)} 条有分）" if scored else "未评"
-    arm = "bash-only 基线" if args.baseline else "完整装配"
+    arm = {"bash": "bash-only 基线", "nomem": "无记忆臂"}.get(mode, "完整装配")
     print(
         f"\n冻结集出分（{arm}｜{args.provider}）：{passed}/{len(results)} 通过"
         f"（完成率 {passed / len(results):.0%}）；"
@@ -874,7 +902,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = f"{'baseline-' if args.baseline else ''}{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+    stamp = f"{'' if mode == 'full' else mode + '-'}{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
     out = RESULTS_DIR / f"frozen-{stamp}.json"
     out.write_text(json.dumps({
         "ts": datetime.now(UTC).isoformat(timespec="seconds"),
