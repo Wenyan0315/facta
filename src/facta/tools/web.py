@@ -27,10 +27,19 @@ import socket
 from typing import Protocol
 from urllib.parse import urlparse
 
-import httpx
-
 from facta.tools.context import ToolContext
 from facta.tools.registry import Tool, ToolRegistry
+
+
+def _import_httpx():
+    """延迟导入（ADR 095）：httpx 属 rag extras，mock 档 wheel 安装没有它——
+    顶层 import 会让「零依赖练习模式」起步即崩；用到联网功能时才要它。"""
+    try:
+        import httpx
+    except ImportError as exc:
+        raise ImportError("联网工具需要 httpx：pip install -e '.[rag]'") from exc
+    return httpx
+
 
 SEARCH_TIMEOUT = 10.0
 FETCH_TIMEOUT = 15.0
@@ -101,6 +110,7 @@ class TavilySearch:
         self._key = api_key
 
     def search(self, query: str) -> list[dict]:
+        httpx = _import_httpx()
         resp = httpx.post(
             TAVILY_API_URL,
             headers={"Authorization": f"Bearer {self._key}"},
@@ -147,6 +157,7 @@ class BochaSearch:
         self._key = api_key
 
     def search(self, query: str) -> list[dict]:
+        httpx = _import_httpx()
         resp = httpx.post(
             BOCHA_API_URL,
             headers={"Authorization": f"Bearer {self._key}"},
@@ -227,6 +238,7 @@ def _fetch_web(url: str) -> str:
     # 大小上限：流式读，超限即停（不把 2MB+ 的响应整个搬进内存再截）
     chunks: list[bytes] = []
     total = 0
+    httpx = _import_httpx()
     with httpx.Client(timeout=FETCH_TIMEOUT, follow_redirects=True) as http, \
             http.stream("GET", url) as resp:
         resp.raise_for_status()

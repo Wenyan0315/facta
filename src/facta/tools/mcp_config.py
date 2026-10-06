@@ -27,11 +27,17 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from facta.paths import WORKSPACE_ROOT
 from facta.tools.mcp_client import McpClient, McpError, register_mcp_tools
-from facta.tools.mcp_http import HttpMcpClient
 from facta.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    # ADR 095（R09）：httpx 在 rag extras——mock 档（零外部依赖）装 wheel 后
+    # 顶层 import 直接 ModuleNotFoundError。HttpMcpClient 只在 URL 型分支用，
+    # 延迟到用时导入；注解走 TYPE_CHECKING 保 mypy（局部变量注解运行时不求值）。
+    from facta.tools.mcp_http import HttpMcpClient
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +102,9 @@ def assemble_servers(registry: ToolRegistry, specs: list[ServerSpec]) -> list:
                 if command and command[0] == "{python}":
                     # 占位符：用 agent 自己的解释器（venv 未激活也不怕找不到 python）
                     command = [sys.executable] + command[1:]
-                client: McpClient | HttpMcpClient = McpClient(
+                # 095：联合里的 HttpMcpClient 在 else 分支才延迟导入（局部注解
+                # 运行时不求值，F823 此处为误报；加引号又撞 UP037，故 noqa）
+                client: McpClient | HttpMcpClient = McpClient(  # noqa: F823
                     # cwd 锚仓库根：清单里的相对脚本路径（"servers/notes_server.py"）
                     # 与 mcp_servers.json 自己的默认位置同源，不随启动目录漂
                     command,
@@ -107,6 +115,10 @@ def assemble_servers(registry: ToolRegistry, specs: list[ServerSpec]) -> list:
                 if not spec.url:   # 畸形配置（command/url 双缺）：跳过而非喂 None 给 httpx
                     logger.warning("MCP 服务器配置缺 url/command，跳过：%s", spec.name)
                     continue
+                from facta.tools.mcp_http import (
+                    HttpMcpClient,  # 延迟导入（095）：httpx 属 rag extras
+                )
+
                 client = HttpMcpClient(
                     spec.url, timeout=spec.timeout, headers=spec.headers or None
                 )

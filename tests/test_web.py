@@ -158,6 +158,8 @@ def test_fetch_web_rejects_domain_resolving_to_private(monkeypatch):
 
 def test_fetch_web_truncates_long_text(monkeypatch):
     # 假 HTTP 层：返回超长正文 → 截到 8000 + 标记
+    import httpx  # 095：web.py 改延迟导入后，直接 patch httpx 本体（同一模块对象）
+
     from facta.tools import web
 
     class _FakeResp:
@@ -183,7 +185,7 @@ def test_fetch_web_truncates_long_text(monkeypatch):
 
         def __exit__(self, *a): return False
 
-    monkeypatch.setattr(web.httpx, "Client", _FakeClient)
+    monkeypatch.setattr(httpx, "Client", _FakeClient)
     out = _fetch_web("https://example.com/long")
     # 界碑（S3）包裹后总长 = 8000 正文 + 界碑声明 + 截断标记，上限放宽到 +300
     assert len(out) <= web.MAX_TEXT_CHARS + 300
