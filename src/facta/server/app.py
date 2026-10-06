@@ -53,6 +53,8 @@ from facta.server.run_store import (
 )
 from facta.server.sse import encode_heartbeat, encode_sse
 from facta.tools.notes import record_provenance, resolve_note_path
+from facta.tools.registry import approval_policy
+from facta.tools.sandbox import detect_backend, sandbox_level
 
 # run_turn 的 on_event 类型 → Run 事件类型（统一用点分层命名，前端按 type 路由）
 _EVENT_MAP = {
@@ -439,6 +441,20 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         """
         _require_session(sid)
         return {"id": ctx.store.fork(sid)}
+
+    @app.get("/api/status")
+    def get_status():
+        """运行环境状态（ADR 093）：配置档与实际后端分开展示。
+
+        三个字段都是点用点读（086 同款纪律，不缓存）：配置写了
+        workspace-write 而机器上没有可用后端时，backend 为 null——
+        诚实降级做成可见，而不是藏在日志里。
+        """
+        return {
+            "sandbox_level": sandbox_level(),
+            "sandbox_backend": detect_backend(),
+            "approval_policy": approval_policy(),
+        }
 
     @app.put("/api/sessions/{sid}")
     def rename_session(sid: str, body: RenameSessionRequest):

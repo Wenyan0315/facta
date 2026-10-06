@@ -1,6 +1,6 @@
 # Facta 架构图
 
-> 版本：v0.110（2026-10-06）｜随着里程碑推进持续迭代此文档
+> 版本：v0.111（2026-10-06）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [021](decisions/021-direction-decisions.md)）：个人执行助手——执行主轴 + 长期记忆 + 通用外延
 
@@ -289,6 +289,7 @@
 | [090-data-root-unification](decisions/090-data-root-unification.md) | R03 统一数据目录 | 运行时路径（todos/audit/vector_db）统一从 `DATA_ROOT` 推导，FACTA_DATA_DIR 覆盖时不往默认目录写新数据；迁移源 MEMORY_PATH 锚死默认旧位不跟随 env（旧布局只存在于仓库内安装，env=全新数据根不跨根搬迁）；围栏同源：两份 `_BLACKLIST_DIRS` 字面量收成 `paths.BLACKLIST_DIRS`，`MEMORY_WRITE_FENCE` 改由常量推导——`_fence_entry` 根内相对/根外绝对，seatbelt 拼接改 Path join 补 tmp 族数据根的写白名单缺口；默认布局输出逐字节不变 |
 | [091-summary-file-activity-result-pairing](decisions/091-summary-file-activity-result-pairing.md) | R04 摘要文件清单核对结果 | `collect_file_activity` 从「只盘点菜」改为按 `tool_call_id` 配对 tool 结果消息（first-wins）+ 白名单成败判定——files.py 自带 `read_file_succeeded`/`write_file_succeeded`（文案生产者同文件=单一真值源，先例=learned.STATUS_PREFIXES）：只认成功文案固有格式（`{path}（` / `已新建 /已覆盖 `），失败/拒绝/闸门（错误：）/崩溃补位（[崩溃恢复]）自动排除，fail-closed 不维护黑名单词表；结果缺席（取消/崩溃/M5 前无 id 底片）= 未知不冒充成功，退化为无清单（085 前行为）；负决策=不统一各失败出口文案、不加结构化标记（str 子类/Message 字段）、清单不扩到 read/write 以外工具；对账测试用真实 _read_file/_write_file 输出钉住词表漂移 |
 | [092-sync-run-wait-budget](decisions/092-sync-run-wait-budget.md) | R05 同步接口等待预算 | `/api/runs/sync` 加查询参数 `?timeout=<秒>`（`Query(gt=0)`，默认 None=081 原契约）：超时返回 200 + `timed_out: true` + 当时真实 `status`（`waiting_approval` 即「在等人工确认」，不加新状态）；超时≠取消——后台 Run 继续跑，调用方拿 `run_id` 自行订阅/cancel/confirm；部分推翻 081「不设超时参数」（087 授权重估），保留「不自动裁决 L2 确认」红线；响应恒含 `timed_out` 字段（schema 恒定）；负决策=不做服务端默认超时（假设留给唯一知道答案的调用方）、超时参数不进 CreateRunRequest 请求体（等待行为属性 ≠ Run 属性） |
+| [093-ui-surface-fork-status-memory-errors](decisions/093-ui-surface-fork-status-memory-errors.md) | R07 已有能力接用户界面 | 三件界面接线：①`GET /api/status` 返回 `{sandbox_level, sandbox_backend, approval_policy}`（配置档与实际后端两字段分开展示，点用点读不缓存）+ 聊天页 sidebar 环境徽章（拉取失败静默）；②fork 按钮进会话行操作区、含 running（085 快照安全），点击后切到副本；③memory 面板 api.js 复刻 notes 的 unwrap（err.status+detail 文案，第二次出现不抽共享模块）、Entry 加 err state 内联横幅、409/404 给「重新载入」按钮；边界=记忆来源 tag 经 visible_text 已可见（无需新工作）、召回原因（recall_xray 无 API）留触发信号；负决策=不做 toast 通知中心、徽章不进 fw 四页、fork 无确认弹窗 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
