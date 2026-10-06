@@ -14,7 +14,12 @@ import json
 import pytest
 
 from facta.core.audit import AuditLog
-from facta.tools.registry import Tool, ToolRegistry
+from facta.tools.registry import (
+    Tool,
+    ToolRegistry,
+    _needs_confirmation,
+    approval_policy,
+)
 from facta.tools.terminal import (
     WORKSPACE_ROOT,
     _confirm_rule,
@@ -473,6 +478,87 @@ def test_default_tools_unaffected_by_confirm_seam():
     )
 
     assert "拒绝" not in out and "WORKSPACE_ROOT" in out
+
+
+# ---------- 确认策略档（086）：untrusted / on-request / never ----------
+
+@pytest.mark.parametrize("value", ["untrusted", "UNTRUSTED", " untrusted "])
+def test_approval_policy_untrusted(monkeypatch, value):
+    monkeypatch.setenv("FACTA_APPROVAL_POLICY", value)
+    assert approval_policy() == "untrusted"
+
+
+@pytest.mark.parametrize("value", ["never", "NEVER"])
+def test_approval_policy_never(monkeypatch, value):
+    monkeypatch.setenv("FACTA_APPROVAL_POLICY", value)
+    assert approval_policy() == "never"
+
+
+@pytest.mark.parametrize("value", ["", "on-request", "bogus"])
+def test_approval_policy_defaults_to_on_request(monkeypatch, value):
+    if value == "":
+        monkeypatch.delenv("FACTA_APPROVAL_POLICY", raising=False)
+    else:
+        monkeypatch.setenv("FACTA_APPROVAL_POLICY", value)
+    assert approval_policy() == "on-request"
+
+
+def _nt(needs):
+    return Tool(name="t", description="", parameters={}, func=lambda: "ok",
+                needs_confirmation=needs)
+
+
+def test_untrusted_forces_confirm_even_for_readonly(monkeypatch):
+    monkeypatch.setenv("FACTA_APPROVAL_POLICY", "untrusted")
+    # 免确认工具也强制弹窗，guard 统一归因策略（不保留工具自身规则名）
+    assert _needs_confirmation(_nt(False), {}) == (True, "untrusted-policy")
+    # 自带规则名的高危工具：归因被策略强制覆盖
+    assert _needs_confirmation(_nt("credential-path"), {}) == (True, "untrusted-policy")
+
+
+def test_never_skips_confirm_even_for_dangerous(monkeypatch):
+    monkeypatch.setenv("FACTA_APPROVAL_POLICY", "never")
+    # 高危工具（bool True 与 callable 命中）都免确认，guard 为 None
+    assert _needs_confirmation(_nt(True), {}) == (False, None)
+    assert _needs_confirmation(_nt(lambda args: True), {}) == (False, None)
+
+
+def test_on_request_keeps_attribution(monkeypatch):
+    monkeypatch.setenv("FACTA_APPROVAL_POLICY", "on-request")
+    # 现状保持：needs 原样、规则名（str）摘进 guard、纯 bool 无 guard
+    assert _needs_confirmation(_nt(False), {}) == (False, None)
+    assert _needs_confirmation(_nt(True), {}) == (True, None)
+    assert _needs_confirmation(_nt("credential-path"), {}) == ("credential-path", "credential-path")
+    assert _needs_confirmation(_nt(lambda args: False), {}) == (False, None)
+    assert _needs_confirmation(_nt(lambda args: "not-whitelisted"), {}) == ("not-whitelisted", "not-whitelisted")
+
+
+def test_untrusted_policy_confirms_readonly_and_audits_guard(tmp_path, monkeypatch):
+    # 端到端：untrusted 下只读工具（needs=False）也走确认缝，批准后审计
+    # guard="untrusted-policy"——评测读 record.guard 零新仪器就能看到机制出手。
+    monkeypatch.setenv("FACTA_APPROVAL_POLICY", "untrusted")
+    audit = AuditLog(tmp_path)
+    registry = ToolRegistry(audit=audit)
+    registry.register(Tool(name="read_file", description="t", parameters={}, func=lambda: "ok"))
+
+    out = registry.execute("read_file", "{}", confirm=lambda n, a: True)
+
+    assert "经用户确认批准" in out and "untrusted-policy" in out
+    assert audit.read()[0]["guard"] == "untrusted-policy"
+
+
+def test_never_policy_runs_dangerous_without_confirm(tmp_path, monkeypatch):
+    # 端到端：never 下高危工具免确认执行（无 confirm 通道也照跑），无 guard。
+    monkeypatch.setenv("FACTA_APPROVAL_POLICY", "never")
+    audit = AuditLog(tmp_path)
+    registry = ToolRegistry(audit=audit)
+    registry.register(Tool(name="danger", description="t", parameters={},
+                           func=lambda: "ran", needs_confirmation=True))
+
+    out = registry.execute("danger", "{}")
+
+    assert out == "ran"
+    assert audit.read()[0].get("guard") is None
 
 
 # ---------- loop 第四条缝：on_confirm 透传 ----------

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from facta.paths import MEMORY_WRITE_FENCE
 
-ENV_SWITCH = "FACTA_SANDBOX"   # =off 强制关闭（其余值/缺省 = auto）
+ENV_SWITCH = "FACTA_SANDBOX"   # 执行隔离档（086）：none / workspace-write / container
 
 # 与 files.py 黑名单交叉同源的目录项（root 相对）——tests/test_sandbox.py
 # 断言 files.py 的每一项在这里都有对应 deny，漂移即红。
@@ -43,13 +43,35 @@ _BLACKLIST_DIRS = (
 )
 
 
+def sandbox_level() -> str:
+    """执行隔离档（086）：把 FACTA_SANDBOX 归一化为三档之一。
+
+    - "none"：无围栏（兼容 048 遗留开关 =off）
+    - "workspace-write"：默认档——写限项目根+TMPDIR，读全放（除 .env）
+    - "container"：后置档（086 放 P1 末期，本版无容器后端）
+
+    点用点读（不缓存）——与 detect_backend 同款纪律：run_command 频率低，
+    缓存会让环境变量在同进程内改档不生效。
+    """
+    value = (os.environ.get(ENV_SWITCH) or "").strip().lower()
+    if value in {"off", "none"}:
+        return "none"
+    if value == "container":
+        return "container"
+    return "workspace-write"
+
+
 def detect_backend() -> str | None:
     """探测可用沙箱后端；无 → None（诚实降级）。
 
+    档位归 sandbox_level：none → 直接 None；container 后置（086），本版诚实
+    降级走 workspace-write 探测、不假装有容器围栏（048 同款裁定）；
+    workspace-write → 现有平台探测。
+
     不做模块级缓存：which 是毫秒级，run_command 频率低；缓存会让
-    FACTA_SANDBOX=off 在同进程内不生效。
+    FACTA_SANDBOX 改档在同进程内不生效。
     """
-    if os.environ.get(ENV_SWITCH) == "off":
+    if sandbox_level() == "none":
         return None
     if sys.platform == "darwin" and shutil.which("sandbox-exec"):
         return "seatbelt"

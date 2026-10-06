@@ -14,6 +14,7 @@ ToolRegistry：登记所有工具，对外提供两件事——
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -215,16 +216,10 @@ class ToolRegistry:
         if denied:
             return denied
 
-        # S4b L2 确认：裁决点在执行前。拒绝走同一审计收口（留痕可查）
-        needs = (
-            tool.needs_confirmation(args)
-            if callable(tool.needs_confirmation)
-            else tool.needs_confirmation
-        )
-        # 050 归因：needs 可能是规则名（非空 str）而不是 bool——摘出来带进审计。
-        # 批准与拒绝两条路径都要带：i4 那次确认是**批准后执行**的，只记拒绝路径
-        # 就正好漏掉要归因的那一条。
-        guard = needs if isinstance(needs, str) else None
+        # S4b L2 确认：裁决点在执行前。拒绝走同一审计收口（留痕可查）。
+        # 086 确认策略档在 _needs_confirmation 收口归一（untrusted 全确认 /
+        # never 跳过 / on-request 现状），execute 分支数不涨（同 _scope_denial）。
+        needs, guard = _needs_confirmation(tool, args)
         if needs and (confirm is None or not confirm(name, args)):
             # 回灌带规则名（#17）：旧文案「用户拒绝了」在 bot 场景是误导（没有用户），
             # 且模型看不到自己撞了哪道墙——054 记录的幻觉确认事故正源于这种静默。
@@ -284,6 +279,47 @@ def _record(
     """
     if audit is not None:
         audit.record(name, args, result, tool.is_readonly, extra=_audit_extra(tool, guard))
+
+
+def approval_policy() -> str:
+    """确认策略档（086）：把 FACTA_APPROVAL_POLICY 归一化为三档之一。
+
+    - "untrusted"：全确认——即便工具免确认也弹（guard="untrusted-policy"），
+      把 agent 交给非完全信任的任务时的「确认缝硬扛」档。
+    - "never"：跳过确认——needs 恒 False（无人工裁决通道的 bot/无头档）。
+    - "on-request"：默认档（缺省/未知值都落这档）——按工具 needs_confirmation 现状。
+
+    点用点读（不缓存），与 detect_backend 同款纪律。
+    """
+    value = (os.environ.get("FACTA_APPROVAL_POLICY") or "").strip().lower()
+    if value == "untrusted":
+        return "untrusted"
+    if value == "never":
+        return "never"
+    return "on-request"
+
+
+def _needs_confirmation(tool: Tool, args: dict) -> tuple[object, str | None]:
+    """086 确认判定收口：返回 (needs, guard)。
+
+    needs 先按工具 needs_confirmation 真值（bool/str/None）算，再经确认策略档
+    改写：untrusted 全确认（guard 统一 "untrusted-policy"，即便工具自带规则名也
+    覆盖——该档弹窗归因是「策略强制」）；never 跳过（needs 恒 False）；on-request
+    现状。guard 是 050 归因——needs 为规则名（非空 str）时摘出来带进审计；批准与
+    拒绝两条路径都要带。抽成函数同 _scope_denial / _approval_trace：execute 分支
+    数已撞 ruff PLR0912，不提高阈值。
+    """
+    needs = (
+        tool.needs_confirmation(args)
+        if callable(tool.needs_confirmation)
+        else tool.needs_confirmation
+    )
+    policy = approval_policy()
+    if policy == "untrusted":
+        return True, "untrusted-policy"
+    if policy == "never":
+        return False, None
+    return needs, (needs if isinstance(needs, str) else None)
 
 
 def _scope_denial(registry: ToolRegistry, tool: Tool, name: str, args: dict) -> str | None:

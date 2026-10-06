@@ -26,6 +26,7 @@ from facta.tools.sandbox import (
     build_bwrap_argv,
     build_seatbelt_profile,
     detect_backend,
+    sandbox_level,
     wrap_command,
 )
 from facta.tools.terminal import _run_command
@@ -85,6 +86,38 @@ def test_detect_backend_matches_platform():
     else:
         expected = None
     assert detect_backend() == expected
+
+
+# ── 1b. 执行隔离档（086）───────────────────────────────────
+
+@pytest.mark.parametrize("value", ["off", "none", "OFF", "None", " off "])
+def test_sandbox_level_none(monkeypatch, value):
+    monkeypatch.setenv("FACTA_SANDBOX", value)
+    assert sandbox_level() == "none"
+
+
+def test_sandbox_level_container(monkeypatch):
+    monkeypatch.setenv("FACTA_SANDBOX", "container")
+    assert sandbox_level() == "container"
+
+
+@pytest.mark.parametrize("value", ["", "auto", "on", "workspace-write", "bogus"])
+def test_sandbox_level_defaults_to_workspace_write(monkeypatch, value):
+    if value == "":
+        monkeypatch.delenv("FACTA_SANDBOX", raising=False)
+    else:
+        monkeypatch.setenv("FACTA_SANDBOX", value)
+    assert sandbox_level() == "workspace-write"
+
+
+def test_container_level_does_not_fake_backend(monkeypatch):
+    # 086 裁定：container 后置、本版无容器后端——档位归 container 但探测
+    # 诚实降级走现有后端（或 None），不假装有容器围栏（048 同款裁定）。
+    monkeypatch.setenv("FACTA_SANDBOX", "workspace-write")
+    with_ws = detect_backend()
+    monkeypatch.setenv("FACTA_SANDBOX", "container")
+    assert detect_backend() == with_ws
+    assert detect_backend() in (None, "seatbelt", "bwrap")
 
 
 # ── 2. wrap_command 形态 ─────────────────────────────────────
