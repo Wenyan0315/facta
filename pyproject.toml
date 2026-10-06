@@ -29,6 +29,7 @@ dev = [
     "mcp>=2.0",   # MCP 互操作验收的裁判服务器（servers/sdk_server.py）；将来写真实服务器也用
     "mypy>=1.11",   # S4 评审 R6：类型检查进 CI——首轮跑就抓到 rename 端点漏 import 的真 bug
     "ruff>=0.6",    # S4 评审 R6：lint 进 CI
+    "playwright>=1.40",  # 094 R08：test_browser 三条冒烟（未装时测试自动 skip）
 ]
 rag = [
     "chromadb>=1.5",   # M7 工业向量库：下限取实测验证版本（1.5.9），教学版不需要，按需 pip install -e ".[rag]"

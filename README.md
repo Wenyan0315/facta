@@ -10,8 +10,8 @@
 
 ![系统架构图 / System Architecture](docs/assets/architecture.png)
 
-> 完整架构说明（中文）：[docs/architecture.md](docs/architecture.md)｜71 份决策记录见 [docs/decisions/](docs/decisions/)。
-> Full architecture docs are in Chinese; 71 decision records live in [docs/decisions/](docs/decisions/).
+> 完整架构说明（中文）：[docs/architecture.md](docs/architecture.md)｜94 份决策记录见 [docs/decisions/](docs/decisions/)。
+> Full architecture docs are in Chinese; 94 decision records live in [docs/decisions/](docs/decisions/).
 
 ---
 
@@ -48,8 +48,8 @@ The four web panels below were captured in mock mode (`FACTA_PROVIDER=mock`); ev
   An OpenAI-compatible interface with metering, retry/timeout, two-tier caching, and circuit breaking, plus a FallbackLLM degradation chain.
 - **崩溃恢复 / Crash recovery**：工具边界落盘账本，进程被 kill -9 后重启自动 heal，已记录的结果原样恢复；结果未知的副作用会提示模型先核验再继续。<br>
   A ledger is persisted at tool boundaries; after a kill -9 the process self-heals on restart — recorded results are restored as-is, and side effects with unknown outcomes prompt the model to verify before continuing.
-- **安全收口 / Safety gates**：L0/L1 命令白名单 + L2 确认缝、外部命令 macOS seatbelt 沙箱（其他平台当前回退为普通命令执行，不笼统宣称跨平台沙箱）、记忆写入围栏、审计 append-only。<br>
-  L0/L1 command whitelists + an L2 confirmation gate, a macOS seatbelt sandbox for external commands (other platforms currently fall back to plain execution — no blanket cross-platform sandbox claim), a memory-write fence, and append-only audit logs.
+- **安全收口 / Safety gates**：L0/L1 命令白名单 + L2 确认缝、外部命令三档执行隔离（`FACTA_SANDBOX`：none / workspace-write / container；后端按平台探测 seatbelt 或 bwrap，无可用后端时诚实降级不假装有围栏）× 三档确认策略（`FACTA_APPROVAL_POLICY`：untrusted / on-request / never）、记忆写入围栏、审计 append-only；当前档位与实际后端在 Web 侧栏徽章直接可见。<br>
+  L0/L1 command whitelists + an L2 confirmation gate, three-tier sandboxing for external commands (`FACTA_SANDBOX`: none / workspace-write / container; seatbelt or bwrap backend detected per platform, with honest degradation when no backend is available) × three-tier approval policy (`FACTA_APPROVAL_POLICY`: untrusted / on-request / never), a memory-write fence, and append-only audit logs; the configured level and actual backend are visible on the web sidebar badge.
 - **CLI + Web 双壳 / CLI + Web shells**：FastAPI + SSE 流式（仅绑 127.0.0.1），Preact 前端四个面板（对话 / 任务计划 / 记忆 / 知识图谱）。<br>
   FastAPI + SSE streaming (bound to 127.0.0.1 only), with four Preact panels: chat / task plans / memory / knowledge graph.
 - **离线评估 / Offline evaluation**：冻结题库 + git archive 副本剥离 + 注入金丝雀 + LLM-as-judge，CI 中与单元测试同跑。<br>
@@ -152,7 +152,7 @@ src/facta/
 evals/              # 离线评估：冻结题库、注入题库、judge / offline evals: frozen scenarios, injection bank, judge
 servers/            # MCP 演示服务器 / MCP demo servers
 tests/              # pytest 测试 / pytest tests
-docs/               # 架构文档与 ADR（71 份）/ architecture docs and ADRs (71)
+docs/               # 架构文档与 ADR（94 份）/ architecture docs and ADRs (94)
 data/               # 语料与运行时数据（notes/learned.example 入库，其余 gitignore）/ corpus & runtime data (notes + learned.example tracked; the rest gitignored)
 ```
 
@@ -166,8 +166,8 @@ Assembly follows a "single source of truth": CLI, Web and the GitHub bot all bui
 
 | 文档 / Doc | 内容 / Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | 系统架构（分层图、71 份 ADR 索引、在册触发信号）/ System architecture (layered diagram, index of 71 ADRs, registered trigger signals) |
-| [docs/decisions/](docs/decisions/) | 架构决策记录（ADR 001–071，含否决档案）/ Architecture decision records (ADR 001–071, incl. rejected alternatives) |
+| [docs/architecture.md](docs/architecture.md) | 系统架构（分层图、94 份 ADR 索引、在册触发信号）/ System architecture (layered diagram, index of 94 ADRs, registered trigger signals) |
+| [docs/decisions/](docs/decisions/) | 架构决策记录（ADR 001–094，含否决档案）/ Architecture decision records (ADR 001–094, incl. rejected alternatives) |
 | [docs/manual-test-cases.md](docs/manual-test-cases.md) | 人工测试用例集 / Manual test cases |
 | [docs/github-bot.md](docs/github-bot.md) | facta-bot 接入指南（issue 打 label 自动修、PR 自动审查的 GitHub 接入层配置手册）/ facta-bot integration guide (GitHub entry layer: label an issue to auto-fix, auto-review PRs) |
 
