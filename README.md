@@ -10,8 +10,8 @@
 
 ![系统架构图 / System Architecture](docs/assets/architecture.png)
 
-> 完整架构说明（中文）：[docs/architecture.md](docs/architecture.md)｜99 份决策记录见 [docs/decisions/](docs/decisions/)。
-> Full architecture docs are in Chinese; 99 decision records live in [docs/decisions/](docs/decisions/).
+> 完整架构说明（中文）：[docs/architecture.md](docs/architecture.md)｜100 份决策记录见 [docs/decisions/](docs/decisions/)。
+> Full architecture docs are in Chinese; 100 decision records live in [docs/decisions/](docs/decisions/).
 
 ---
 
@@ -152,7 +152,7 @@ src/facta/
 evals/              # 离线评估：冻结题库、注入题库、judge / offline evals: frozen scenarios, injection bank, judge
 servers/            # MCP 演示服务器 / MCP demo servers
 tests/              # pytest 测试 / pytest tests
-docs/               # 架构文档与 ADR（99 份）/ architecture docs and ADRs (99)
+docs/               # 架构文档与 ADR（100 份）/ architecture docs and ADRs (100)
 data/               # 语料与运行时数据（notes/learned.example 入库，其余 gitignore）/ corpus & runtime data (notes + learned.example tracked; the rest gitignored)
 ```
 
@@ -166,8 +166,8 @@ Assembly follows a "single source of truth": CLI, Web and the GitHub bot all bui
 
 | 文档 / Doc | 内容 / Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | 系统架构（分层图、99 份 ADR 索引、在册触发信号）/ System architecture (layered diagram, index of 99 ADRs, registered trigger signals) |
-| [docs/decisions/](docs/decisions/) | 架构决策记录（ADR 001–099，含否决档案）/ Architecture decision records (ADR 001–099, incl. rejected alternatives) |
+| [docs/architecture.md](docs/architecture.md) | 系统架构（分层图、100 份 ADR 索引、在册触发信号）/ System architecture (layered diagram, index of 100 ADRs, registered trigger signals) |
+| [docs/decisions/](docs/decisions/) | 架构决策记录（ADR 001–100，含否决档案）/ Architecture decision records (ADR 001–100, incl. rejected alternatives) |
 | [docs/manual-test-cases.md](docs/manual-test-cases.md) | 人工测试用例集 / Manual test cases |
 | [docs/github-bot.md](docs/github-bot.md) | facta-bot 接入指南（issue 打 label 自动修、PR 自动审查的 GitHub 接入层配置手册）/ facta-bot integration guide (GitHub entry layer: label an issue to auto-fix, auto-review PRs) |
 
