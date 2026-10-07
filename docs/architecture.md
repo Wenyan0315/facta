@@ -1,6 +1,6 @@
 # Facta 架构图
 
-> 版本：v0.114（2026-10-06）｜随着里程碑推进持续迭代此文档
+> 版本：v0.115（2026-10-07）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [021](decisions/021-direction-decisions.md)）：个人执行助手——执行主轴 + 长期记忆 + 通用外延
 
@@ -293,6 +293,7 @@
 | [094-backlog-readme-frontend-ci](decisions/094-backlog-readme-frontend-ci.md) | R08 backlog/README/前端 CI | ①待办表就维护在 087 R 表（✅+ADR 链接，不另开文件）；②README 刷新 ADR 数量（71→94）与三档沙箱/审批说明；③CI 加前端构建闸（setup-node + `npm ci` + build + `git diff --exit-code static/fw/`，产物进 git 故可比对），不引入前端 lint；④新增 tests/test_browser.py：Playwright sync 三条冒烟（聊天页徽章 / fork 清单+1 / memory 分组标题），子进程 uvicorn 起最小 ctx（不背 assemble 重副作用），playwright 或 chromium 缺席自动 skip 并进 dev extras，CI 显式装 chromium 恒跑；负决策=不做更全 E2E、不用 pytest-playwright 插件 |
 | [095-wheel-distribution-verification](decisions/095-wheel-distribution-verification.md) | R09 wheel 分发验证 | 一次性实验记进 ADR 不造常驻测试（CI 化留触发信号=第一个真实外部用户）：干净 venv + wheel[web] + 中立 cwd mock 启动，清单五条全过；坐实并修掉 5 个分发阻断缺陷——①pyproject 补 `[tool.setuptools.package-data]` 逐层枚举 static 四层（wheel 原 0 个静态文件）；②③mcp_config/web 两处 httpx 顶层 import 改延迟导入（rag extras，mock 档起步即崩）；④⑤assemble env 门控 mkdir + 「env 覆盖下 notes 无 .md=还没写笔记的正常状态」跳过 KB/图谱同步（否则首启炸空目录防线、二次启动必崩），仓库布局 loader 两道防线一字不动；不发 PyPI（不可逆外动作+维护承诺） |
 | [096-real-task-memory-ablation-acceptance](decisions/096-real-task-memory-ablation-acceptance.md) | R06 真实任务与记忆消融验收 | 三臂同源对照（full/nomem/bash）× 3 轮 × 23 题（老 18 + 新采 r8–r12 记忆受益题）：nomem 臂只动 harness 不动场景——`_wipe_memory` 在 staging 后 spawn 前抹副本 `learned/` + `user-memory.md`（notes/向量库/图谱保留，固化写回不关），子进程零新增路径走 `_full_arm`；CLI 加 `--nomem`/`--budget`（¥20 硬顶，超顶中断批次保读数）；判定=臂有效性（r7–r12 full 须显著优于 nomem）+ 执行收益（full vs bash）；出分：full 84.1% / nomem 63.8% / bash 60.9%，r7–r12 full 14:2 完胜=记忆注入链实证起效，full vs bash +23.2pp 且更便宜更快=机制层有执行收益；全臂稳定失败 r1（外部数据源）、r12（建不出可运行 pytest 骨架）如实记录不改题 |
+| [097-next-milestone-mechanism-closeout-and-product](decisions/097-next-milestone-mechanism-closeout-and-product.md) | 下一里程碑路线图（N01–N07，待实施） | 机制收口与产品扩张并行（用户拍板）：素材是证据到期的触发信号——r1/r12 九轮稳定失败（046 的 n≥3 门槛已过）、plan-scope 围栏 9 次同类失败（丙案重审信号兑现）、spawn_step 七观测评审到期（307 触发信号）、VS Code 壳双前置清（044+095）、B-lite 撒饵前置兑现（096 出分）、tombstone 差一轮证据（N05 第二次锚定跑，预算顶 ¥10）；N01-N02=编排/预算评审 ADR（裁定可以是「不改」但须给理由）、N03=产物可运行性裁定、N04=壳最小可用（做壳不重写 UI）、N07=活清单卫生；暂缓项不解冻，实现 ADR 从 098 起引用 097/Nxx |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
