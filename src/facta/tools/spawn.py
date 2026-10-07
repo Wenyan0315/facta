@@ -319,7 +319,8 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
     if ctx.session is not None:
         board = ctx.session.plan
 
-        def _spawn_step(step_id: int, task: str, worktree: bool = False,
+        def _spawn_step(step_id: int, task: str, tools: list[str] | None = None,
+                        max_rounds: int = DEFAULT_ROUNDS, worktree: bool = False,
                         confirm=None, event=None, should_cancel=None) -> str:
             # 校验在 board.update_step 里统一做（薄包装原则，与 plan.py 工具同款）：
             # 无活跃计划 / step_id 不在计划 / 已终态，都 ValueError → 错误串回灌
@@ -329,8 +330,11 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                 return f"步骤派发被拒：{e}"
 
             # 复用 spawn_subagent 全套（噪声隔离/工具子集/worktree 隔离/确认透传/事件透传/取消透传）
+            # 099：tools/max_rounds 透传——两条派发入口参数面对称；子任务工具＝
+            # 计划白名单（自动继承）∩ 本参数，不构成第二真值源
             result_status, conclusion = spawn_subagent(
                 task, llm=sub_llm, registry=registry,
+                tools=tools, max_rounds=max_rounds,
                 worktree=worktree, ctx=ctx, confirm=confirm, on_event=event,
                 should_cancel=should_cancel,
             )
@@ -357,13 +361,22 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                 "（成功标 done、失败标 failed），无需你手动再调 update_plan_step。"
                 "用它与 make_plan 配合：先 make_plan 拆步骤，再逐个 spawn_step 执行，"
                 "最后 finish_plan 收官。step_id 是计划里的步骤编号（以最新计划为准）。"
-                "worktree=True 时子任务在独立 git worktree 沙箱里改文件，改动经确认后合回。"
+                "tools 可限定子任务能用的工具（缺省＝计划白名单内全量；本计划声明的"
+                "工具范围会自动继承并对子任务生效），max_rounds 是子任务的工具循环"
+                "预算（默认 3）。worktree=True 时子任务在独立 git worktree 沙箱里"
+                "改文件，改动经确认后合回。"
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "step_id": {"type": "integer", "description": "计划步骤编号（以最新计划为准）"},
                     "task": {"type": "string", "description": "这一步的执行任务书：做什么、产出什么结论（自包含）"},
+                    "tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "子任务可用的工具名清单（缺省＝计划白名单内全量；白名单自动继承）",
+                    },
+                    "max_rounds": {"type": "integer", "description": "子任务工具循环预算（默认 3，上限 10）"},
                     "worktree": {"type": "boolean", "description": "是否在独立 git worktree 沙箱里改文件（改代码类步骤用 true）"},
                 },
                 "required": ["step_id", "task"],
