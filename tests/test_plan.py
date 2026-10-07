@@ -15,7 +15,7 @@ from facta.core.types import Message
 from facta.memory.plan import StepStatus
 from facta.memory.store import Session, load_session, save_session
 from facta.orchestrator.agent import Agent
-from facta.orchestrator.loop import RunResult, run_turn
+from facta.orchestrator.loop import RunResult, _extended_budget, run_turn
 from facta.tools.context import ToolContext
 from facta.tools.plan import register_plan_tools
 from facta.tools.registry import ToolRegistry
@@ -360,10 +360,15 @@ def test_rounds_exhausted_closing_menu_keeps_plan_closeout_only():
     # ⇒ 它结构上无法产出 tool_calls，只能把调用吐成正文（DSML 泄漏）。
     # 修法甲轻量版：收尾段只留收官两个菜（update_plan_step + finish_plan），
     # 计划板因此能被正常关闭。
+    # N02 丙案后：1 步计划把 rounds=2 扩到 3，本测试用满扩容额度再耗尽——
+    # 收尾行为本身的断言不变，只多了一轮诚实的 in_progress 回写。
     session = Session()
     llm = ScriptedLLM([
         Message(role="assistant", content="", tool_calls=[
             _call("make_plan", {"steps": [{"title": "甲"}]}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 1, "status": "in_progress", "note": "做甲中"}),
         ]),
         Message(role="assistant", content="", tool_calls=[
             _call("update_plan_step", {"step_id": 1, "status": "done", "note": "做完了"}),
@@ -382,14 +387,14 @@ def test_rounds_exhausted_closing_menu_keeps_plan_closeout_only():
 
     assert result is RunResult.COMPLETED
     assert reply is not None and reply.content == "已收官：甲做完，无遗留。"
-    # 调用序：2 轮工具循环 + 1 次收尾（递收官两个菜）+ 1 次文字总结（撤干净）
-    assert len(llm.calls) == 4
-    closing_menu = llm.tool_menus[2]
+    # 调用序：3 轮工具循环（丙案扩容 2+1）+ 1 次收尾（递收官两个菜）+ 1 次文字总结（撤干净）
+    assert len(llm.calls) == 5
+    closing_menu = llm.tool_menus[3]
     assert closing_menu is not None
     assert [s["function"]["name"] for s in closing_menu] == [
         "update_plan_step", "finish_plan",
     ]
-    assert llm.tool_menus[3] is None          # 收官跑完即撤菜单
+    assert llm.tool_menus[4] is None          # 收官跑完即撤菜单
     assert session.plan.active is None        # 计划板真被关闭（047 反方第 4 条的遗留损害）
     assert len(session.plan.archive) == 1
 
@@ -426,6 +431,8 @@ def test_rounds_exhausted_closing_can_finalize_dangling_step():
     # 实机回归（2026-09-27 定向跑 r4）：只递 finish_plan 时模型点了它、被
     # 终态闸拒（有步骤悬空），而补终态的工具已不在菜单里 ⇒ 板子照样挂在
     # active，正是修法要消除的污染。两个菜都递，模型才能同批补终态 + 收官。
+    # N02 丙案后：2 步计划把 rounds=2 扩到 4，用满扩容额度（乙保持
+    # in_progress 不终态化）再进收尾——悬空补终态场景才轮得到收尾段。
     session = Session()
     llm = ScriptedLLM([
         Message(role="assistant", content="", tool_calls=[
@@ -433,6 +440,12 @@ def test_rounds_exhausted_closing_can_finalize_dangling_step():
         ]),
         Message(role="assistant", content="", tool_calls=[
             _call("update_plan_step", {"step_id": 1, "status": "done", "note": "做完了"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[   # 消耗扩容轮次
+            _call("update_plan_step", {"step_id": 2, "status": "in_progress", "note": "做乙中"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 2, "status": "in_progress", "note": "继续做乙"}),
         ]),
         Message(role="assistant", content="", tool_calls=[   # 收尾段：同批补终态 + 收官
             # 同批多点菜必须带 index：merge_stream_chunks 按 index 归并，
@@ -456,6 +469,54 @@ def test_rounds_exhausted_closing_can_finalize_dangling_step():
     assert len(session.plan.archive) == 1
     tool_results = [m.content for m in session.messages if m.role == "tool"]
     assert not any("尚未终态化" in r for r in tool_results)   # 没撞上终态闸
+
+
+# ---------- N02（ADR 100 丙案）：计划授权预算 ----------
+
+
+def test_make_plan_extends_rounds_budget():
+    # 丙案核心行为：4 步计划把 rounds=2 扩到 6——旧版第 2 轮就熔断进收尾，
+    # 扩容后四步全部回写完还有第 6 轮留给最终回答
+    session = Session()
+    llm = ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("make_plan", {"steps": [
+                {"title": "甲"}, {"title": "乙"}, {"title": "丙"}, {"title": "丁"},
+            ]}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 1, "status": "done", "note": "ok"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 2, "status": "done", "note": "ok"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 3, "status": "done", "note": "ok"}),
+        ]),
+        Message(role="assistant", content="", tool_calls=[
+            _call("update_plan_step", {"step_id": 4, "status": "done", "note": "ok"}),
+        ]),
+        Message(role="assistant", content="四步全部做完。"),
+    ])
+
+    result, reply = run_turn(
+        session, "做完四件事",
+        agent=_fused_agent(session, 2), llm=llm,
+        on_confirm=lambda name, args: True,   # 计划审批：批准
+    )
+
+    assert result is RunResult.COMPLETED
+    assert reply is not None and reply.content == "四步全部做完。"
+    assert len(llm.calls) == 6   # 5 轮工具循环（扩容到 6 内）+ 1 次最终回答
+    assert all(s.status is StepStatus.DONE for s in session.plan.view().steps)
+
+
+def test_extended_budget_formula_is_capped():
+    # 公式钉：base + 步数，封顶 _PLAN_ROUNDS_CAP=8——防自批大计划刷预算
+    assert _extended_budget(5, 3) == 8
+    assert _extended_budget(2, 1) == 3
+    assert _extended_budget(5, 20) == 13
+    assert _extended_budget(2, 20) == 10
 
 
 # ---------- 060：失败台账（finish_plan 落账 + make_plan 查重软拦）----------

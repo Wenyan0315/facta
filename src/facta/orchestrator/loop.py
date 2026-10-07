@@ -84,6 +84,32 @@ _MENU_PLAN_ONLY = (
 # 状态零变化、token 白烧。下限 2（=重复 1 次即熔断无意义，留给误报空间）
 _STUCK_LIMIT = max(2, int(os.environ.get("FACTA_STUCK_LIMIT", "3")))
 
+# N02（ADR 100 丙案）：计划授权预算——make_plan 落地/修订后，本回合轮次
+# 预算 = base + min(步数, 封顶)。授权点与 L2 人审重合（make_plan
+# needs_confirmation）：人批了多大的活，就给多少行动额度。封顶防自动
+# 批准环境（评测 policy=approve）下自批超大计划刷预算；056 的 llm_calls
+# 恒等式自此只在无计划场景恒等（口径修正见 ADR 100）。
+_PLAN_ROUNDS_CAP = 8
+
+
+def _extended_budget(base: int, steps: int) -> int:
+    """计划步数 → 轮次预算（N02 丙案）：base + 步数，封顶 _PLAN_ROUNDS_CAP。"""
+    return base + min(steps, _PLAN_ROUNDS_CAP)
+
+
+def _maybe_extend_budget(budget: int, base: int, reply: Message, session: Session) -> int:
+    """N02 丙案：本批若落地/修订了计划（且板上有活跃步骤）→ 扩容预算。
+
+    修订被人审拒绝时板上旧计划不变——旧计划同样过过人审，按其步数扩容
+    语义一致，不特判（ADR 100 实现节）。判定抽成独立函数同 086
+    `_needs_confirmation` 先例：run_turn 已在 PLR0912 边缘，不在这加分支。
+    """
+    if any(tc["name"] == "make_plan" for tc in reply.tool_calls or []):
+        view = session.plan.view()
+        if view is not None and view.steps:
+            return max(budget, _extended_budget(base, len(view.steps)))
+    return budget
+
 
 def _stuck_check(
     reply: Message, prev_sig: tuple[tuple[str, str], ...] | None, streak: int
@@ -407,7 +433,9 @@ def run_turn(
         prev_batch_sig: tuple[tuple[str, str], ...] | None = None
         stuck_streak = 0
         stuck = False
-        for _round in range(agent.max_tool_rounds):
+        budget = agent.max_tool_rounds   # N02 丙案：计划授权扩容的就位（见循环尾）
+        _round = 0
+        while _round < budget:
             # 协作式取消检查点①：每次模型调用前。取消则掐半截轮、本轮无产出
             if should_cancel and should_cancel():
                 trim_incomplete_round(session.messages)
@@ -457,12 +485,15 @@ def run_turn(
             # 已回灌，循环决策权归还模型（bench 三层分解：Jev 管第一步，
             # 循环内决策归模型/harness）。direct 场景模型直答即 return，到不了这里
             tools = full_tools
-        # for 循环跑满都没 break（模型点菜上瘾）→ 强制收尾
+            # N02 丙案：本批落地/修订了计划 → 按活跃步骤数扩容本回合预算
+            budget = _maybe_extend_budget(budget, agent.max_tool_rounds, reply, session)
+            _round += 1
+        # while 跑满都没 break（模型点菜上瘾）→ 强制收尾
         # （P0-6 原地踏步熔断已自带 stuck 事件，不再发 max_rounds 噪声）
         if not stuck and on_event:
             on_event("max_rounds", {})
         # 收尾段整块交给 _close_out（ADR 056：菜单与告知必须配套，见其 docstring）
-        return _close_out(   # noqa: TRY300  # 紧贴 for 收尾段陈述「保险丝收尾也入史」，不挪 else
+        return _close_out(   # noqa: TRY300  # 紧贴循环收尾段陈述「保险丝收尾也入史」，不挪 else
             llm, payload, schemas, session, agent,
             on_confirm, on_event, should_cancel, on_text,
         )
