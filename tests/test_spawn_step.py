@@ -118,6 +118,34 @@ def test_spawn_step_rejects_terminal_step():
     assert "已是终态" in out
 
 
+def test_spawn_step_forwards_tools_and_max_rounds(monkeypatch):
+    # 099 乙案：两条派发入口参数面对称——tools/max_rounds 原样透传给
+    # spawn_subagent（生产 0923 三连撞的正是这个签名缺口）
+    import facta.tools.spawn as sp
+
+    seen = {}
+
+    def fake_spawn_subagent(task, llm=None, registry=None, tools=None,
+                            max_rounds=3, worktree=False, ctx=None,
+                            confirm=None, on_event=None, should_cancel=None):
+        seen["tools"] = tools
+        seen["max_rounds"] = max_rounds
+        return sp.RunResult.COMPLETED, "子任务完成"
+
+    monkeypatch.setattr(sp, "spawn_subagent", fake_spawn_subagent)
+    registry, session = _setup(ScriptedLLM([]))
+    _make_plan(session)
+
+    out = registry.execute("spawn_step", json.dumps({
+        "step_id": 1, "task": "查资料",
+        "tools": ["list_notes", "search_notes"], "max_rounds": 5,
+    }))
+    assert seen["tools"] == ["list_notes", "search_notes"]
+    assert seen["max_rounds"] == 5
+    assert "执行完成" in out
+    assert session.plan.view().steps[0].status is StepStatus.DONE
+
+
 # ---------- 子 agent 权限 ----------
 
 

@@ -406,6 +406,10 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "对照旧计划继承），reason 必填说明修订原因。"
             "建议同时用 tools 声明本计划需要的工具范围：声明后范围外的调用会被程序"
             "直接拒绝（防中途读到的内容把任务带偏），要扩大只能再来一次本工具修订。"
+            "两条要点（099）：① 派子任务的计划，spawn_step/spawn_subagent 与子任务"
+            "要用的工具都要一并写进 tools——子 agent 继承本声明，漏写派发工具会被"
+            "程序拒绝；② 工具名必须精确拼写（如 read_notes 不是 read_note），"
+            "拼错即该工具全被拦。"
         ),
         parameters={
             "type": "object",
@@ -435,7 +439,9 @@ def register_plan_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                         "本计划要用的工具名清单，按最小必要声明（如只做读取与写笔记就写 "
                         '["read_file","search_notes","write_note"]，不必带 run_command）。'
                         "省略＝不限制；修订时省略＝沿用原范围，给空数组＝解除限制。"
-                        "计划三件（make_plan/update_plan_step/finish_plan）无需声明，恒可用。"
+                        "计划三件（make_plan/update_plan_step/finish_plan）无需声明，恒可用；"
+                        "派子任务时把 spawn_subagent（或 spawn_step）与子任务要用的工具"
+                        "一并列入——子 agent 继承本声明，漏写会被程序拒绝。"
                     ),
                 },
             },
