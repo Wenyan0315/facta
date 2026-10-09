@@ -12,6 +12,7 @@
   - **P5 账本每轮截断重写**：`begin(run_id)` 直接截断该会话的账本文件。**ponytail 裁定**——历史 run 的账本没有消费者（heal 只看最后一轮，人工排查另有 `data/audit/`），留着只会长出「清理策略 + 磁盘增长」两件不必要的事。代价是「上一轮为什么中断」查不到，需要时再改成保留 N 轮。
   - **P6 同步写，否决 038 反方 2 的「异步写」**：事件粒度（非每 token）下一轮十几次 append + 若干次原子 save，实机无感；异步队列恰好与本模块的目标矛盾——崩溃时队列里没 flush 的正是最需要的那几条。符合 038「实测开销超阈值再优化，不预先工程化」。
   - **P7 不加 HTTP resume 端点**：范围裁定。Web 侧下一次 `POST /api/runs`（`user_text=None`）自动走 heal，CLI 侧启动时 heal 一次（覆盖「上次是 Web 被杀留下的残局」这种共享 session 的情况），evalkit 直接调 `heal + run_turn`——**没有消费者需要单独的 `/resume`**。前端也没有 resume UI。等 S8 常驻进程或前端要做「一键续跑」时再开。
+    > **口径修正注记（2026-10-09，[102](102-n07-hygiene-dispositions.md)）**：本条的「Web 侧 `POST /api/runs`（`user_text=None`）」在 **HTTP 边界不成立**——`CreateRunRequest.text` 是必填纯字符串，API 层表达不了 None，空串 `""` 只会原样传给 `run_turn` 追加一条空用户消息（实测模型回「这条消息是空的」）。**续跑机制本身工作如验收记录**（`run.healed` + 副作用零重复）；真实的续跑 UX＝用户再发一条消息（如「继续」），heal 在 worker 进场时补齐悬挂轮次。`user_text=None` 只在内核/evalkit 直调路径可达。原文留档不改写。
 
 - **CLI 为什么不挂 writer**：CLI 只在轮末 `settle_session` 落盘，中途被杀时 `session.json` 仍停在上一个干净边界，压根没有残局；Ctrl+C 路径已有 `trim_incomplete_round` 收尾。所以 CLI 只在启动 heal（读账本），不在执行期写账本——写了对它自己没用（它不会产生悬挂），留着只是白付 I/O。
 
