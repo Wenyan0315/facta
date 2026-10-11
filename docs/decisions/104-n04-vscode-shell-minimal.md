@@ -58,12 +58,14 @@
 
 ## 验收（097 N04 原文）
 
-- [ ] 壳里能完成一轮真实对话（用户在 VS Code 里手动验收——安装
-  `vscode/facta-0.1.0.vsix` 或 F5 开发宿主实测后勾）。
+- [x] 壳里能完成一轮真实对话（2026-10-11 用户实测：vsix 0.1.3 装入
+  VS Code，壳内完成真实对话，流式回复正常）。
 - [x] 不造第二个前端真值源（结构审查：壳 HTML 仅一个 iframe + CSP，
-  零 UI 复刻、零自有脚本）。
-- [ ] IDE 桥两项可用：当前文件路径 + 选中区进上下文（命令编译通过，
-  VS Code 内实测后勾）。
+  零 UI 复刻；「零自有脚本」自 0.1.3 起为例外——3 行引导脚本，见执行校正）。
+- [x] IDE 桥两项可用：当前文件路径 + 选中区进上下文——桥命令实测可用
+  （剪贴板写入经 `pbpaste` 实读验证，路径 + 选中区格式正确）；粘贴进
+  壳内对话框受 VS Code webview 平台限制（Cmd+V 不达嵌套 iframe、
+  Simple Browser 同页可粘），挂 [issue #42](https://github.com/Wenyan0315/facta/issues/42)。
 
 ## 验证结果
 
@@ -79,3 +81,27 @@
   `*.vsix` 已进 .gitignore。
 - 待用户实测的两条：壳内真实对话 + 桥命令实测（上表 ①③）——安装
   方式：`code --install-extension vscode/facta-0.1.0.vsix` 或 F5。
+
+## 执行校正（2026-10-11 用户实测收口）
+
+**验收③的粘贴半边被 VS Code webview 平台限制挡住，issue #42 挂档。**
+
+- 实测链路：壳内对话框打字正常、`Cmd+V` 无反应、右键无菜单；**同一页面**
+  在 VS Code 自带 Simple Browser 里粘贴正常；系统剪贴板内容正确（`pbpaste`
+  实读桥输出 247 字节，路径 + 选中区格式无误）——桥的写入半边坐实可用。
+  完整排查记录与触发信号见
+  [issue #42](https://github.com/Wenyan0315/facta/issues/42)。
+- **三轮对齐尝试（vsix 0.1.1–0.1.3，每轮 reload 后实测，均未解锁粘贴）**：
+  ①webview 选项 `enableForms: true`；②iframe 显式 sandbox 四标志
+  （`allow-scripts allow-forms allow-same-origin allow-downloads`）；③iframe
+  URL 拼 `?id=<webview id>&vscodeBrowserReqId=<ts>` 引导脚本（webview
+  service worker 对 localhost 请求按 `?id=` 路由，照 Simple Browser 的
+  index.js 抄）。三者保留进 0.1.3（与 Simple Browser 对齐零成本，且 0.1.3
+  即实测通过验收①的版本）；根因未定位——Simple Browser 与最小壳的
+  差异不止这三处。
+- **「零自有脚本」红线破例**：壳 HTML 自 0.1.3 含 3 行引导脚本（读
+  location.search 的 id 拼给 iframe src）——性质是装载引导不是 UI，红线
+  本意「不造第二个前端真值源」未破；若 issue #42 根因定位后证明脚本
+  非必需，收回这道口。
+- 验收①③均按实测收口（③带 issue #42 注记）；vsix 现行版本 0.1.3
+  （`code --install-extension vscode/facta-0.1.3.vsix`，旧版已清理）。

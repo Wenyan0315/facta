@@ -1,6 +1,6 @@
 # Facta 架构图
 
-> 版本：v0.123（2026-10-11）｜随着里程碑推进持续迭代此文档
+> 版本：v0.124（2026-10-11）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [021](decisions/021-direction-decisions.md)）：个人执行助手——执行主轴 + 长期记忆 + 通用外延
 > 产品验证顺序（[098](decisions/098-product-prototype-priorities.md)，原型待实施）：开发方案评审与范围控制 → 项目 Brief 与历史决定复用 → 源码联动讲解；Facta 作为能力底座，先验证自用收益。
@@ -301,7 +301,7 @@
 | [101-artifact-runnability-no-seam-check](decisions/101-artifact-runnability-no-seam-check.md) | N03 产物可运行性裁定 | 确认缝不加产物可运行性校验——n=9 全红早于 099/100，两机制改动后 r12 连续两次通过（单写薄利形状与 R06 首红同型＝单发命中率），046 不为不再复现的形状建机制；缝的定位不符（危险操作裁决≠产物 QA，域耦合+执行未审产物+骨架假红三重代价）；量尺已在（verify+judge rubric+用户目检）；登记活清单挂双触发信号——r12 型再连续 ≥3 轮红或生产出现「声称建好跑不起来」报告时重议，第一候选是最轻 teaching 不是缝校验 |
 | [102-n07-hygiene-dispositions](decisions/102-n07-hygiene-dispositions.md) | N07 活清单卫生三件处置 | ① TODOS_PATH（325 条）标结案——090 已实际修掉（`assemble.py:76` 走 `DATA_ROOT`），补文档滞后；② 续跑口径（324 条）修正——architecture server 行改为真实 UX（再发一条消息 + heal 补齐），ADR 040 P7 加口径修正注记原文留档；③ MCP 可视化配置面板（用户拍板）排下一里程碑——不阻塞 N04/D01 双线，触发信号沿用（手动编辑 mcp_servers.json 出现真实摩擦或产品线空位）；活清单两条结案 + 待讨论条定档 |
 | [103-n05-lme-second-anchor-round](decisions/103-n05-lme-second-anchor-round.md) | N05 LongMemEval 第二轮锚定 | knowledge-update 未垫底（首轮 2/6 垫底 → 二轮 5/6 并列第二高），「连续两轮垫底」门槛正确过滤单轮 alarm——不立项 tombstone/四态、挂回信号（再垫底即与下次连续重计）；总量稳定（25/36→23/36）但分题型 n=6 摆动 ±3 题＝单轮垫底读数噪声大，正是门槛设计的原因；hit@3 两轮全程 83–100% 加固「检索不是瓶颈」；实付 ¥0.345（含断网废轮 ¥0.035）远低于 ¥10 顶；053 的 tombstone 语义登记维持（另途触发=memory_add 开闸前置） |
-| [104-n04-vscode-shell-minimal](decisions/104-n04-vscode-shell-minimal.md) | N04 VS Code 壳最小可用 | 做壳不重写 UI：`vscode/` 扩展=生命周期（探活→拉起→回收）+ 单跳 iframe 壳（webview 结构上不能是远程 origin，iframe src=服务地址保住页内 app 同源执行——评审③「不套 iframe」意图的实现路径）+ 剪贴板桥（评审裁定的零服务端方案：postMessage 注入被跨源挡死）；服务端仅加 `FACTA_SERVER_PORT`（评审②用户拍板可配端口）+ `FACTA_DATA_DIR` 注入（评审①，071 通道）；880 passed + 端口 8123 端到端 + tsc 零错误 + .vsix 9.48KB 打包；壳内真实对话与桥命令待用户实测后勾验收 |
+| [104-n04-vscode-shell-minimal](decisions/104-n04-vscode-shell-minimal.md) | N04 VS Code 壳最小可用 | 做壳不重写 UI：`vscode/` 扩展=生命周期（探活→拉起→回收）+ 单跳 iframe 壳（webview 结构上不能是远程 origin，iframe src=服务地址保住页内 app 同源执行——评审③「不套 iframe」意图的实现路径）+ 剪贴板桥（评审裁定的零服务端方案：postMessage 注入被跨源挡死）；服务端仅加 `FACTA_SERVER_PORT`（评审②用户拍板可配端口）+ `FACTA_DATA_DIR` 注入（评审①，071 通道）；880 passed + 端口 8123 端到端 + tsc 零错误 + .vsix 打包；**用户实测收口（2026-10-11）**：壳内真实对话完成、桥命令可用（pbpaste 实读验证）；粘贴进壳内对话框受 VS Code webview 平台限制（Cmd+V 不达嵌套 iframe、Simple Browser 同页可粘）挂 issue #42——三轮对齐（enableForms/显式 sandbox/?id= 引导脚本）保留进 vsix 0.1.3，「零自有脚本」为例外开 3 行引导口 |
 | [105-n06-b-lite-bait-article](decisions/105-n06-b-lite-bait-article.md) | N06 B-lite 撒饵文章 | 338 条执行件：设计文章《为什么我的 MCP 记忆服务器只有两个只读工具》落 `docs/posts/`（先仓库后外发第一段，外发挂后续）；用户两点裁定——渠道=先仓库后外发、署名=项目名 facta（个人隐身，仓库链接为唯一信号②回流通道）；内容红线=实验性出口定语+无 API 承诺+零隐私；诚实撒饵自白（第 7 节明说在等第二个用户）；纯文档案零代码改动 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
