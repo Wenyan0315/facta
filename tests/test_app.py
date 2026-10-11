@@ -894,3 +894,15 @@ def test_graph_rebuild_forces_full_resync(tmp_path, monkeypatch):
     assert set(body["report"]) == {"extracted", "unchanged", "removed", "skipped", "failed"}
     # force 清空后失败篇不记指纹 → 指纹保持空（下次 rebuild 会再试）
     assert ctx.graph.note_hashes == {}
+
+
+# ---------- N04（ADR 104）：服务端口可配 ----------
+
+
+def test_server_port_env_overridable(monkeypatch):
+    # D01 评审②裁定「支持可配端口」：FACTA_SERVER_PORT env，缺省 8000
+    from facta.server.__main__ import server_port
+
+    assert server_port() == 8000   # 缺省不变（与既有文档/README 口径一致）
+    monkeypatch.setenv("FACTA_SERVER_PORT", "8123")
+    assert server_port() == 8123

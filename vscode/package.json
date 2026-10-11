@@ -1,0 +1,48 @@
+{
+  "name": "facta",
+  "displayName": "Facta",
+  "description": "Facta 个人 AI Agent 的 VS Code 宿主——连接本地 facta.server，界面原样复用（做壳不重写 UI）",
+  "version": "0.1.0",
+  "publisher": "facta",
+  "license": "MIT",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onCommand:facta.open"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "facta.open", "title": "打开面板", "category": "Facta" },
+      { "command": "facta.attachContext", "title": "复制当前文件/选中区上下文", "category": "Facta" }
+    ],
+    "configuration": {
+      "title": "Facta",
+      "properties": {
+        "facta.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "扩展拉起或连接的服务地址（含端口；拉服务时端口经 FACTA_SERVER_PORT 注入）"
+        },
+        "facta.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "装有 facta 的 Python 解释器（服务未运行时用它拉起 python -m facta.server）"
+        },
+        "facta.dataDir": {
+          "type": "string",
+          "default": "",
+          "description": "数据目录（缺省空＝服务端自回落；配置后经 FACTA_DATA_DIR 注入）"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

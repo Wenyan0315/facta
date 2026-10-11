@@ -20,12 +20,21 @@ from facta.orchestrator.assemble import assemble
 from facta.server.app import create_app
 
 
+def server_port() -> int:
+    """D01 评审②（ADR 104）：端口可配——FACTA_SERVER_PORT env，缺省 8000。
+
+    VS Code 壳拉子进程时按 serverUrl 解析出的端口注入；host 维持只绑
+    127.0.0.1（安全默认不动）。
+    """
+    return int(os.environ.get("FACTA_SERVER_PORT", "8000"))
+
+
 def main() -> None:
     load_dotenv()   # 先于 provider 读取：.env 里的 FACTA_PROVIDER 必须对本进程生效
     provider = os.environ.get("FACTA_PROVIDER") or os.environ.get("AGENT_PROVIDER", "deepseek")
     ctx = assemble(provider)
     app = create_app(ctx)
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=server_port())
 
 
 if __name__ == "__main__":
