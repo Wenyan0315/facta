@@ -19,6 +19,7 @@ export default defineConfig({
         memory: resolve(import.meta.dirname, "memory.html"),
         graph: resolve(import.meta.dirname, "graph.html"),
         notes: resolve(import.meta.dirname, "notes.html"),
+        mcp: resolve(import.meta.dirname, "mcp.html"),
       },
       output: {
         entryFileNames: "assets/[name].js",

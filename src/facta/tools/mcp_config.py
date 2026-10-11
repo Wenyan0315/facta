@@ -27,7 +27,7 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from facta.paths import WORKSPACE_ROOT
 from facta.tools.mcp_client import McpClient, McpError, register_mcp_tools
@@ -89,9 +89,13 @@ def load_server_specs(path: Path) -> list[ServerSpec]:
     return specs
 
 
-def assemble_servers(registry: ToolRegistry, specs: list[ServerSpec]) -> list:
-    """按清单一台台装配：成功返回客户端（调用方负责 finally 关闭）。"""
-    clients = []
+def assemble_servers(registry: ToolRegistry, specs: list[ServerSpec]) -> list[tuple[Any, str]]:
+    """按清单一台台装配：成功返回 (client, name) 对（调用方负责 finally 关闭）。
+
+    名字跟着客户端走（106）：MCP 面板要对照「文件清单 vs 运行时」，哪些
+    服务器真的拉起来了只有这个循环知道——AppContext 据此记 mcp_active。
+    """
+    clients: list[tuple[Any, str]] = []
     for spec in specs:
         if not spec.enabled:
             logger.info("MCP 服务器已禁用，跳过：%s", spec.name)
@@ -133,6 +137,6 @@ def assemble_servers(registry: ToolRegistry, specs: list[ServerSpec]) -> list:
             logger.warning("MCP 服务器登记失败，跳过：%s（%s）", spec.name, exc)
             client.close()
             continue
-        clients.append(client)
+        clients.append((client, spec.name))
         logger.info("MCP 服务器已接入：%s", spec.name)
     return clients

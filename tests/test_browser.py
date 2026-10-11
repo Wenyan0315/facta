@@ -144,3 +144,11 @@ def test_memory_page_lists_groups(server, browser):
     page.wait_for_selector("h3.memory-group-title")
     assert "决定与理由" in page.inner_text("body")
     page.close()
+
+
+def test_mcp_page_loads_manifest(server, browser):
+    """106 第五入口：MCP 面板加载出清单信息（断言常驻文案，不依赖清单内容）。"""
+    page = browser.new_page()
+    page.goto(f"{server}/mcp")
+    page.wait_for_function("document.querySelector('#mcp-root').textContent.includes('清单文件')")
+    page.close()

@@ -65,7 +65,7 @@ def test_assemble_url_server_into_registry(tmp_path):
     try:
         path = _write(tmp_path, {"servers": [{"name": "demo", "url": url}]})
         registry = ToolRegistry()
-        clients = assemble_servers(registry, load_server_specs(path))
+        clients = [c for c, _ in assemble_servers(registry, load_server_specs(path))]
         try:
             assert "demo__echo_server" in registry.names()
             assert registry.execute("demo__echo_server", json.dumps({"text": "hi"})) == json.dumps({"text": "hi"})
@@ -82,7 +82,7 @@ def test_dead_server_does_not_block_others(tmp_path, caplog):
     path = _write(tmp_path, {"servers": [{"name": "ghost", "command": ["/definitely/not/a/binary"]}]})
     registry = ToolRegistry()
     with caplog.at_level(logging.WARNING):
-        clients = assemble_servers(registry, load_server_specs(path))
+        clients = [c for c, _ in assemble_servers(registry, load_server_specs(path))]
     assert clients == []
     assert "ghost" not in registry.names()
     assert "失败" in caplog.text
@@ -93,10 +93,13 @@ def test_python_placeholder_resolves_to_current_interpreter(tmp_path):
     notes = Path(__file__).resolve().parents[1] / "servers" / "notes_server.py"
     path = _write(tmp_path, {"servers": [{"name": "notes", "command": ["{python}", str(notes)]}]})
     registry = ToolRegistry()
-    clients = assemble_servers(registry, load_server_specs(path))
+    pairs = assemble_servers(registry, load_server_specs(path))
+    clients = [c for c, _ in pairs]
     try:
         assert "notes__get_server_time" in registry.names()
         assert registry.execute("notes__get_server_time", "{}")
+        # 106：名字跟着客户端走——面板 active 名单的数据源
+        assert [n for _, n in pairs] == ["notes"]
     finally:
         for c in clients:
             c.close()
@@ -116,7 +119,7 @@ def test_name_collision_idempotent_and_skipped(tmp_path):
     try:
         path = _write(tmp_path, {"servers": [{"name": "a", "url": url, "prefix": "same__"}, {"name": "b", "url": url, "prefix": "same__"}]})
         registry = ToolRegistry()
-        clients = assemble_servers(registry, load_server_specs(path))
+        clients = [c for c, _ in assemble_servers(registry, load_server_specs(path))]
         try:
             assert len(clients) == 1   # 第一个进了，第二个撞前缀被拒
             names = registry.names()
