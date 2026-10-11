@@ -129,6 +129,9 @@ class AppContext:
     build_agent: Callable[[Session], Agent]
     todos: TodoStore    # 个人待办仓库（2026-09-17）：工具与 Web API 共用同一实例
     mcp_clients: list = field(default_factory=list)   # 最终退出时统一 close，不留孤儿进程
+    # 106：已实际接入的服务器名（面板「文件 vs 运行时」对照的运行时半边；
+    # 装配在 assemble 一次完成，改清单要重启才反映到这里）
+    mcp_active: list[str] = field(default_factory=list)
     graph: GraphStore = field(default_factory=GraphStore)   # S7a/S7b 知识图谱（活对象：查询原语与图表面板共用最新图）
 
 
@@ -421,7 +424,9 @@ def assemble(provider: str) -> AppContext:
     except ValueError as e:
         logger.warning("MCP 配置读取失败，本轮无外部工具：%s", e)
         specs = []
-    mcp_clients = assemble_servers(mother, specs)
+    pairs = assemble_servers(mother, specs)
+    mcp_clients = [client for client, _ in pairs]
+    mcp_active = [name for _, name in pairs]   # 106：面板对照用，见 AppContext 注记
     logger.info("全局工具（%d 个）：%s", len(mother.names()), ", ".join(mother.names()))
 
     def session_registry(session: Session) -> ToolRegistry:
@@ -502,5 +507,6 @@ def assemble(provider: str) -> AppContext:
         build_agent=build_agent,
         todos=todos,
         mcp_clients=mcp_clients,
+        mcp_active=mcp_active,
         graph=graph,   # S7b：图谱挂上 AppContext——surface 面板端点在 server 层读
     )

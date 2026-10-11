@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -42,7 +43,7 @@ from facta.memory.store import Session
 from facta.orchestrator.assemble import AppContext, settle_session
 from facta.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
 from facta.orchestrator.loop import RunResult, run_turn
-from facta.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, user_memory_path
+from facta.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, WORKSPACE_ROOT, user_memory_path
 from facta.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -52,6 +53,7 @@ from facta.server.run_store import (
     RunStore,
 )
 from facta.server.sse import encode_heartbeat, encode_sse
+from facta.tools.mcp_config import ServerSpec, load_server_specs
 from facta.tools.notes import record_provenance, resolve_note_path
 from facta.tools.registry import approval_policy
 from facta.tools.sandbox import detect_backend, sandbox_level
@@ -101,6 +103,10 @@ def _learned_path(category: str) -> Path:
 # 知识语料面板（042）单篇读取上限：超限给明确错误，不把浏览器拖死。
 # notes 是 agent 写的 markdown，正常几百字到几万字；1MB 已经是事故级。
 NOTE_MAX_BYTES = 1_000_000
+
+# MCP 配置面板（106）管理的清单文件：与 assemble 的默认读位同源
+# （MCP_SERVERS env 只影响「当前进程装配」，面板恒管仓库默认文件）。
+MANAGED_MCP_PATH = WORKSPACE_ROOT / "mcp_servers.json"
 
 
 def _note_path(name: str) -> Path:
@@ -175,6 +181,22 @@ class NoteSaveRequest(BaseModel):
 
     content: str
     base_hash: str
+
+
+class McpServerBody(BaseModel):
+    """MCP 服务器新增/编辑的请求体（106）。
+
+    name 由 URL 定位（条目身份，不收改名）；headers 不收——密钥不经 UI，
+    PUT 时服务端保留原条目的值（新条目不带 headers）。command/url 二选一
+    由 load_server_specs 在落盘前校验（写侧不变式，见 _mcp_write）。
+    """
+
+    command: list[str] | None = None
+    url: str | None = None
+    prefix: str = ""
+    timeout: float = 30.0
+    enabled: bool = True
+    base_hash: str   # GET /api/mcp 拿到的整文件 hash（乐观锁）
 
 
 def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
@@ -668,6 +690,129 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             "unchanged": report.unchanged,
         }
 
+    # MCP 配置面板（106）：mcp_servers.json 的读写 API。面板管文件不管进程——
+    # MCP 装配在 assemble()（进程启动一次），文件与运行时的差异由「servers vs
+    # ctx.mcp_active」对照呈现（前端标「待重启生效」）。
+    # 两条密钥护栏：MCP_SERVERS env 指向的个人文件不伺服读写（面板恒管仓库
+    # 默认文件）；headers 值不出现在任何响应里（GET 只报 has_headers，写侧
+    # 服务端保留原值——含密钥的配置从面板这条路写不进仓库文件）。
+    def _mcp_load() -> tuple[str, list[ServerSpec] | None, str | None]:
+        """读清单并校验。返回 (原文, specs, 解析错误)——文件不存在 → ("", [], None)。"""
+        try:
+            text = MANAGED_MCP_PATH.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return "", [], None
+        try:
+            return text, load_server_specs(MANAGED_MCP_PATH), None
+        except ValueError as exc:
+            return text, None, str(exc)
+
+    def _mcp_write(payload: dict) -> str:
+        """新清单先过 load_server_specs 校验再原子落盘，返回新内容的 hash。
+
+        写侧不变式（106）：校验失败的请求整体拒绝，磁盘上永远不会有让下一次
+        启动走「MCP 工具静默全消失」分支的坏清单（S8a 边界①记过的最难查形状）。
+        """
+        text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        tmp = MANAGED_MCP_PATH.with_name(MANAGED_MCP_PATH.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        try:
+            load_server_specs(tmp)
+        except ValueError as exc:
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(400, str(exc)) from None
+        os.replace(tmp, MANAGED_MCP_PATH)
+        return file_hash(text)
+
+    def _mcp_raw(text: str) -> list[dict]:
+        """清单原文 → 原始条目（保留 headers 等未暴露字段，写侧 merge 用）。"""
+        return json.loads(text)["servers"] if text else []
+
+    def _mcp_entry(name: str, body: McpServerBody, headers: dict | None) -> dict:
+        """请求体 → 清单条目。None/空不落键（读侧缺省逻辑补）；headers 原样保留。"""
+        entry: dict = {"name": name}
+        if body.command is not None:
+            entry["command"] = body.command
+        if body.url is not None:
+            entry["url"] = body.url
+        if body.prefix:
+            entry["prefix"] = body.prefix
+        entry["timeout"] = body.timeout
+        entry["enabled"] = body.enabled
+        if headers:
+            entry["headers"] = headers
+        return entry
+
+    def _mcp_check() -> tuple[str, list[dict]]:
+        """读清单：损坏拒写（400）。返回 (原文, 原始条目)。"""
+        text, _, parse_error = _mcp_load()
+        if parse_error is not None:
+            raise HTTPException(
+                400, f"清单文件已损坏，面板无法安全写入：{parse_error}（请手修或删除该文件）"
+            ) from None
+        return text, _mcp_raw(text)
+
+    def _mcp_lock(text: str, base_hash: str) -> None:
+        """整文件乐观锁（409，042 先例）：挡手编与面板的盲覆盖。"""
+        if file_hash(text) != base_hash:
+            raise HTTPException(409, "清单已被外部修改（可能手编过），请重新载入再改")
+
+    @app.get("/api/mcp")
+    def mcp_status():
+        env_path = os.environ.get("MCP_SERVERS")
+        text, specs, parse_error = _mcp_load()
+        return {
+            "managed_path": str(MANAGED_MCP_PATH),
+            "effective_path": env_path or str(MANAGED_MCP_PATH),
+            "env_override": bool(env_path),
+            "hash": file_hash(text),
+            "parse_error": parse_error,
+            "servers": [
+                {
+                    "name": s.name,
+                    "command": s.command,
+                    "url": s.url,
+                    "prefix": s.prefix,
+                    "timeout": s.timeout,
+                    "enabled": s.enabled,
+                    "has_headers": bool(s.headers),
+                }
+                for s in (specs or [])
+            ],
+            # 运行时半边：assemble 拉起时记下的名单（改文件不重启，这里不变）
+            "active": list(ctx.mcp_active),
+        }
+
+    @app.post("/api/mcp/servers/{name}", status_code=201)
+    def mcp_add(name: str, body: McpServerBody):
+        text, raw = _mcp_check()
+        _mcp_lock(text, body.base_hash)
+        if any(s.get("name") == name for s in raw):
+            raise HTTPException(409, f"已有同名服务器 {name}（prefix 会撞车，请换名）")
+        raw.append(_mcp_entry(name, body, headers=None))   # 新条目不带 headers（密钥不经 UI）
+        return {"ok": True, "hash": _mcp_write({"servers": raw})}
+
+    @app.put("/api/mcp/servers/{name}")
+    def mcp_update(name: str, body: McpServerBody):
+        # 404 先于 409：条目没了就是没了，「重新载入」救不了不存在的条目
+        text, raw = _mcp_check()
+        old = next((s for s in raw if s.get("name") == name), None)
+        if old is None:
+            raise HTTPException(404, f"没有名为 {name} 的服务器")
+        _mcp_lock(text, body.base_hash)
+        # 除 headers 外全量替换（name 是条目身份，不收改名的 PUT）
+        raw[raw.index(old)] = _mcp_entry(name, body, headers=old.get("headers"))
+        return {"ok": True, "hash": _mcp_write({"servers": raw})}
+
+    @app.delete("/api/mcp/servers/{name}")
+    def mcp_delete(name: str, base_hash: str = Query(...)):
+        text, raw = _mcp_check()
+        if not any(s.get("name") == name for s in raw):
+            raise HTTPException(404, f"没有名为 {name} 的服务器")
+        _mcp_lock(text, base_hash)
+        raw = [s for s in raw if s.get("name") != name]
+        return {"ok": True, "hash": _mcp_write({"servers": raw})}
+
     # 知识图谱面板（S7b）：图数据 + 重建图谱。图是 notes 的结构化投影
     # （知识资产），面板一次拉全量——图小，搜索定位/路径高亮/类型过滤
     # 全在前端内存算，无需额外交互端点。「重建图谱」= force 全量重抽
@@ -723,6 +868,11 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     @app.get("/notes")
     def notes_page():
         return FileResponse(static_dir / "fw" / "notes.html")
+
+    # MCP 配置面板页面（FW 第五入口，106）：与四入口同款伺服
+    @app.get("/mcp")
+    def mcp_page():
+        return FileResponse(static_dir / "fw" / "mcp.html")
 
     # 前端静态文件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）。
     # no-cache（每次 revalidate，未变时 304 也快）：浏览器对无 Cache-Control 的

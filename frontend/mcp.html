@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCP 配置 · Facta</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <button id="new-session" onclick="location.href='/'">← 返回对话</button>
+      <span class="muted" style="font-size:12px;">MCP 服务器清单（mcp_servers.json）——改完重启服务生效</span>
+    </div>
+    <ul id="session-list"><li class="muted">MCP 配置</li></ul>
+  </aside>
+
+  <main id="chat">
+    <div id="messages">
+      <h2 class="tasks-title">MCP 配置</h2>
+      <div id="mcp-root"></div>
+    </div>
+  </main>
+
+  <script type="module" src="/src/mcp/main.jsx"></script>
+</body>
+</html>
