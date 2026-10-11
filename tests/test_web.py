@@ -11,6 +11,7 @@ import pytest
 from facta.tools.context import ToolContext
 from facta.tools.registry import ToolRegistry
 from facta.tools.web import (
+    BochaSearch,
     _fetch_web,
     _parse_bocha,
     _web_search,
@@ -98,6 +99,35 @@ def test_parse_bocha_normalizes_response():
 def test_parse_bocha_empty_payload():
     assert _parse_bocha({}) == []
     assert _parse_bocha({"data": {}}) == []
+
+
+def test_bocha_search_preserves_unlimited_freshness(monkeypatch):
+    import httpx
+
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(kwargs["json"])
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={"data": {"webPages": {"value": []}}},
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert BochaSearch("offline-test-key").search("历史事件") == []
+    assert calls == [{
+        "query": "历史事件", "count": 5, "summary": True, "freshness": "noLimit",
+    }]
+
+
+@pytest.mark.parametrize("summary", [None, "", "   "])
+def test_parse_bocha_empty_summary_formats_date_without_parentheses(summary):
+    payload = {"data": {"webPages": {"value": [{
+        "name": "仅日期", "url": "https://example.invalid/date",
+        "summary": summary, "datePublished": "2026-01-01T12:00:00Z",
+    }]}}}
+    assert _parse_bocha(payload)[0]["content"] == "发布：2026-01-01"
 
 
 def test_get_web_search_priority(monkeypatch):
