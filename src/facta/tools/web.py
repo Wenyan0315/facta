@@ -139,7 +139,7 @@ def _parse_bocha(payload: dict) -> list[dict]:
         content = (v.get("summary") or v.get("snippet") or "").strip()
         date = (v.get("datePublished") or "")[:10]
         if date:
-            content = f"{content}（发布：{date}）"
+            content = f"{content}（发布：{date}）" if content else f"发布：{date}"
         out.append({"title": v.get("name", ""), "url": v.get("url", ""), "content": content})
     return out
 
@@ -149,6 +149,10 @@ class BochaSearch:
 
     与 Tavily 同姿势：httpx 手写 REST、key 走环境变量。默认拒绝、不做语言
     路由——双 Provider 分发的触发信号是实测出语言偏好差异，届时再加包装层。
+
+    summary=True 要长摘要；freshness=noLimit 不限时间——时间过滤的决策权
+    留给模型（它知道用户问的是「今天天气」还是「历史事件」）。触发信号：
+    模型常带时间词查询却拿不到新结果时，再把 freshness 暴露成工具参数。
     """
 
     name = "bocha"
@@ -161,7 +165,7 @@ class BochaSearch:
         resp = httpx.post(
             BOCHA_API_URL,
             headers={"Authorization": f"Bearer {self._key}"},
-            json={"query": query, "count": 5, "summary": True},
+            json={"query": query, "count": 5, "summary": True, "freshness": "noLimit"},
             timeout=SEARCH_TIMEOUT,
         )
         resp.raise_for_status()
