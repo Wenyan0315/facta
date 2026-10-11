@@ -66,3 +66,8 @@ frontend/node_modules/
 # 架构图构建过程产物（architecture.build.py 一跑即重新生成）
 docs/assets/architecture.html
 docs/assets/architecture.imagegen.png
+
+# N04（ADR 104）：VS Code 扩展的构建产物与依赖（源码入库，产物本地生成）
+vscode/node_modules/
+vscode/out/
+vscode/*.vsix
