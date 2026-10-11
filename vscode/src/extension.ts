@@ -69,7 +69,13 @@ function shellHtml(url: string): string {
   // VS Code 的 webview 结构上不能直接是远程 origin（HTML 串在
   // vscode-webview:// 沙箱里执行）——单跳 iframe src=服务地址让聊天 app
   // 在服务 origin 内跑，页内 EventSource 与 /api/* 同源不受损；CSP 只
-  // 放行该 frame 源。壳内零自有脚本、零 UI 复刻（不造第二个前端真值源）。
+  // 放行该 frame 源。壳内零 UI 复刻（不造第二个前端真值源）。
+  //
+  // 引导脚本（3 行，为「壳内可粘贴」而破「零自有脚本」口，照 Simple Browser
+  // 的 iframe 装载方式对齐）：webview 的 service worker 会接管所有指向
+  // localhost/127.0.0.1 的请求并按请求方 URL 里的 ?id= 识别所属 webview
+  // （service-worker.js getWebviewIdForClient）；裸 URL 的 iframe 与
+  // Simple Browser（id + 防缓存时间戳）路由形态不同，实测粘贴被吞。
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -77,7 +83,15 @@ function shellHtml(url: string): string {
 <meta http-equiv="Content-Security-Policy" content="frame-src ${url};">
 <style>html,body,iframe{margin:0;padding:0;height:100%;width:100%;border:0;display:block}</style>
 </head>
-<body><iframe src="${url}"></iframe></body>
+<body>
+<iframe sandbox="allow-scripts allow-forms allow-same-origin allow-downloads"></iframe>
+<script>
+  const u = new URL("${url}");
+  u.searchParams.set("id", new URLSearchParams(location.search).get("id") || "");
+  u.searchParams.set("vscodeBrowserReqId", String(Date.now()));
+  document.querySelector("iframe").src = u.toString();
+</script>
+</body>
 </html>`;
 }
 
@@ -97,8 +111,12 @@ export function activate(context: vscode.ExtensionContext): void {
         "facta",
         "Facta",
         vscode.ViewColumn.Beside,
-        // iframe 内的聊天页自带脚本（app.js/SSE），宿主壳自身零脚本
-        { enableScripts: true, retainContextWhenHidden: true },
+        // iframe 内的聊天页自带脚本（app.js/SSE），宿主壳自身零脚本；
+        // enableForms：webview 沙箱的 allow-forms 标志会被嵌套 iframe 继承——
+        // 不开则壳内输入框打字正常但 Cmd+V 粘贴被沙箱吞掉（实测对照：VS Code
+        // 自带 Simple Browser 开了此标志、粘贴可用，2026-10-11 实测定位）；
+        // 嵌套 iframe 的显式 sandbox 四标志同样照抄 Simple Browser（对齐后才可粘）
+        { enableScripts: true, enableForms: true, retainContextWhenHidden: true },
       );
       panel.webview.html = shellHtml(url);
     }),
