@@ -5,6 +5,9 @@ const inputEl = document.getElementById("input");
 const cancelEl = document.getElementById("cancel");
 const sessionListEl = document.getElementById("session-list");
 const newSessionBtn = document.getElementById("new-session");
+const ideCtxEl = document.getElementById("ide-ctx");
+
+let ideCtx = null;            // 服务端 IDE 信箱现值（null = 空槽）；「所见即所送」的唯一凭据
 
 let currentSessionId = null;  // 「当前会话」是前端概念（S8a）：后端不再有 active 特例
 let currentRunId = null;      // 可见会话的 in-flight Run；切走即脱钩，Run 在后端照跑
@@ -261,6 +264,10 @@ async function send() {
 
   // 省略 session_id = 后端新开一段对话，真实 id 从响应里认
   const payload = currentSessionId ? { text, session_id: currentSessionId } : { text };
+  // 「所见即所送」（ADR 107）：只有 chip 真的显示过，这一轮才认领信箱。
+  // 判据是本地 ideCtx 而不是再 GET 一次——用户点过「×」之后哪怕信箱又被
+  // 投了新件，也不能偷偷带上。
+  payload.ide_context = ideCtx !== null;
   let resp;
   try {
     resp = await fetch("/api/runs", {
@@ -284,6 +291,9 @@ async function send() {
   const data = await resp.json();
   currentRunId = data.run_id;
   currentSessionId = data.session_id;
+  // 认领成功 ⇒ 信箱已空，chip 必须跟着消失（只在真认领过时清：发送期间
+  // focus 又拉到的新件属于下一轮，不能被这次清掉）
+  if (payload.ide_context) setIdeCtx(null);
   setupEventSource(data.run_id, turn);
   loadSessions();   // 新会话入清单 / 清单标题跟上
 }
@@ -622,6 +632,41 @@ async function loadEnvBadge() {
       `沙箱 ${st.sandbox_level}/${st.sandbox_backend ?? "无"} · 确认 ${st.approval_policy}`;
   } catch (_) { /* 服务没起来或端点缺席：徽章留空 */ }
 }
+
+// IDE 上下文 chip（ADR 107）：VS Code 壳把「当前文件 + 选中区」投进服务端
+// 单槽信箱，这里读出来给用户看，让他知道这一轮会带上什么。
+// 拉取时机 = focus（用户从 IDE 切回来那一刻）。不轮询——全站零轮询是既有
+// 口径；也不用 SSE 推——它严格 per-Run，结构性承载不了「发送前」的全局通知。
+async function loadIdeContext() {
+  try {
+    setIdeCtx(await (await fetch("/api/ide/context")).json());
+  } catch (_) { /* 信箱端点缺席或服务没起来：chip 保持现状，不挡聊天 */ }
+}
+
+function setIdeCtx(ctx) {
+  ideCtx = ctx;
+  ideCtxEl.innerHTML = "";
+  if (!ctx) { ideCtxEl.classList.add("hidden"); return; }
+  const label = document.createElement("span");
+  label.textContent = `📎 正在看 ${ctx.path}` + (ctx.lines ? `（选中 ${ctx.lines} 行）` : "");
+  const drop = document.createElement("button");
+  drop.type = "button";
+  drop.textContent = "×";
+  drop.title = "丢弃这份 IDE 上下文（这一轮就不带了）";
+  drop.addEventListener("click", dropIdeContext);
+  ideCtxEl.append(label, drop);
+  ideCtxEl.classList.remove("hidden");
+}
+
+async function dropIdeContext() {
+  setIdeCtx(null);   // 先清 UI：chip 一消失，下一轮就不认领信箱了
+  try {
+    await fetch("/api/ide/context", { method: "DELETE" });
+  } catch (_) { /* 删失败也只是信箱里留着一份没人认领的件 */ }
+}
+
+inputEl.addEventListener("focus", loadIdeContext);
+window.addEventListener("focus", loadIdeContext);
 
 // 启动：默认落在最近改动的会话（清单已按最后修改时刻降序）——后端不再有
 // active 概念，「打开看到哪一段」纯粹是前端的选择。

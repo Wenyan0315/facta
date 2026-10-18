@@ -1,6 +1,6 @@
 // N04（ADR 104）：VS Code 壳最小可用。本文件是「宿主」不是「UI」——
 // 界面 100% 由 facta.server 伺服（单跳 iframe），这里只有三件事：
-// 服务生命周期（拉起/探活/回收）、单跳 iframe 壳、剪贴板 IDE 桥。
+// 服务生命周期（拉起/探活/回收）、单跳 iframe 壳、IDE 上下文直投（107）。
 // 三条 D01 评审裁定落点：①数据目录只经 FACTA_DATA_DIR env 注入；
 // ②端口经 FACTA_SERVER_PORT 注入（serverUrl 语义=拉起或连接的地址）；
 // ③单跳 iframe 保住页内 app 的同源执行（见 shellHtml 注释）。
@@ -120,23 +120,38 @@ export function activate(context: vscode.ExtensionContext): void {
       );
       panel.webview.html = shellHtml(url);
     }),
-    // IDE 桥（剪贴板模式，ADR 104 用户拍板）：跨源 DOM 写入不可行 +
-    // 服务器零改动红线 ⇒ 复制格式化上下文，用户粘贴到对话框开头
+    // IDE 桥（ADR 107，推翻 104 的剪贴板模式）：直投服务端单槽信箱。
+    // 剪贴板路线在壳内走不通（issue #42：Cmd+V 不达嵌套 iframe，三轮对齐
+    // 未解锁），而且它总要用户多做一步；改成 POST 之后服务端在发送那一刻
+    // 注入，粘贴不再是链路的一环。
     vscode.commands.registerCommand("facta.attachContext", async () => {
       const ed = vscode.window.activeTextEditor;
       if (!ed) {
         vscode.window.showInformationMessage("没有打开的活动编辑器");
         return;
       }
+      // path 照实投不加工：asRelativePath 在工作区内给相对路径，否则原样
+      // 返回绝对路径——壳里常打开别的项目，两种都得能用（107「不做围栏」）
       const path = vscode.workspace.asRelativePath(ed.document.fileName);
-      const sel = ed.document.getText(ed.selection).trim();
-      const text = sel
-        ? `正在看：\`${path}\`\n选中：\n\`\`\`\n${sel}\n\`\`\`\n`
-        : `正在看：\`${path}\`\n`;
-      await vscode.env.clipboard.writeText(text);
-      vscode.window.showInformationMessage(
-        "上下文已复制，粘贴到 Facta 对话框开头即可",
-      );
+      const selection = ed.document.getText(ed.selection).trim();
+      try {
+        const url = await ensureServer();
+        const resp = await fetch(`${url}/api/ide/context`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path, selection }),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+        vscode.window.showInformationMessage(
+          selection
+            ? "已投递，回到 Facta 面板发消息即会带上"
+            : `已投递（${path}），回到 Facta 面板发消息即会带上`,
+        );
+      } catch (e) {
+        vscode.window.showErrorMessage(
+          `投递失败：${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     }),
   );
 }
