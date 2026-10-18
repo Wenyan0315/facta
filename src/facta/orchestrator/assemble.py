@@ -51,6 +51,7 @@ from facta.paths import (
     WORKSPACE_ROOT,
     user_memory_path,
 )
+from facta.review import REVIEW_SYSTEM_PROMPT, REVIEW_TOOLS
 from facta.tools.builtin import register_builtin
 from facta.tools.context import ToolContext
 from facta.tools.graph import register_graph_tools
@@ -134,6 +135,11 @@ class AppContext:
     mcp_active: list[str] = field(default_factory=list)
     graph: GraphStore = field(default_factory=GraphStore)   # S7a/S7b 知识图谱（活对象：查询原语与图表面板共用最新图）
     call_ledger: CallLedger = field(default_factory=CallLedger)   # 108：明细账（逐笔 call_id），供交叉核验与退出告警
+    # ADR 111：评审 Agent 工厂（D01/110-V01）。给一个会话与被评审仓库根，还一个
+    # 【只读证据菜单 + 已保证人设】的评审 Agent；仓库锚点与记忆归属由工厂按
+    # repo_root 决定（见 assemble 内实现）。默认 None = 未装配（最小测试 ctx），
+    # 仅 review 模式消费它；放在尾部是因为 dataclass 默认值须排在无默认字段之后。
+    build_review_agent: Callable[[Session, Path], Agent] | None = None
 
 
 def ensure_persona(session: Session, agent: Agent) -> None:
@@ -301,6 +307,53 @@ def _sync_notes_and_graph(kb: KnowledgeBase, graph_llm: LLM | None) -> GraphStor
         if g_report.extracted or g_report.removed:
             graph.save(GRAPH_PATH)
     return graph
+
+
+def build_review_registry(mother_ctx: ToolContext, audit: AuditLog, repo_root: Path) -> ToolRegistry:
+    """评审 registry（ADR 111）：只装只读证据族，文件锚点指向被评审仓库。
+
+    复用 S6a 锚点注入缝（`ctx.workspace_root`）——围栏与黑名单随之相对
+    `repo_root` 判定，读取范围自动限制在所选项目，**不放宽全局权限**。
+    session/history 恒 None：不注册计划/历史工具（评审不用计划板，
+    「历史决定」走 learned 注入而非会话检索）。write_file 由
+    register_file_tools 照常注册，但被 REVIEW_TOOLS 过滤掉——「不改代码」
+    是结构性事实。模块级而非闭包：可直接用一次性 ctx 单测（见
+    tests/test_review.py），不必跑整套 assemble。
+    """
+    reg = ToolRegistry(audit=audit)
+    rctx = replace(mother_ctx, workspace_root=repo_root, session=None, history=None)
+    register_builtin(reg, rctx)     # time + notes（history 两件因 history=None 自跳）
+    register_file_tools(reg, rctx)  # 文件四件（只读三件进 REVIEW_TOOLS）
+    return reg
+
+
+def build_review_agent(
+    registry: ToolRegistry,
+    session: Session,
+    repo_root: Path,
+    *,
+    workspace_root: Path = WORKSPACE_ROOT,
+    learned_dir: Path | None = LEARNED_DIR,
+) -> Agent:
+    """评审 Agent 工厂（ADR 111）：只读证据菜单 + 按归属决定的项目决定注入。
+
+    项目记忆归属（110 §4）：learned 三桶**只在评审 Facta 本仓**
+    （repo_root == workspace_root）时注入；评审外部仓库不注入 Facta 的决定，
+    避免把不同项目的决定混作当前约束。用户级记忆不注入（陪伴者语境，
+    与评审无关）。评审 run 不挂场景路由（router=None，保确定性）。
+    """
+    learned = learned_dir if (learned_dir is not None and repo_root == workspace_root) else None
+    agent = build_default_agent(
+        registry,
+        learned,
+        router=None,
+        user_memory_path=None,
+        base_prompt=REVIEW_SYSTEM_PROMPT,
+    )
+    # 只读证据子集：schemas() 与 execute() 双重过滤——评审不能改代码/跑命令
+    agent = replace(agent, allowed_tools=REVIEW_TOOLS)
+    ensure_persona(session, agent)
+    return agent
 
 
 def assemble(provider: str) -> AppContext:
@@ -499,6 +552,14 @@ def assemble(provider: str) -> AppContext:
         ensure_persona(session, agent)
         return agent
 
+    def _review_agent_factory(session: Session, repo_root: Path) -> Agent:
+        """绑进程级资源（mother_ctx / audit）的评审工厂（ADR 111）。
+
+        构造逻辑住在模块级 build_review_registry/build_review_agent（可直接
+        单测）；这里只把 assemble 手里的 mother_ctx 与 audit 递进去。
+        """
+        return build_review_agent(build_review_registry(mother_ctx, audit, repo_root), session, repo_root)
+
     return AppContext(
         provider=provider,
         ledger=ledger,
@@ -509,6 +570,7 @@ def assemble(provider: str) -> AppContext:
         kb=kb,
         store=store,
         build_agent=build_agent,
+        build_review_agent=_review_agent_factory,
         todos=todos,
         mcp_clients=mcp_clients,
         mcp_active=mcp_active,

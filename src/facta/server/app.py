@@ -19,6 +19,7 @@ import queue
 import re
 import threading
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -39,7 +40,8 @@ from facta.memory.learned import (
     update_line_by_id,
     visible_text,
 )
-from facta.memory.store import Session
+from facta.memory.store import Session, derive_title
+from facta.orchestrator.agent import Agent
 from facta.orchestrator.assemble import AppContext, settle_session
 from facta.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
 from facta.orchestrator.loop import RunResult, run_turn
@@ -166,6 +168,10 @@ class CreateRunRequest(BaseModel):
     text: str
     session_id: str | None = None
     ide_context: bool = False
+    # ADR 111（D01/110-V01）：mode="review" 走评审 Agent（只读证据菜单），
+    # repo_root 指定被评审仓库根。缺省 chat ⇒ 全部既有调用方逐字节不受影响。
+    mode: Literal["chat", "review"] = "chat"
+    repo_root: str | None = None
 
 
 class IdeContextBody(BaseModel):
@@ -245,7 +251,30 @@ class McpServerBody(BaseModel):
     base_hash: str   # GET /api/mcp 拿到的整文件 hash（乐观锁）
 
 
-def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
+def _agent_for_mode(
+    ctx: AppContext, session: Session, mode: str, repo_root: Path | None
+) -> Agent:
+    """按 mode 选本轮 agent（ADR 111）。
+
+    review 走评审工厂（只读证据菜单、文件锚点=被评审仓库）；装配缺失
+    =编程错误，报错而非静默降级成 chat（否则评审会悄悄跑成普通对话）。
+    抽成独立函数：_run_worker 的 branch 预算与 TRY301 都收在这里。
+    """
+    if mode == "review":
+        if ctx.build_review_agent is None:
+            raise RuntimeError("评审模式不可用：AppContext 未装配 build_review_agent")
+        return ctx.build_review_agent(session, repo_root or WORKSPACE_ROOT)
+    return ctx.build_agent(session)
+
+
+def _run_worker(
+    ctx: AppContext,
+    run: Run,
+    user_text: str | None,
+    *,
+    mode: str = "chat",
+    repo_root: Path | None = None,
+) -> None:
     """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。
 
     S8a 起 worker 自带会话生命周期：进场 load、出场 save，中间独占。
@@ -254,6 +283,10 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
     agent 也是每轮现造（ctx.build_agent）：人设由工厂保证，且 learned/ 与
     用户记忆的快照因此每轮都是新的——常驻 agent 会让本轮刚固化的记忆
     要等重启才进 prompt。
+
+    ADR 111（mode="review"）：走 `ctx.build_review_agent(session, repo_root)`
+    ——只读证据菜单、文件锚点=被评审仓库；评审**不跑 settle**（模型意见不自动
+    升级为项目决定，只做保底落盘），标题在此就地补。
 
     P0-3（038）崩溃恢复：user_text=None 即「续跑」——不追加新提问，先把
     上次被杀留下的悬挂工具轮次 heal 成合法底片，再让 run_turn 从现场往前走。
@@ -278,7 +311,8 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
     writer: CheckpointWriter | None = None
     try:
         session = ctx.store.load(run.session_id)
-        agent = ctx.build_agent(session)
+        # ADR 111：评审模式用评审 Agent（只读证据菜单、文件锚点=被评审仓库）
+        agent = _agent_for_mode(ctx, session, mode, repo_root)
         ledger = ledger_path(run.session_id)
         # 绑定 save：writer 因此不懂 SessionStore，测试可注入
         writer = CheckpointWriter(ledger, lambda: ctx.store.save(run.session_id, session))
@@ -310,6 +344,9 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
             status = STATUS_COMPLETED
         elif result is RunResult.CANCELLED:
             status = STATUS_CANCELLED
+        # ADR 111：评审不跑 settle（不固化记忆），标题就地补一个（首句派生）
+        if mode == "review" and session.title is None:
+            session.title = derive_title(session)
     except Exception as exc:   # 防御性兜底：run_turn 已捕获 LLMUnavailableError，这里是意外
         run.emit("error", {"message": str(exc)})
     finally:
@@ -322,7 +359,8 @@ def _run_worker(ctx: AppContext, run: Run, user_text: str | None) -> None:
         except Exception as exc:   # 保底失败不吞终态：告知用户，流照常收口
             run.emit("error", {"message": f"会话保底落盘失败：{exc}"})
         run.finish(status)   # ② 终态事件 + 释放准入——从这里起同会话可开下一轮
-        if session is not None:
+        # ADR 111：评审模式跳过后台固化——模型评审意见不自动升级为项目决定（098 红线）
+        if session is not None and mode != "review":
             try:
                 settle_session(session, run.session_id, ctx.store, ctx.internal_llm)
             except Exception:   # 对话本体已保底落盘，游标未推进下轮重烧（P2-7 兜底）
@@ -383,6 +421,22 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         if store.active_run(sid) is not None:
             raise HTTPException(409, "该会话有任务在运行，请等它结束")
 
+    def _review_repo(body: CreateRunRequest) -> Path | None:
+        """校验并解析被评审仓库根（ADR 111）。非评审模式恒 None。
+
+        外部输入（HTTP）：必须存在且为目录——评审的文件锚点会指向它，
+        读取范围随之限制在该仓库内（复用 S6a 锚点缝，不放宽全局权限）。
+        省略时为 Facta 本仓（评审自己）。
+        """
+        if body.mode != "review":
+            return None
+        if not body.repo_root:
+            return WORKSPACE_ROOT
+        p = Path(body.repo_root).expanduser()
+        if not p.is_dir():
+            raise HTTPException(400, f"被评审仓库路径不存在或不是目录：{body.repo_root}")
+        return p.resolve()
+
     @app.post("/api/runs", status_code=202)
     def create_run(body: CreateRunRequest):
         sid = body.session_id
@@ -396,7 +450,10 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         # daemon 线程：服务退出时不留阻塞；请求线程立即 202 返回
         # 认领在 409 之后：会话忙时不该把信箱里那份吃掉
         threading.Thread(
-            target=_run_worker, args=(ctx, run, _claim_ide_context(body)), daemon=True
+            target=_run_worker,
+            args=(ctx, run, _claim_ide_context(body)),
+            kwargs={"mode": body.mode, "repo_root": _review_repo(body)},
+            daemon=True,
         ).start()
         return {"run_id": run.run_id, "session_id": sid}
 
@@ -426,7 +483,10 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         if isinstance(run, str):
             raise HTTPException(409, run)
         threading.Thread(
-            target=_run_worker, args=(ctx, run, _claim_ide_context(body)), daemon=True
+            target=_run_worker,
+            args=(ctx, run, _claim_ide_context(body)),
+            kwargs={"mode": body.mode, "repo_root": _review_repo(body)},
+            daemon=True,
         ).start()
         settled = run._settle_done.wait(timeout=timeout)   # 阻塞到终态 + 收官（076 同步点）
         return {
@@ -993,6 +1053,11 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     @app.get("/mcp")
     def mcp_page():
         return FileResponse(static_dir / "fw" / "mcp.html")
+
+    @app.get("/review")
+    def review_page():
+        """方案评审页（ADR 111，FW 第六入口）：提交分节材料 + 被评审仓库根。"""
+        return FileResponse(static_dir / "fw" / "review.html")
 
     # 前端静态文件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）。
     # no-cache（每次 revalidate，未变时 304 也快）：浏览器对无 Cache-Control 的

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>方案评审 · Facta</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" crossorigin src="/fw/assets/review.js"></script>
+  <link rel="modulepreload" crossorigin href="/fw/assets/hooks.module.js">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <button id="new-session" onclick="location.href='/'">← 返回对话</button>
+      <span class="muted" style="font-size:12px;">开工前方案评审——结合被评审仓库实际，指出有依据的遗漏、偏离和不必要的工作</span>
+    </div>
+    <ul id="session-list"><li class="muted">方案评审</li></ul>
+  </aside>
+
+  <main id="chat">
+    <div id="messages">
+      <h2 class="tasks-title">方案评审</h2>
+      <div id="review-root"></div>
+    </div>
+  </main>
+
+  <script src="/vendor/marked.min.js"></script>
+</body>
+</html>
