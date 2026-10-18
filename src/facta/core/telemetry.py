@@ -104,3 +104,88 @@ class UsageLedger:
             deg = f"（降级 {self.jev_degradations} 次走原生路径）" if self.jev_degradations else ""
             lines.append(f"Jev 路由   : {self.jev_calls} 次{deg}")
         return "\n".join(lines)
+
+
+@dataclass
+class CallEntry:
+    """一笔逻辑模型调用的明细记录（含重试；缓存命中不在此列）。
+
+    call_id 进程内唯一；attempts 是真实下游尝试次数——观测真源，来自
+    RobustLLM 重试循环控制流（_inner.generate 每被调用一次），不取自 usage
+    字段：即使 usage=None，请求尝试次数仍准确记 1；usage 是 LLM 自报用量
+    （可能 None，失败或无响应体时不猜测）；outcome 为 ok|error。
+    """
+
+    call_id: str
+    operation: str
+    attempts: int
+    usage: dict | None
+    outcome: str
+
+
+class CallLedger:
+    """明细账：与 UsageLedger 累计尺职责分离（累计尺只增不减，明细逐笔）。
+
+    UsageLedger 答「总共花了多少」，CallLedger 答「每一笔花在哪」——
+    call_id 是核验【唯一归属】的锚（查双计/漏记/虚构全靠它）。
+    """
+
+    def __init__(self) -> None:
+        self._entries: list[CallEntry] = []
+        self._seq = 0
+
+    def record(
+        self,
+        operation: str,
+        attempts: int,
+        usage: dict | None,
+        outcome: str,
+        call_id: str | None = None,
+    ) -> str:
+        """落一笔，返回 call_id。production 自增；测试传固定 call_id 制造篡改场景。"""
+        if call_id is None:
+            self._seq += 1
+            call_id = f"c{self._seq:04d}"
+        self._entries.append(CallEntry(call_id, operation, attempts, usage, outcome))
+        return call_id
+
+    @property
+    def entries(self) -> list[CallEntry]:
+        return list(self._entries)
+
+
+@dataclass
+class CallVerification:
+    """明细账 vs 累计尺 vs 唯一归属的交叉核验结果。"""
+
+    ledger_attempts: int         # 明细账 attempt 合计
+    expected_attempts: int       # 累计尺推算的总 attempt 数（calls+retries+failures）
+    ledger_matches_total: bool
+    duplicates: list[str]        # 同一 call_id 重复入账
+    ok: bool
+
+
+def verify_calls(call_ledger: CallLedger, usage: UsageLedger) -> CallVerification:
+    """交叉核验：明细账 attempt 合计须等于累计尺推算值，且 call_id 无重复。
+
+    恒等式依据：一次逻辑调用要么成功（1 次落地 attempt + 其重试）要么最终失败
+    （重试耗尽），每一次 attempt 恰好落入 calls / retries / failures 三者之一——
+    故 总 attempt = llm_calls + llm_retries + llm_failures。这是「内部一致性」，
+    只能查出账本内部漏写；「与外部观测不一致」的漏记/虚构靠测试替身的
+    matches_observation 兜住（见 ADR 108 档 A）。
+    """
+    entries = call_ledger.entries
+    ledger_attempts = sum(e.attempts for e in entries)
+    expected = usage.llm_calls + usage.llm_retries + usage.llm_failures
+    seen: dict[str, int] = {}
+    for e in entries:
+        seen[e.call_id] = seen.get(e.call_id, 0) + 1
+    duplicates = [cid for cid, n in seen.items() if n > 1]
+    ok = ledger_attempts == expected and not duplicates
+    return CallVerification(
+        ledger_attempts=ledger_attempts,
+        expected_attempts=expected,
+        ledger_matches_total=ledger_attempts == expected,
+        duplicates=duplicates,
+        ok=ok,
+    )

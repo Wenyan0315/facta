@@ -25,7 +25,7 @@ from facta.core.audit import AuditLog
 from facta.core.gateway import SemanticCacheLLM
 from facta.core.jev import JevClient, ScenarioRouter
 from facta.core.llm import LLM, get_llm
-from facta.core.telemetry import UsageLedger
+from facta.core.telemetry import CallLedger, UsageLedger
 from facta.core.types import Message
 from facta.knowledge.extract import sync_graph
 from facta.knowledge.graph import GraphStore
@@ -133,6 +133,7 @@ class AppContext:
     # 装配在 assemble 一次完成，改清单要重启才反映到这里）
     mcp_active: list[str] = field(default_factory=list)
     graph: GraphStore = field(default_factory=GraphStore)   # S7a/S7b 知识图谱（活对象：查询原语与图表面板共用最新图）
+    call_ledger: CallLedger = field(default_factory=CallLedger)   # 108：明细账（逐笔 call_id），供交叉核验与退出告警
 
 
 def ensure_persona(session: Session, agent: Agent) -> None:
@@ -318,7 +319,9 @@ def assemble(provider: str) -> AppContext:
         logger.info("已回收 %s 个残留 worktree（上次进程未正常退出）", stale)
 
     # 0) 账本（M7.5）：全进程一本账，LLM 与 embedding 都往里记，退出时打印
+    #    call_ledger 与 usage 账本同源一本：明细账（逐笔 call_id）供 108 交叉核验
     ledger = UsageLedger()
+    call_ledger = CallLedger()
 
     # 1) embedder：语义缓存与知识库共用一个（记账只注入这一处）
     #    练习模式（假模型）走词袋（离线不花一分钱）；真模型走所选 embedding
@@ -343,7 +346,7 @@ def assemble(provider: str) -> AppContext:
     #    用户链（llm）：内部链再包一层语义档，只服务用户聊天流量——
     #        内部调用的（提示词, 回复）进缓存池有串味路径，且内部 prompt
     #        几乎不可能命中 0.92 阈值（白付 embed）
-    internal_llm = get_llm(provider, ledger)
+    internal_llm = get_llm(provider, ledger, call_ledger=call_ledger)
     # 语义缓存默认关闭（评审修复轮）：它只比最后一条 user 消息，忽略历史/
     # system/计划——「继续」在不同任务里含义完全不同，外部评审探针实证了
     # 跨上下文串味；M10 direct 路由把纯聊天送进 tools=None 命中区后风险
@@ -499,6 +502,7 @@ def assemble(provider: str) -> AppContext:
     return AppContext(
         provider=provider,
         ledger=ledger,
+        call_ledger=call_ledger,
         embedder=embedder,
         llm=llm,
         internal_llm=internal_llm,

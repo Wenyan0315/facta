@@ -11,6 +11,7 @@ import sys
 import threading
 
 from facta.cli import EXIT_NEW, run_chat
+from facta.core.telemetry import verify_calls
 from facta.memory.store import Session, derive_title
 from facta.orchestrator.assemble import assemble, settle_session
 from facta.orchestrator.checkpoint import heal, ledger_path, read_ledger
@@ -103,6 +104,10 @@ def main() -> None:
 
     # 打印本次会话账单（M7.5）：钱花哪了，退出一目了然
     print(ctx.ledger.bill())
+    # 108：退出前交叉核验（明细账 vs 累计尺 vs call_id 唯一归属）——异常只告警不拦截
+    v = verify_calls(ctx.call_ledger, ctx.ledger)
+    if not v.ok:
+        print(f"⚠️ 成本记账核验未通过：{v}")
 
 
 if __name__ == "__main__":
