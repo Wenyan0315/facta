@@ -8,6 +8,7 @@ playwright 未装或 chromium 缺席时整模块 skip——本地不挡三门；
 CI 显式 `playwright install --with-deps chromium`，三条恒跑。
 """
 
+import json
 import os
 import socket
 import subprocess
@@ -151,4 +152,34 @@ def test_mcp_page_loads_manifest(server, browser):
     page = browser.new_page()
     page.goto(f"{server}/mcp")
     page.wait_for_function("document.querySelector('#mcp-root').textContent.includes('清单文件')")
+    page.close()
+
+
+def test_ide_context_chip_appears_and_can_be_dropped(server, browser):
+    """ADR 107：壳投递 → focus 拉取 → chip 可见 → 点「×」后服务端信箱也空。
+
+    拉取时机是 focus 而非轮询（全站零轮询口径），所以必须真点一下输入框。
+    """
+    urllib.request.urlopen(urllib.request.Request(
+        f"{server}/api/ide/context",
+        data=json.dumps({"path": "demo.py", "selection": "a = 1\nb = 2"}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    ))
+    page = browser.new_page()
+    page.goto(server)
+    page.click("#input")
+    page.wait_for_function("!document.querySelector('#ide-ctx').classList.contains('hidden')")
+    chip = page.inner_text("#ide-ctx")
+    assert "demo.py" in chip and "选中 2 行" in chip
+
+    page.click("#ide-ctx button")
+    page.wait_for_function("document.querySelector('#ide-ctx').classList.contains('hidden')")
+    # UI 先清、DELETE 后发（chip 一消失这一轮就不认领了）⇒ 轮询到服务端真空
+    for _ in range(50):   # 最多 5s
+        if json.loads(urllib.request.urlopen(f"{server}/api/ide/context").read()) is None:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("点「×」后服务端信箱未清空")
     page.close()

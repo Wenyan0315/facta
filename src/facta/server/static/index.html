@@ -31,6 +31,8 @@
     <div id="messages"></div>
     <form id="composer">
       <textarea id="input" rows="2" placeholder="发消息给 agent…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <!-- IDE 上下文 chip（ADR 107）：显示「这一轮会带上哪份 IDE 现场」，空槽即隐藏 -->
+      <div id="ide-ctx" class="hidden"></div>
       <div class="composer-actions">
         <button type="button" id="cancel" class="hidden">取消</button>
         <button type="submit" id="send">发送</button>

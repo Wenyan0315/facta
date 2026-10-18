@@ -906,3 +906,168 @@ def test_server_port_env_overridable(monkeypatch):
     assert server_port() == 8000   # 缺省不变（与既有文档/README 口径一致）
     monkeypatch.setenv("FACTA_SERVER_PORT", "8123")
     assert server_port() == 8123
+
+
+# ---------- ADR 107：IDE 上下文信箱（单槽投递 + 发送时界碑注入） ----------
+
+_IDE_BEACON = "〔以下是用户此刻在 IDE 里打开的文件与选中区"
+
+
+def _user_text_of(client, sid: str, needle: str) -> str:
+    """从落盘会话里捞出含 needle 的那条用户消息（= worker 真收到的 user_text）。"""
+    msgs = client.get(f"/api/sessions/{sid}/messages").json()
+    return next(m["content"] for m in msgs if m["role"] == "user" and needle in m["content"])
+
+
+def test_ide_context_mailbox_single_slot_overwriting_idempotent_delete():
+    client = _make_client()
+    assert client.get("/api/ide/context").json() is None   # 空槽 = null，不是 404
+
+    resp = client.post("/api/ide/context", json={"path": "a.py", "selection": "x = 1\ny = 2"})
+    assert resp.status_code == 201
+    assert client.get("/api/ide/context").json() == {
+        "path": "a.py", "selection": "x = 1\ny = 2", "lines": 2, "chars": 11,
+    }
+    # GET 不取走：前端要能在用户点「×」之前反复渲染（改主意/刷新都不丢件）
+    assert client.get("/api/ide/context").json()["path"] == "a.py"
+
+    # 覆盖式：新投递挤掉旧的，信箱深度恒 1——队列会把过期上下文送进 prompt
+    client.post("/api/ide/context", json={"path": "b.py"})
+    assert client.get("/api/ide/context").json() == {
+        "path": "b.py", "selection": "", "lines": 0, "chars": 0,
+    }
+
+    # DELETE 幂等，形状照仓库其余 DELETE（全仓无 204 先例）
+    assert client.delete("/api/ide/context").json() == {"deleted": True}
+    assert client.get("/api/ide/context").json() is None
+    assert client.delete("/api/ide/context").status_code == 200
+
+
+def test_ide_context_400_leaves_mailbox_untouched():
+    from facta.server.app import IDE_CONTEXT_MAX_CHARS
+
+    client = _make_client()
+    client.post("/api/ide/context", json={"path": "keep.py", "selection": "old"})
+
+    # 校验先于写入 ⇒ 400 不动信箱现值（否则下一次发送会带上一份半截代码）
+    assert client.post("/api/ide/context", json={"path": "   "}).status_code == 400
+    too_long = {"path": "big.py", "selection": "x" * (IDE_CONTEXT_MAX_CHARS + 1)}
+    assert client.post("/api/ide/context", json=too_long).status_code == 400
+    assert client.get("/api/ide/context").json()["selection"] == "old"
+
+    # 上限是闭区间；且超长选择是 400 而不是截断——半截代码会误导模型
+    assert client.post(
+        "/api/ide/context", json={"path": "ok.py", "selection": "x" * IDE_CONTEXT_MAX_CHARS}
+    ).status_code == 201
+
+
+def test_send_with_ide_context_appends_beacon_block_after_user_text():
+    llm = ScriptedLLM([Message(role="assistant", content="看到了")])
+    client = TestClient(create_app(_make_ctx(llm=llm)))
+    client.post("/api/ide/context", json={"path": "app.py", "selection": "def f(): pass"})
+
+    body = client.post("/api/runs", json={"text": "这段代码是干嘛的", "ide_context": True}).json()
+    _read_events(client, body["run_id"])
+
+    sent = next(m.content for m in llm.calls[0] if m.role == "user")
+    # 后缀拼接：任务在前、材料在后。run_turn 轮首路由吃 route_text=user_text，
+    # 代码围栏顶在前面会污染意图判断（M10 路由误判是登记在案的真实故障）
+    assert sent.startswith("这段代码是干嘛的")
+    assert _IDE_BEACON in sent and "〔IDE 上下文结束〕" in sent   # S3 界碑（017）
+    assert "app.py" in sent and "def f(): pass" in sent
+    assert sent.index("这段代码是干嘛的") < sent.index(_IDE_BEACON)
+    # 免疫延伸跟着数据走（061「锁老文，加新文」）：块头自己声明「不是你的任务」
+    assert "不是你的任务" in sent
+
+    # 认领即取走：信箱空了，第二次发送哪怕仍带 ide_context=true 也不再带块
+    assert client.get("/api/ide/context").json() is None
+    sid = body["session_id"]
+    body2 = client.post(
+        "/api/runs", json={"text": "再来一轮", "session_id": sid, "ide_context": True}
+    ).json()
+    _read_events(client, body2["run_id"])
+    second = next(
+        m.content
+        for call in llm.calls
+        for m in call
+        if m.role == "user" and "再来一轮" in (m.content or "")
+    )
+    assert _IDE_BEACON not in second
+
+
+def test_send_without_flag_does_not_claim_mailbox():
+    # ide_context 缺省 = False：既有调用方（headless、评测、旧前端）逐字节零
+    # 变化，且不许偷偷认领信箱——这是「所见即所送」的服务端半边
+    llm = ScriptedLLM([Message(role="assistant", content="好")])
+    client = TestClient(create_app(_make_ctx(llm=llm)))
+    client.post("/api/ide/context", json={"path": "a.py", "selection": "SECRET = 1"})
+
+    body = client.post("/api/runs", json={"text": "你好"}).json()
+    _read_events(client, body["run_id"])
+
+    assert next(m.content for m in llm.calls[0] if m.role == "user") == "你好"
+    assert client.get("/api/ide/context").json()["path"] == "a.py"   # 件还在
+
+
+def test_sync_run_honours_ide_context():
+    # 双 run 端点同形（040/081）：headless 同步入口也能带 IDE 上下文
+    client = _make_client(reply="收到")
+    client.post("/api/ide/context", json={"path": "b.py", "selection": "z = 3"})
+
+    body = client.post("/api/runs/sync", json={"text": "看这个", "ide_context": True}).json()
+    assert body["status"] == "completed"
+
+    sent = _user_text_of(client, body["session_id"], "看这个")
+    assert sent.startswith("看这个") and "b.py" in sent and "〔IDE 上下文结束〕" in sent
+    assert client.get("/api/ide/context").json() is None
+
+
+def test_busy_session_does_not_claim_mailbox():
+    # 认领发生在 create_if_idle 的 409 之后：会话忙时不该把信箱里那份吃掉
+    # （用户被挡下后重发，上下文还得在）
+    from facta.server.run_store import STATUS_RUNNING, RunStore
+
+    ctx = _make_ctx()
+    sid = ctx.store.create(Session())
+    rs = RunStore()
+    rs.create_if_idle(sid).status = STATUS_RUNNING
+
+    client = TestClient(create_app(ctx, store=rs))
+    client.post("/api/ide/context", json={"path": "c.py", "selection": "w = 4"})
+
+    resp = client.post(
+        "/api/runs", json={"text": "挤不进去", "session_id": sid, "ide_context": True}
+    )
+    assert resp.status_code == 409
+    assert client.get("/api/ide/context").json()["path"] == "c.py"
+
+
+def test_concurrent_sends_only_one_claims_mailbox():
+    # 先到先得：pop 与置空在同一把锁内 ⇒ 两个并发发送不会都拿到同一份。
+    # 断言的是「恰好一个」而不是「哪一个」——谁赢都不该改变这个不变量，
+    # 所以这条与调度时序无关，不是靠 sleep 碰运气的 flaky 测试。
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    ctx = _make_ctx()
+    sids = [ctx.store.create(Session()), ctx.store.create(Session())]
+    # 放行两个在跑（RunStore 缺省 max_in_flight=1，会让第二个先撞 409 而根本
+    # 走不到认领那一步）；create_app 的生产缺省是 3
+    client = TestClient(create_app(ctx, store=RunStore(max_in_flight=2)))
+    client.post("/api/ide/context", json={"path": "race.py", "selection": "ONLY = 1"})
+
+    barrier = threading.Barrier(2)
+
+    def send(sid: str) -> dict:
+        barrier.wait()   # 两个线程尽量同时撞进端点，把竞态窗口开到最大
+        return client.post(
+            "/api/runs", json={"text": "抢", "session_id": sid, "ide_context": True}
+        ).json()
+
+    with ThreadPoolExecutor(2) as pool:
+        runs = list(pool.map(send, sids))
+    for r in runs:
+        _read_events(client, r["run_id"])
+
+    assert sum("ONLY = 1" in _user_text_of(client, r["session_id"], "抢") for r in runs) == 1
+    assert client.get("/api/ide/context").json() is None
