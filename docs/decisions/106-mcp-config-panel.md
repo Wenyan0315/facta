@@ -90,8 +90,9 @@ Tool 对象）——改配置**重启才生效**，这是面板必须诚实呈�
   测试族拼合覆盖——test_mcp_config 钉「enabled 服务器被
   assemble_servers 拉起注册」、面板钉「PUT 写进文件」、assemble 钉
   「启动读同一清单」，三环字面同源。
-- [ ] 浏览器侧用户实测收口：/mcp 页面开关 memory 服务器并保存 →
-  重启服务 → 对话里 memory__ 工具出现/消失。
+- [x] 浏览器侧实测收口：真 Chromium 打开 `/mcp` 点「启用」memory →
+  重启服务 → 对话菜单里 `memory__` 两件出现；再点「停用」→ 重启 →
+  消失（三次真启动往返，读数见「验证结果」末条）。
 - [x] 写侧校验不变式：任何写请求不可能让磁盘留下过不了
   `load_server_specs` 的清单（`test_write_rejects_command_and_url_both`
   钉 400 + 磁盘不动 + 无 .tmp 残留）。
@@ -118,4 +119,14 @@ Tool 对象）——改配置**重启才生效**，这是面板必须诚实呈�
   headers`）。
 - **已知行为（非缺陷）**：面板写入的条目把 timeout/enabled 恒写全
   （原手编条目可省略用读侧缺省）——面板成为写入方后的格式归一，
-  语义逐字段等价；手编爱好者会看到一次性格式 diff。
+  语义逐字段等价；手编爱好者会看到一次性格式 diff。归一只落在**被写的
+  那一条**：同文件里未触碰的条目逐字段原样（浏览器实测钉住，见下）。
+- **浏览器侧实测收口**（真 Chromium + 真 `assemble`，8197 端口；数据根与
+  用户级记忆指 /tmp 隔离，唯一被改的仓库文件是清单本身，结束按字节还原）：
+  起点 memory `enabled:false` → 启动① `active=[notes]`、主 agent 菜单
+  **30 件**且无 `memory__`；页面点「启用」→ 磁盘 `enabled:true`（notes/ctx7
+  两条逐字段原样）、徽章「已禁用」→「待重启」、横幅点名「待接入 [memory]」
+  → 启动② `active=[notes, memory]`、菜单 **32 件**含 `memory__memory_recall`
+  与 `memory__memory_list_categories`、徽章「运行中」、横幅消失；页面点
+  「停用」→ 横幅改点名「待移除 [memory]」→ 启动③ 回到 30 件、
+  `active=[notes]`。「改配置重启才生效」这条产品语义在真链路上逐环兑现。
