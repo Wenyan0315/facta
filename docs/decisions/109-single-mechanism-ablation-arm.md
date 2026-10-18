@@ -53,7 +53,20 @@ delta-agent 的消融臂（`C_NO_SCOPE`/`C_NO_VERSION_CHECK`）给的方法：**
 - [x] **同源可证**：除 `scope_check` 挂否外，两臂装配/判分/judge 逐字节同源；`check_mechanism` 纳入 `no_scope`（计划/确认缝/工具族全在，不静默变题）。
 - [x] 三臂互斥：`--baseline`/`--nomem`/`--no-scope` 两两组合被拒（`test_arms_are_mutually_exclusive`）。
 
-**验证结果（2026-10-18）**：4 条测试全离线（假 agent / 假 ctx / monkeypatch，一次 LLM 不花）。档 A 摘除落点在 harness 侧 `_full_arm` 装好后置补丁——**`src/` 零改动**（被测机制 `plan_scope_check` 一字未动）。真机出分（`--no-scope --only r2` 喂 099 丙案反事实）留待下一轮真模型跑，不据单轮读数下结论（046 偏差 5）。
+**验证结果（2026-10-18）**：4 条测试全离线（假 agent / 假 ctx / monkeypatch，一次 LLM 不花）。档 A 摘除落点在 harness 侧 `_full_arm` 装好后置补丁——**`src/` 零改动**（被测机制 `plan_scope_check` 一字未动）。
+
+### 真机验证结果（2026-10-18，deepseek，plan 三场景 r2/r4/m1 × 3 轮 × 2 臂，总耗 ≈¥1.14）
+
+| 轮 | full 臂 | no_scope 臂 |
+|---|---|---|
+| R1 | 3/3，q5.00；r2 ✅ `guards=[plan-scope]` | 2/3，q4.00；r2 ❌ 无 `spawn_step` |
+| R2 | 3/3，q5.00；r2 ✅ `guards=[plan-scope]` | 2/3，q4.67；r2 ❌ |
+| R3 | 2/3，q5.00；r2 ❌ `guards=[]` | 2/3，q4.67；r2 ❌ |
+
+- **摘除生效（验收项坐实）**：full 臂 `guards` 命中 `plan-scope` 共 3 次（r2×2、r4×1）；no_scope 臂 6 次运行全部 `guards=[]`——范围闸真被摘掉，非静默失效。
+- **反事实读数**：关闸未改善任何场景——r2 完成率 `2/3→0/3`（0 次 `spawn_step`）、m1 质量 `5/5/5→4/4/4`、r4 持平；full 臂 r2 的两次 pass 均伴随 `plan-scope` 出手。
+- **保留**：n=3 偏小；r2 的 full 臂自身亦翻车一次（R3）；m1 两臂 `guards` 皆空仍稳定差 1 分，不放大解读。
+- **结论**：否证「plan-scope 拦截大面积杀任务」——范围闸非净杀手、略偏净正。作为喂 [099](099-orchestration-review-spawn-step-and-plan-scope.md) 丙案的反事实证据，丙案维持缓议。
 
 ## 反方（预写）
 
