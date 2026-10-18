@@ -20,6 +20,7 @@ export default defineConfig({
         graph: resolve(import.meta.dirname, "graph.html"),
         notes: resolve(import.meta.dirname, "notes.html"),
         mcp: resolve(import.meta.dirname, "mcp.html"),
+        review: resolve(import.meta.dirname, "review.html"),
       },
       output: {
         entryFileNames: "assets/[name].js",

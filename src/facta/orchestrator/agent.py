@@ -218,6 +218,7 @@ def build_default_agent(
     learned_dir: Path | None,
     router: ScenarioRouter | None = None,
     user_memory_path: Path | None = None,
+    base_prompt: str = DEFAULT_SYSTEM_PROMPT,
 ) -> Agent:
     """主 agent：S5 前行为等价（素材搬家）+ learned 读取侧（新能力）。
 
@@ -228,8 +229,10 @@ def build_default_agent(
     user_memory_path（M6.5）：用户级记忆快照，拼在项目桶之后；None/空文件
     同收敛。注入位置在主 agent——spawn 的子 agent 不注入（执行器不是
     陪伴者，任务书自包含原则，见 spawn.py 头注记）。
+    base_prompt（ADR 111）：行为定义底座——默认主助手人设；评审等派生
+    Agent 传入各自人设（learned/用户记忆的注入位置不变，仍拼在其后）。
     """
-    prompt = DEFAULT_SYSTEM_PROMPT
+    prompt = base_prompt
     # ADR 078 预算分账与拼接顺序解耦：分账 user 先领（相处知识，量小权重高，
     # user_len 含块头算保守），learned 三桶吃剩余；拼接仍项目桶在前、用户
     # 记忆殿后（既有顺序契约，test_user_memory_after_project_block 钉着）。
