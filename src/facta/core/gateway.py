@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
 from facta.core.llm import LLM, LLMUnavailableError, StreamChunk, merge_stream_chunks
-from facta.core.telemetry import UsageLedger
+from facta.core.telemetry import CallLedger, UsageLedger
 from facta.core.types import Message
 from facta.core.vector_math import cosine_similarity
 
@@ -73,12 +73,14 @@ class RobustLLM(LLM):
         inner: LLM,
         ledger: UsageLedger | None = None,
         config: GatewayConfig | None = None,
+        call_ledger: CallLedger | None = None,
     ) -> None:
         self._inner = inner
         # 对外报内层模型的名字（降级链打印认得清谁是谁）；
         # 空 label 兜底类名——与旧版 getattr property 同语义
         self.name = inner.name or inner.__class__.__name__
         self._ledger = ledger or UsageLedger()
+        self._call_ledger = call_ledger or CallLedger()
         self._cfg = config or GatewayConfig()
         # 进程级 LRU 精确缓存，不落盘——重启清零没损失，下次重新算就是了
         self._cache: OrderedDict[str, Message] = OrderedDict()
@@ -114,7 +116,9 @@ class RobustLLM(LLM):
 
         start = time.perf_counter()
         error: Exception | None = None
+        attempts = 0
         for attempt in range(self._cfg.retries + 1):
+            attempts += 1  # 观测真源：下游尝试每发生一次记 1（不取自 usage）
             try:
                 reply = self._inner.generate(messages, tools)
             except Exception as exc:
@@ -127,7 +131,9 @@ class RobustLLM(LLM):
                     time.sleep(self._cfg.backoff * (2 ** attempt))  # 指数退避
             else:
                 elapsed = time.perf_counter() - start
-                self._ledger.record_llm(getattr(reply, "usage", None), self._cost_of(reply), elapsed)
+                usage = getattr(reply, "usage", None)
+                self._ledger.record_llm(usage, self._cost_of(reply), elapsed)
+                self._call_ledger.record(self.name, attempts, usage, "ok")
                 self._on_success()
                 if key is not None:
                     self._store(key, reply)
@@ -139,6 +145,7 @@ class RobustLLM(LLM):
 
         # 最终失败：记账 + 熔断计数 + 原样抛给上层（FallbackLLM / 主循环）
         self._ledger.record_llm_failure()
+        self._call_ledger.record(self.name, attempts, None, "error")
         self._on_failure()
         if error is None:  # 理论不可达：循环不 return 就必有 error
             raise RuntimeError("unreachable")
@@ -175,7 +182,9 @@ class RobustLLM(LLM):
 
         start = time.perf_counter()
         error: Exception | None = None
+        attempts = 0
         for attempt in range(self._cfg.retries + 1):
+            attempts += 1  # 观测真源：下游尝试每发生一次记 1（不取自 usage）
             try:
                 stream = self._inner.generate_stream(messages, tools)
                 first = next(stream)   # 惰性：真正的网络请求发生在这一行
@@ -199,15 +208,18 @@ class RobustLLM(LLM):
                 except Exception:
                     # 中途失败：字已外流，重试=重复说话，降级也一样——只能上抛
                     self._ledger.record_llm_failure()
+                    self._call_ledger.record(self.name, attempts, None, "error")
                     self._on_failure()
                     raise
                 # 流耗尽 = 调用成功：usage 记账 + 熔断复位 + 计时
                 self._ledger.record_llm(usage, self._cost_of_usage(usage), time.perf_counter() - start)
+                self._call_ledger.record(self.name, attempts, usage, "ok")
                 self._on_success()
                 return
 
         # 开场失败（一直没拿到第一块）：与 generate 相同的最终失败路径
         self._ledger.record_llm_failure()
+        self._call_ledger.record(self.name, attempts, None, "error")
         self._on_failure()
         if error is None:  # 理论不可达
             raise RuntimeError("unreachable")

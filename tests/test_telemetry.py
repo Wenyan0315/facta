@@ -10,7 +10,7 @@ import pytest
 
 from facta.core.gateway import GatewayConfig, RobustLLM
 from facta.core.llm import LLM, OpenAICompatibleLLM, get_llm
-from facta.core.telemetry import UsageLedger
+from facta.core.telemetry import CallLedger, UsageLedger, verify_calls
 from facta.core.types import Message
 
 
@@ -223,3 +223,94 @@ def test_bill_omits_prefix_when_no_cache_usage():
     ledger.record_llm({"prompt_tokens": 100, "completion_tokens": 10})
     bill = ledger.bill()
     assert "prefix" not in bill
+
+
+# ---- 108：成本记账交叉核验（明细账 + call_id 唯一归属 + 观测真源） ----
+
+
+def test_verify_calls_matches_total_identity():
+    """恒等式：总 attempt = llm_calls + llm_retries + llm_failures（混合场景）。"""
+    ledger = UsageLedger()
+    calls = CallLedger()
+    # 成功 1 次（无重试）：1 attempt
+    RobustLLM(UsageFakeLLM(), ledger, call_ledger=calls).generate(
+        [Message(role="user", content="hi")]
+    )
+    # 重试成功：2 次重试 + 1 次落地 = 3 attempts
+    flaky = FlakyLLM(fail_times=2)
+    RobustLLM(flaky, ledger, GatewayConfig(retries=2, backoff=0), call_ledger=calls).generate(
+        [Message(role="user", content="hi")]
+    )
+    # 失败（401 不可重试）：1 attempt
+    with pytest.raises(_AuthError):
+        RobustLLM(
+            UnauthorizedLLM(), ledger, GatewayConfig(retries=2, backoff=0), call_ledger=calls
+        ).generate([Message(role="user", content="hi")])
+
+    v = verify_calls(calls, ledger)
+    # llm_calls=2 + llm_retries=2 + llm_failures=1 = 5 == 明细 1+3+1
+    assert v.expected_attempts == 5
+    assert v.ledger_attempts == 5
+    assert v.ledger_matches_total is True
+    assert v.duplicates == []
+    assert v.ok is True
+
+
+def test_verify_calls_detects_duplicate():
+    """双计篡改：同一 call_id 入账两次，内部账本自洽时依然被查出。"""
+    ledger = UsageLedger()
+    calls = CallLedger()
+    calls.record("usage_fake", 1, None, "ok", call_id="c0001")
+    calls.record("usage_fake", 1, None, "ok", call_id="c0001")  # 双计
+    # 同步把累计尺也加两次，让 ledger_matches_total 仍成立——同源自比的盲区
+    ledger.record_llm(None)
+    ledger.record_llm(None)
+
+    v = verify_calls(calls, ledger)
+    assert v.ledger_matches_total is True    # 内部仍自洽
+    assert v.duplicates == ["c0001"]         # 但双计被唯一归属抓到
+    assert v.ok is False
+
+
+def test_verify_calls_detects_undercount():
+    """漏记：明细少记一笔（attempt 合计 < 累计尺推算），内部一致性不成立。"""
+    ledger = UsageLedger()
+    calls = CallLedger()
+    calls.record("usage_fake", 1, None, "ok")
+    ledger.record_llm(None)
+    ledger.record_llm(None)  # 累计两次调用，明细只一笔
+
+    v = verify_calls(calls, ledger)
+    assert v.ledger_matches_total is False
+    assert v.ok is False
+
+
+def test_attempts_reflects_actual_inner_calls():
+    """观测真源：明细 attempt 数 == 独立第二真源（spy 模型自己数的调用次数）。"""
+    ledger = UsageLedger()
+    calls = CallLedger()
+    flaky = FlakyLLM(fail_times=2)
+    RobustLLM(flaky, ledger, GatewayConfig(retries=2, backoff=0), call_ledger=calls).generate(
+        [Message(role="user", content="hi")]
+    )
+    assert flaky.attempts == 3                # spy 独立计数：2 失败 + 1 成功
+    assert calls.entries[0].attempts == 3     # 观测与 spy 一致（非同源自比）
+    assert verify_calls(calls, ledger).ok is True
+
+
+def test_failure_attempts_recorded_usage_none():
+    """失败路径：attempt 照实入账、usage=None（无响应体不猜测），恒等式仍成立。"""
+    ledger = UsageLedger()
+    calls = CallLedger()
+    with pytest.raises(RuntimeError):
+        RobustLLM(
+            BoomLLM(), ledger, GatewayConfig(retries=1, backoff=0), call_ledger=calls
+        ).generate([Message(role="user", content="hi")])
+
+    entry = calls.entries[0]
+    assert entry.outcome == "error"
+    assert entry.attempts == 2   # retries=1：第一次失败 + 第二次失败
+    assert entry.usage is None
+    v = verify_calls(calls, ledger)
+    assert v.expected_attempts == 2   # llm_calls=0 + retries=1 + failures=1
+    assert v.ok is True

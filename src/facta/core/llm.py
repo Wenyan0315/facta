@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from facta.core.telemetry import UsageLedger
+from facta.core.telemetry import CallLedger, UsageLedger
 from facta.core.types import Message
 
 if TYPE_CHECKING:  # 仅类型检查期导入：运行期由 get_llm 函数内导入（避免循环依赖）
@@ -483,6 +483,7 @@ def get_llm(
     ledger: UsageLedger | None = None,
     config: GatewayConfig | None = None,
     with_mock_fallback: bool = True,
+    call_ledger: CallLedger | None = None,
 ) -> LLM:
     """工厂 = 进程内网关（M7.5d 起是降级链组装器）。
 
@@ -506,7 +507,7 @@ def get_llm(
 
     def _wrapped(inner: LLM, label: str) -> LLM:
         inner.name = label  # 降级打印时能认出谁是谁（OpenAICompatible 类名不带供应商）
-        return RobustLLM(inner, ledger, config)
+        return RobustLLM(inner, ledger, config, call_ledger)
 
     if provider in ("mock", "echo", "repeat"):
         fakes: dict[str, LLM] = {
