@@ -16,6 +16,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from evals import frozen_eval as fe
 
 CANARY = "sk-canary-DO-NOT-LEAK-9f3a"
@@ -823,3 +825,81 @@ def test_new_memory_scenarios_keep_fingerprint_out_of_task():
         for needle in s["answer_contains"]:
             assert needle not in str(s["task"]), f"{sid} 任务文本泄漏指纹 {needle}"
             assert needle in str(s["setup"]), f"{sid} 的 seed 里找不到指纹 {needle}"
+
+
+# ── no_scope 臂（109）：与 full 的差别只在范围闸挂不挂 ──
+
+
+def _fake_agent(scope_check):
+    """假 agent：只带 _ablate 会碰的那个字段（registry.scope_check）。"""
+    registry = type("R", (), {"scope_check": scope_check})()
+    return type("A", (), {"registry": registry})()
+
+
+def test_ablate_no_scope_clears_scope_check():
+    """no_scope 臂把范围闸从起跑线摘掉：scope_check → None（registry.py 干净关闭点）。
+
+    摘除=起跑线配置（与 096 抹记忆同性质），不改机制代码——plan_scope_check 本体
+    一字不动，只是不挂到 registry 上。full 臂不许动它：起跑线差异只此一处。
+    """
+    sentinel = object()
+    agent = _fake_agent(sentinel)
+    fe._ablate("no_scope", agent)
+    assert agent.registry.scope_check is None
+
+    keep = _fake_agent(sentinel)
+    fe._ablate("full", keep)
+    assert keep.registry.scope_check is sentinel
+
+
+def test_ablate_no_scope_survives_new_session(monkeypatch, tmp_path):
+    """换 Session 会重造 agent——摘除必须跟着重做，否则后续轮范围闸偷偷复活。"""
+    ctx = _FakeCtx()
+    built: list = []
+
+    def fake_build(session):
+        agent = _fake_agent(object())
+        built.append(agent)
+        return agent
+
+    monkeypatch.setattr(ctx, "build_agent", fake_build)
+    monkeypatch.setattr(fe, "assemble", lambda provider: ctx)
+
+    def fake_run_turn(session, task, **kw):
+        return type("R", (), {"name": "COMPLETED"})(), type("P", (), {"content": "答"})()
+
+    monkeypatch.setattr(fe, "run_turn", fake_run_turn)
+
+    state = fe.ChildState(
+        "mock", [{"task": "T1"}, {"task": "T2", "new_session": True}],
+        "approve", str(tmp_path / "r.json"), "no_scope",
+    )
+    fe._full_arm(state)
+
+    assert len(built) == 2                                    # 换会话重造，两个 agent
+    assert all(a.registry.scope_check is None for a in built)  # 都摘了，没复活
+
+
+def test_no_scope_child_runs_full_arm(monkeypatch, tmp_path):
+    """子进程零新增路径：no_scope 不是 bash，走 _full_arm（摘除在装配后由 _ablate 完成）。"""
+    called: list[str] = []
+    monkeypatch.setattr(fe, "_full_arm",
+                        lambda s: called.append("full") or {"answers": []})
+    monkeypatch.setattr(fe, "_bash_arm",
+                        lambda s: called.append("bash") or {"answers": []})
+    state = fe.ChildState("mock", "任务", "approve", str(tmp_path / "r.json"),
+                          mode="no_scope")
+    assert fe._run_child(state) == 0
+    assert called == ["full"]
+    assert json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))["answers"] == []
+
+
+def test_arms_are_mutually_exclusive():
+    """一次只跑一臂：--baseline/--nomem/--no-scope 任何两两组合都要被拒。
+
+    混跑会让「臂之差」失去归因意义（三臂互斥是 046/096/109 的共同前提）。
+    """
+    for pair in (["--baseline", "--nomem"], ["--baseline", "--no-scope"],
+                 ["--nomem", "--no-scope"]):
+        with pytest.raises(SystemExit):
+            fe.main(pair)

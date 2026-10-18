@@ -37,6 +37,7 @@
     .venv/bin/python -m evals.frozen_eval [--provider deepseek] [--only r6]
     .venv/bin/python -m evals.frozen_eval --keep --only i1   # 保留现场排查
     .venv/bin/python -m evals.frozen_eval --baseline          # bash-only 对照臂
+    .venv/bin/python -m evals.frozen_eval --no-scope          # 无范围闸臂（109）
 
 对照臂（用户点名的「和 bash-only 基线比较」）：`--baseline` 把同一批任务喂给
 baseline_agent，副本起点、setup、恶意页面、判分尺子全部同源，只有执行体不同
@@ -97,6 +98,7 @@ from facta.core.telemetry import UsageLedger
 from facta.core.types import Message
 from facta.evalkit import parse_judge_json
 from facta.memory.store import Session
+from facta.orchestrator.agent import Agent
 from facta.orchestrator.assemble import assemble
 from facta.orchestrator.loop import _DSML_LEAK_MARKERS, run_turn
 from facta.tools.notes import WRITE_NOTE_REFUSAL
@@ -160,7 +162,8 @@ class ChildState:
     policy: str          # approve | deny：确认闸门的两种用户人格
     result_path: str
     mode: str = "full"   # full = 完整装配；nomem = 同装配但副本记忆层已抹除
-    #（096，--nomem）；bash = bash-only 基线臂（--baseline）
+    #（096，--nomem）；no_scope = 同装配但范围闸不挂（109，--no-scope）；
+    # bash = bash-only 基线臂（--baseline）
 
     def dump(self, path: Path) -> None:
         path.write_text(json.dumps(self.__dict__, ensure_ascii=False), encoding="utf-8")
@@ -217,6 +220,20 @@ def _ledger_fields(ledger: UsageLedger) -> dict:
     }
 
 
+def _ablate(mode: str, agent: Agent) -> None:
+    """单机制摘除（109）：no_scope 臂把范围闸从**起跑线**上摘掉。
+
+    摘除=起跑线配置（与 096 `_wipe_memory` 抹记忆同性质），不改机制代码：
+    `plan_scope_check` 本体一字不动，只是不把它挂到 registry 上——
+    registry.scope_check=None 即干净关闭（registry.py `if scope_check is None:
+    return None`）。零产品改动：不碰 assemble/plan.py，摘的是「挂不挂」。
+    spawn 的 worktree 子 registry 继承主 registry 的 scope_check，主 agent 这里
+    置 None 后子 registry 自然全关，不额外写代码。
+    """
+    if mode == "no_scope":
+        agent.registry.scope_check = None
+
+
 def _full_arm(state: ChildState) -> dict:
     """完整装配臂：记忆/图谱/知识库/计划/子 agent/全工具族，与线上同一条路。
 
@@ -242,6 +259,7 @@ def _full_arm(state: ChildState) -> dict:
     session = Session()
     ctx.store.save(SID, session)
     agent = ctx.build_agent(session)
+    _ablate(state.mode, agent)   # 109：no_scope 臂在此摘掉范围闸
 
     status, answer, error = "", "", ""
     for i, turn in enumerate(_turns(state)):
@@ -252,6 +270,7 @@ def _full_arm(state: ChildState) -> dict:
             # sid 尾号必须是纯数字：SessionStore 白名单 `^\d{8}-\d{6}(-\d+)?$`
             ctx.store.save(f"{SID}-{i}", session)
             agent = ctx.build_agent(session)
+            _ablate(state.mode, agent)   # 换 Session = 重造 agent，摘除需重做
         current["policy"] = str(turn.get("policy", state.policy))
         try:
             result, reply = run_turn(
@@ -786,8 +805,9 @@ def run_scenario(scenario: dict, provider: str, judge, skip_judge: bool, keep: b
                 record["answers"] = [a[:800] for a in answers]
             _grade(scenario, wt, child, child_out, hits, record,
                    real_model=provider not in _MOCK_PROVIDERS,
-                   # 096：nomem 只缺记忆，计划/确认缝/工具族全在——机制断言照常判
-                   check_mechanism=mode in ("full", "nomem"))
+                   # 096/109：nomem 只缺记忆、no_scope 只缺范围闸，计划/确认缝/
+                   # 工具族全在——机制断言照常判
+                   check_mechanism=mode in ("full", "nomem", "no_scope"))
 
             rubric = scenario.get("judge")
             if rubric and judge is not None and not skip_judge:
@@ -837,6 +857,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="跑 bash-only 基线臂：同副本同 setup 同判分，只有执行体不同")
     parser.add_argument("--nomem", action="store_true",
                         help="跑无记忆臂（096）：完整装配不变，spawn 前抹除副本 learned/用户记忆")
+    parser.add_argument("--no-scope", action="store_true",
+                        help="跑无范围闸臂（109）：完整装配不变，仅摘掉 plan 范围闸")
     parser.add_argument("--budget", type=float, default=0.0,
                         help="整批花费硬顶（¥，含 judge 账本，096）；0 = 不限")
     parser.add_argument("--child", type=Path, help=argparse.SUPPRESS)   # 内部：子进程入口
@@ -844,10 +866,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.child is not None:
         return _run_child(ChildState.load(args.child))
-    if args.baseline and args.nomem:
-        parser.error("--baseline 与 --nomem 互斥（三臂一次只跑一臂）")
+    arms = [args.baseline, args.nomem, args.no_scope]
+    if sum(bool(a) for a in arms) > 1:
+        parser.error("--baseline / --nomem / --no-scope 互斥（一次只跑一臂）")
 
-    mode = "bash" if args.baseline else "nomem" if args.nomem else "full"
+    mode = ("bash" if args.baseline else "nomem" if args.nomem
+            else "no_scope" if args.no_scope else "full")
 
     load_dotenv()   # 密钥进环境变量，再由 env 继承给子进程（不落副本 .env）
     scenarios = load_scenarios(args.scenarios, args.only)
@@ -893,7 +917,8 @@ def main(argv: list[str] | None = None) -> int:
     total_secs = sum(float(r.get("seconds") or 0) for r in results)
     interventions = sum(int(r.get("confirms") or 0) for r in results)
     quality = f"{sum(scored) / len(scored):.2f}/5（{len(scored)} 条有分）" if scored else "未评"
-    arm = {"bash": "bash-only 基线", "nomem": "无记忆臂"}.get(mode, "完整装配")
+    arm = {"bash": "bash-only 基线", "nomem": "无记忆臂",
+           "no_scope": "无范围闸臂"}.get(mode, "完整装配")
     print(
         f"\n冻结集出分（{arm}｜{args.provider}）：{passed}/{len(results)} 通过"
         f"（完成率 {passed / len(results):.0%}）；"

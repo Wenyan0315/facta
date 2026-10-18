@@ -1,6 +1,6 @@
 # Facta 架构图
 
-> 版本：v0.127（2026-10-18）｜随着里程碑推进持续迭代此文档
+> 版本：v0.128（2026-10-18）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [021](decisions/021-direction-decisions.md)）：个人执行助手——执行主轴 + 长期记忆 + 通用外延
 > 产品验证顺序（[098](decisions/098-product-prototype-priorities.md)，原型待实施）：开发方案评审与范围控制 → 项目 Brief 与历史决定复用 → 源码联动讲解；Facta 作为能力底座，先验证自用收益。
@@ -306,6 +306,7 @@
 | [106-mcp-config-panel](decisions/106-mcp-config-panel.md) | MCP 可视化配置面板 | 344 条①执行件（用户拍板单项定稿+全编辑档）：RESTful 四端点（GET /api/mcp 返回 managed/effective path + env_override + 整文件 base_hash + 文件清单 + active 运行时名单；POST/PUT/DELETE 单条粒度）——写侧不变式=新内容先过 `load_server_specs` 校验再原子落盘（磁盘永远留不下「MCP 静默全消失」的坏清单）；生效语义诚实呈现（MCP 装配在 assemble 进程启动一次，文件 vs active 不一致标「待重启生效」，不做热重载）；两条密钥护栏=env 覆盖时面板仍只管仓库文件（不伺服读写 MCP_SERVERS 指向的个人文件）+ headers 不暴露（GET 只回 has_headers，PUT 服务端保留原值，密钥值不经 UI）；FW 第五入口 /mcp 与四入口同款伺服；范围外挂触发信号=连通测试/headers 编辑/Skill 配置/热重载 |
 | [107-ide-context-inbox](decisions/107-ide-context-inbox.md) | IDE 上下文信箱（桥最小可用集） | 348 行剩余待议③执行件（用户拍板「IDE 桥最小可用集」）：**显式推翻 104 的剪贴板桥裁定**——那步粘贴被 issue #42 判死（Cmd+V 不达嵌套 iframe、三轮对齐未解锁、根因未定位），「零服务端改动」保住了功能没交付 ⇒ 重裁正当，104 其余裁定全沿用；新形状=扩展采集（当前文件路径 + 选中区）POST 进服务端**单槽信箱**（`create_app` 闭包内一个字典 + 一把锁，覆盖式不排队，GET 不取走、pop 只在发送那一刻，超长 400 不截断）→ 前端 focus 时拉 chip 给人看 → 发送时 server 层把界碑块**拼在用户文本之后**（保 `route_text` 前缀不被代码围栏污染 M10 轮首路由；不给 `run_turn` 加形参＝不碰 checkpoint/评测轨迹）；界碑照 061「免疫随数据走」新增 `_IDE_OPEN/_IDE_CLOSE` 块头三件事（性质/时效/免疫延伸），SYSTEM_PROMPT sha256 锁一行不改、不加内容检测器（049）；前端**「所见即所送」不变式**（`ide_context = ideCtx !== null`）把「用户看不见的注入」从设计上排除；不做路径围栏（壳里常打开别的项目，`WORKSPACE_ROOT` 相对判定会误杀主用例）+ 无认证登记为既有暴露面非新增；扩展仍不进 CI（20 行 fetch 无状态机，触发信号未兑现）、vsix 0.1.3→0.2.0；顺带追认待议①②（`ensureServer()` spawn + `FACTA_DATA_DIR` 注入）⇒ 348 行议题关闭；issue #42 改注「已绕开」；LSP 诊断/diff 视图/多槽/整文件/反向桥全部范围外挂触发信号 |
 | [108-cost-accounting-cross-check](decisions/108-cost-accounting-cross-check.md) | 成本记账交叉核验 | 盲区=单通道自证（token 来自 `reply.usage`、usage=None 静默漏记）+失败/重试无观测（`record_llm_failure` 不知发了几次请求）+账单从未被核验；方案=独立明细账 `CallLedger` + `call_id` 唯一归属 + 观测真源取 `RobustLLM` 重试循环控制流（档 A 用户拍板，不碰 `llm.py`）+ `verify_calls()` 三不变量（`ledger_matches_total`/`matches_observation`/`unaccounted·unobserved·duplicate`）+ 移植 delta C-5 篡改注入测试；核验时机=仅测试+退出账单（热路径零开销）；边界=不做结算级账/请求字节维度/任务两级账本、不动网关四衣语义 |
+| [109-single-mechanism-ablation-arm](decisions/109-single-mechanism-ablation-arm.md) | 单机制摘除臂 C_NO_SCOPE | 现状=消融全是整臂摘除（full/bash/nomem + memory/graph_ablation），单机制净贡献无臂可测（`guards`/`expect_tools` 是读数非对照臂）；方案=新增 `mode="no_scope"`（`--no-scope`，三臂互斥）+ 摘除落点甲案（harness 侧 `_full_arm` build 后置 `agent.registry.scope_check=None`，registry.py 干净关闭点，`new_session` 重建后重摘）——**零产品改动**、被测机制 `plan_scope_check` 一字不动；受控同源（唯一变量=闸挂否）；用途=喂 099 丙案反事实（关闸看范围闸是否大面积杀任务）；边界=不建通用 `--ablate` 框架/不翻 `expect_tools` 断言/不据单轮读数控丙案；912 passed + 7 skipped |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
