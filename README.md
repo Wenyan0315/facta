@@ -17,8 +17,8 @@
 
 ## 界面一览 / UI Tour
 
-以下为 Web 壳的四个面板，截自 mock 模式（`FACTA_PROVIDER=mock`），图中全部为演示数据：
-The four web panels below were captured in mock mode (`FACTA_PROVIDER=mock`); everything shown is demo data.
+以下为 Web 壳的四个面板，截自 mock 模式（`FACTA_PROVIDER=mock`），图中全部为演示数据（另有语料与 MCP 配置两个入口，暂无截图）：
+The four web panels below were captured in mock mode (`FACTA_PROVIDER=mock`); everything shown is demo data. (The corpus and MCP-config entries have no screenshots yet.)
 
 | 对话 / Chat | 任务视图 / Tasks |
 |---|---|
@@ -50,8 +50,8 @@ The four web panels below were captured in mock mode (`FACTA_PROVIDER=mock`); ev
   A ledger is persisted at tool boundaries; after a kill -9 the process self-heals on restart — recorded results are restored as-is, and side effects with unknown outcomes prompt the model to verify before continuing.
 - **安全收口 / Safety gates**：L0/L1 命令白名单 + L2 确认缝、外部命令三档执行隔离（`FACTA_SANDBOX`：none / workspace-write / container；后端按平台探测 seatbelt 或 bwrap，无可用后端时诚实降级不假装有围栏）× 三档确认策略（`FACTA_APPROVAL_POLICY`：untrusted / on-request / never）、记忆写入围栏、审计 append-only；当前档位与实际后端在 Web 侧栏徽章直接可见。<br>
   L0/L1 command whitelists + an L2 confirmation gate, three-tier sandboxing for external commands (`FACTA_SANDBOX`: none / workspace-write / container; seatbelt or bwrap backend detected per platform, with honest degradation when no backend is available) × three-tier approval policy (`FACTA_APPROVAL_POLICY`: untrusted / on-request / never), a memory-write fence, and append-only audit logs; the configured level and actual backend are visible on the web sidebar badge.
-- **CLI + Web 双壳 / CLI + Web shells**：FastAPI + SSE 流式（仅绑 127.0.0.1），Preact 前端四个面板（对话 / 任务计划 / 记忆 / 知识图谱）。<br>
-  FastAPI + SSE streaming (bound to 127.0.0.1 only), with four Preact panels: chat / task plans / memory / knowledge graph.
+- **CLI + Web 双壳 / CLI + Web shells**：FastAPI + SSE 流式（仅绑 127.0.0.1），零构建对话壳 + Preact 五入口（任务计划 / 记忆 / 知识图谱 / 语料 / MCP 配置）。<br>
+  FastAPI + SSE streaming (bound to 127.0.0.1 only): a zero-build chat shell plus five Preact entries — task plans / memory / knowledge graph / corpus / MCP config.
 - **离线评估 / Offline evaluation**：冻结题库 + git archive 副本剥离 + 注入金丝雀 + LLM-as-judge，CI 中与单元测试同跑。<br>
   A frozen scenario bank + git-archive copy isolation + injection canaries + LLM-as-judge, running in CI alongside unit tests.
 
