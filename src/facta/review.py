@@ -23,6 +23,15 @@ REVIEW_TOOLS = frozenset({
     "list_dir",
 })
 
+# 评审 Agent 的工具轮次预算（ADR 112）：一轮=一次模型调用（批内可多个工具调用），
+# 默认 5（Agent dataclass）对评审偏紧——V01 真机 3/4 例自报「预算已用完」，
+# 299 行文件只读到 40 行，「待验证」段实为保险丝收尾话术（证据被截断而非
+# 模型自愿标注）。12 = 默认的 2.4 倍：典型评审 6–8 轮自然收束，留「读完+复核」
+# 余量；原地踏步熔断（_STUCK_LIMIT）独立于预算，放大预算不放大白烧风险。
+# 只经 build_review_agent 注入（replace 手法与 allowed_tools 同款）——全局默认、
+# chat/spawn/评测臂一律不动。
+REVIEW_MAX_TOOL_ROUNDS = 12
+
 REVIEW_SYSTEM_PROMPT = (
     "你是一个开发方案评审助手。用户在让 AI 开工前，把任务目标、验收要求、"
     "待评审方案交给你；请结合可读取的项目仓库和已确认的项目决定，检查方案里"

@@ -1,9 +1,9 @@
 # Facta 架构图
 
-> 版本：v0.130（2026-10-18）｜随着里程碑推进持续迭代此文档
+> 版本：v0.131（2026-10-19）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [021](decisions/021-direction-decisions.md)）：个人执行助手——执行主轴 + 长期记忆 + 通用外延
-> 产品验证（[098](decisions/098-product-prototype-priorities.md)/[110](decisions/110-product-validation-and-engineering-showcase.md)，原型待实施；V01 实现落点见 [111](decisions/111-v01-review-prototype.md)）：方案评审 → Brief 与历史决定复用 → 源码联动讲解；外部需求验证与工程作品展示并重，1–2 个自用任务后尽早外部试用，五例自用不再是前置。
+> 产品验证（[098](decisions/098-product-prototype-priorities.md)/[110](decisions/110-product-validation-and-engineering-showcase.md)，V01 已实现并真机验证见 [111](decisions/111-v01-review-prototype.md)，证据预算见 [112](decisions/112-review-tool-rounds-budget.md)）：方案评审 → Brief 与历史决定复用 → 源码联动讲解；外部需求验证与工程作品展示并重，1–2 个自用任务后尽早外部试用，五例自用不再是前置。
 
 ## 对外架构图
 
@@ -308,7 +308,8 @@
 | [108-cost-accounting-cross-check](decisions/108-cost-accounting-cross-check.md) | 成本记账交叉核验 | 盲区=单通道自证（token 来自 `reply.usage`、usage=None 静默漏记）+失败/重试无观测（`record_llm_failure` 不知发了几次请求）+账单从未被核验；方案=独立明细账 `CallLedger` + `call_id` 唯一归属 + 观测真源取 `RobustLLM` 重试循环控制流（档 A 用户拍板，不碰 `llm.py`）+ `verify_calls()` 三不变量（`ledger_matches_total`/`matches_observation`/`unaccounted·unobserved·duplicate`）+ 移植 delta C-5 篡改注入测试；核验时机=仅测试+退出账单（热路径零开销）；边界=不做结算级账/请求字节维度/任务两级账本、不动网关四衣语义 |
 | [109-single-mechanism-ablation-arm](decisions/109-single-mechanism-ablation-arm.md) | 单机制摘除臂 C_NO_SCOPE | 现状=消融全是整臂摘除（full/bash/nomem + memory/graph_ablation），单机制净贡献无臂可测（`guards`/`expect_tools` 是读数非对照臂）；方案=新增 `mode="no_scope"`（`--no-scope`，三臂互斥）+ 摘除落点甲案（harness 侧 `_full_arm` build 后置 `agent.registry.scope_check=None`，registry.py 干净关闭点，`new_session` 重建后重摘）——**零产品改动**、被测机制 `plan_scope_check` 一字不动；受控同源（唯一变量=闸挂否）；用途=喂 099 丙案反事实（关闸看范围闸是否大面积杀任务）；边界=不建通用 `--ablate` 框架/不翻 `expect_tools` 断言/不据单轮读数控丙案；912 passed + 7 skipped |
 | [110-product-validation-and-engineering-showcase](decisions/110-product-validation-and-engineering-showcase.md) | 外部需求验证与工程作品展示并重（待实施） | 用户目标排序 1=3>2；保留 098/D01 优先，取消五例自用前置，按最小原型 → 1–2 个自用任务 → 面向 3–5 位目标开发者的外部探索 → 公开案例与去留判断推进；外部仓库接入须明确读取范围与记忆归属；产品收益、记忆增益和工程质量分别记录，方向归档不等于已实现或已验证需求 |
-| [111-v01-review-prototype](decisions/111-v01-review-prototype.md) | V01 最小原型——指定仓库的开工前方案评审（待实施） | 落实 098/D01 与 110/V01：FW 第六页 `/review`（分节材料 + 被评审仓库根）→ `POST /api/runs/sync` 加 `mode="review"`/`repo_root`，复用 run 机制不新建引擎；接入复用 S6a 锚点注入缝（`replace(mother_ctx, workspace_root=repo_root)` 重注册文件四件，围栏/黑名单相对 `repo_root` 判定）**不放宽全局权限**；记忆归属=learned 三桶只在 `repo_root==WORKSPACE_ROOT` 注入或不注入；评审**不自动固化**（跳 `settle_session` consolidate，守 098 红线）；评审人设 `REVIEW_SYSTEM_PROMPT` + `allowed_tools=只读证据集`（结构性禁改代码/跑命令/派子任务）；边界=不建 IDE/阅读器/三工具适配、不自动跑命令、不换模型投票 |
+| [111-v01-review-prototype](decisions/111-v01-review-prototype.md) | V01 最小原型——指定仓库的开工前方案评审 | 落实 098/D01 与 110/V01：FW 第六页 `/review`（分节材料 + 被评审仓库根）→ `POST /api/runs/sync` 加 `mode="review"`/`repo_root`，复用 run 机制不新建引擎；接入复用 S6a 锚点注入缝（`replace(mother_ctx, workspace_root=repo_root)` 重注册文件四件，围栏/黑名单相对 `repo_root` 判定）**不放宽全局权限**；记忆归属=learned 三桶只在 `repo_root==WORKSPACE_ROOT` 注入或不注入；评审**不自动固化**（跳 `settle_session` consolidate，守 098 红线）；评审人设 `REVIEW_SYSTEM_PROMPT` + `allowed_tools=只读证据集`（结构性禁改代码/跑命令/派子任务）；边界=不建 IDE/阅读器/三工具适配、不自动跑命令、不换模型投票；**真机验证通过（2026-10-19，外部仓 4 例：锚定/两态/全程只读/不固化坐实）**，V02 自用待做 |
+| [112-review-tool-rounds-budget](decisions/112-review-tool-rounds-budget.md) | 评审 Agent 单独工具轮次预算 | 111 真机摩擦（3/4 例被默认 `max_tool_rounds=5` 截断，299 行文件只读 40 行，「待验证」段实为保险丝收尾话术）提前解决：`REVIEW_MAX_TOOL_ROUNDS=12` 常量住 review.py 调教区，落点=`build_review_agent` 既有 replace 行扩一笔（与 `allowed_tools` 同款手法）——Agent 全局默认/chat/spawn/评测臂逐字节不动；12=默认 2.4 倍（典型评审 6–8 轮自然收束，留读完+复核余量），原地踏步熔断独立于预算不放大白烧；不做 env/动态/按仓大小自适应，「12 是否够用」挂 V02 观察项 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
