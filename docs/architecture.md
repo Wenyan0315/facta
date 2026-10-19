@@ -1,9 +1,9 @@
 # Facta 架构图
 
-> 版本：v0.131（2026-10-19）｜随着里程碑推进持续迭代此文档
+> 版本：v0.132（2026-10-19）｜随着里程碑推进持续迭代此文档
 > 更新规则：架构有变更（新增层/模块）时，同步更新本文件并提升版本号；架构决策（v0.37 起）写进 docs/decisions/ 并在本文件索引表加行
 > 产品定位（v0.50 起，见 [021](decisions/021-direction-decisions.md)）：个人执行助手——执行主轴 + 长期记忆 + 通用外延
-> 产品验证（[098](decisions/098-product-prototype-priorities.md)/[110](decisions/110-product-validation-and-engineering-showcase.md)，V01 已实现并真机验证见 [111](decisions/111-v01-review-prototype.md)，证据预算见 [112](decisions/112-review-tool-rounds-budget.md)）：方案评审 → Brief 与历史决定复用 → 源码联动讲解；外部需求验证与工程作品展示并重，1–2 个自用任务后尽早外部试用，五例自用不再是前置。
+> 产品验证（[098](decisions/098-product-prototype-priorities.md)/[110](decisions/110-product-validation-and-engineering-showcase.md)，V01 已实现并真机验证见 [111](decisions/111-v01-review-prototype.md)；2.0 路线图见 [114](decisions/114-facta-2-roadmap.md)）：方案评审 → Brief 与历史决定复用 → 源码联动讲解；外部需求验证与工程作品展示并重，1–2 个自用任务后尽早外部试用，五例自用不再是前置。
 
 ## 对外架构图
 
@@ -310,6 +310,8 @@
 | [110-product-validation-and-engineering-showcase](decisions/110-product-validation-and-engineering-showcase.md) | 外部需求验证与工程作品展示并重（待实施） | 用户目标排序 1=3>2；保留 098/D01 优先，取消五例自用前置，按最小原型 → 1–2 个自用任务 → 面向 3–5 位目标开发者的外部探索 → 公开案例与去留判断推进；外部仓库接入须明确读取范围与记忆归属；产品收益、记忆增益和工程质量分别记录，方向归档不等于已实现或已验证需求 |
 | [111-v01-review-prototype](decisions/111-v01-review-prototype.md) | V01 最小原型——指定仓库的开工前方案评审 | 落实 098/D01 与 110/V01：FW 第六页 `/review`（分节材料 + 被评审仓库根）→ `POST /api/runs/sync` 加 `mode="review"`/`repo_root`，复用 run 机制不新建引擎；接入复用 S6a 锚点注入缝（`replace(mother_ctx, workspace_root=repo_root)` 重注册文件四件，围栏/黑名单相对 `repo_root` 判定）**不放宽全局权限**；记忆归属=learned 三桶只在 `repo_root==WORKSPACE_ROOT` 注入或不注入；评审**不自动固化**（跳 `settle_session` consolidate，守 098 红线）；评审人设 `REVIEW_SYSTEM_PROMPT` + `allowed_tools=只读证据集`（结构性禁改代码/跑命令/派子任务）；边界=不建 IDE/阅读器/三工具适配、不自动跑命令、不换模型投票；**真机验证通过（2026-10-19，外部仓 4 例：锚定/两态/全程只读/不固化坐实）**，V02 自用待做 |
 | [112-review-tool-rounds-budget](decisions/112-review-tool-rounds-budget.md) | 评审 Agent 单独工具轮次预算 | 111 真机摩擦（3/4 例被默认 `max_tool_rounds=5` 截断，299 行文件只读 40 行，「待验证」段实为保险丝收尾话术）提前解决：`REVIEW_MAX_TOOL_ROUNDS=12` 常量住 review.py 调教区，落点=`build_review_agent` 既有 replace 行扩一笔（与 `allowed_tools` 同款手法）——Agent 全局默认/chat/spawn/评测臂逐字节不动；12=默认 2.4 倍（典型评审 6–8 轮自然收束，留读完+复核余量），原地踏步熔断独立于预算不放大白烧；不做 env/动态/按仓大小自适应，「12 是否够用」挂 V02 观察项 |
+| [113-brief-generation-prototype](decisions/113-brief-generation-prototype.md) | D02 最小原型——项目 Brief 生成与历史决定复用（已评审待实施） | 098/D02 落实：给任务意图+被开工仓库根 → 结构化开工 Brief（六节契约：目标复述/相关历史决定带日期与 ADR 出处/仓库现状/约束纪律/验收建议/待补充），复用 111 骨架（mode=brief/锚点/归属/跳固化）+ 112 预算 + REVIEW_TOOLS；**已过 /review 开工前评审（dogfood：D01 评审 D02，learned 注入真机首跑）**，四条必改（装配三落点/前端五落点/worker 两处条件/V02 时序）+三条可选全采纳；实现载体调整为 114/M2 首个 data skill；V02 第一例摩擦记录在案（材料≈0/核实 10 分钟/双通道生效/愿复用） |
+| [114-facta-2-roadmap](decisions/114-facta-2-roadmap.md) | Facta 2.0 路线图——通用多任务 harness | 定位=个人多任务 agent harness（任务委派：每任务绑项目仓+技能，后台自主推进，知识按归属分层默认最小可见）；五跨越（对话→委派/取消→steering 打断/全局知识→归属四层/硬编码 mode→skill 数据化/Web→VS Code 一等宿主）；**架构红线=不重写内核**（演进只在编排层+数据层）；知识界定=归属四层矩阵+项目记忆双模式（默认集中 data/projects/，可切就地 .facta/ 带得走，用户拍板）+边界三层（skill 能力/锚点数据/可见性知识）；Task 完整实体（状态机+产物登记+任务级账单，用户拍板，反方登记）；分期 M1 可控长任务（steering+续跑+TaskStore+分账）→ M2 界定与技能（skill 数据化+项目记忆，Brief 首个）→ M3 多任务（队列+并发+授权档）→ M4 宿主与发布（VS Code 面板+v2.0.0）；负决策=无多用户/in-process/自动投递/云部署/内核重写 |
 | [veto-archive](decisions/veto-archive.md) | 否决档案（活清单） | 被否决方案+原因+重新考虑触发信号，持续追加 |
 
 ## 已知问题（活清单）
