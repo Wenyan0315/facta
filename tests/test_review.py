@@ -30,7 +30,7 @@ from facta.orchestrator.assemble import (
     ensure_persona,
 )
 from facta.paths import WORKSPACE_ROOT
-from facta.review import REVIEW_SYSTEM_PROMPT, REVIEW_TOOLS
+from facta.review import REVIEW_MAX_TOOL_ROUNDS, REVIEW_SYSTEM_PROMPT, REVIEW_TOOLS
 from facta.server.app import create_app
 from facta.server.run_store import RunStore
 from facta.tools.context import ToolContext
@@ -143,6 +143,10 @@ def test_review_agent_menu_is_readonly_evidence_set(tmp_path):
     assert "不在当前 agent 的工具清单" in out
     assert not (repo / "x.txt").exists()
     assert agent.router is None   # 评审不挂场景路由（保确定性）
+
+    # ADR 112：评审证据预算——单独 12 轮（V01 真机 3/4 例被默认 5 轮截断），
+    # 换 replace 注入而非改 Agent 全局默认（chat/spawn/评测臂不动）。
+    assert agent.max_tool_rounds == REVIEW_MAX_TOOL_ROUNDS == 12
 
 
 def test_review_agent_injects_project_decisions_only_for_own_repo(tmp_path):

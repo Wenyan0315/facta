@@ -51,7 +51,7 @@ from facta.paths import (
     WORKSPACE_ROOT,
     user_memory_path,
 )
-from facta.review import REVIEW_SYSTEM_PROMPT, REVIEW_TOOLS
+from facta.review import REVIEW_MAX_TOOL_ROUNDS, REVIEW_SYSTEM_PROMPT, REVIEW_TOOLS
 from facta.tools.builtin import register_builtin
 from facta.tools.context import ToolContext
 from facta.tools.graph import register_graph_tools
@@ -350,8 +350,10 @@ def build_review_agent(
         user_memory_path=None,
         base_prompt=REVIEW_SYSTEM_PROMPT,
     )
-    # 只读证据子集：schemas() 与 execute() 双重过滤——评审不能改代码/跑命令
-    agent = replace(agent, allowed_tools=REVIEW_TOOLS)
+    # 只读证据子集 + 评审证据预算（ADR 112）：schemas() 与 execute() 双重过滤
+    # ——评审不能改代码/跑命令；预算 12 替默认 5（评审要读完文件才能核实前提，
+    # V01 真机 3/4 例被 5 轮截断）。两笔都是 replace 注入，全局默认不动。
+    agent = replace(agent, allowed_tools=REVIEW_TOOLS, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS)
     ensure_persona(session, agent)
     return agent
 
