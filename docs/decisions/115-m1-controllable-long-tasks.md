@@ -44,8 +44,13 @@
   不是 `asdict` 全量导出，故新增字段不会漏进响应；并在 `tests/test_app.py`
   加一条响应字段快照钉住。Task 走**新入口** `/api/tasks`。
 - **Task 字段**：`task_id / goal / session_id / repo_root / status / run_ids /
-  artifacts / billing / continuations / started_at / created_at / updated_at /
-  cancel_requested / fuse_fired`。
+  artifacts / billing / continuations / started_at / cost_base / created_at /
+  updated_at / cancel_requested / fuse_fired / blocked_reason`。
+  （实现回写：`blocked_reason`＝§3「把原因写进 Task」的落点；`cost_base`＝成本
+  保险丝的 resume 基线（§3 恢复重置项）；两者为本清单初版遗漏、实现期补上。
+  `artifacts` 不落 dataclass 字段，序列化时现推（产物=引用）。落盘格式＝
+  dataclass 字段（`asdict`），与 API 视图 `to_dict`（显式挑字段）刻意分开——
+  两种形状混用会让磁盘快照反序列化失败，实现期实测抓到。）
 - **`repo_root` 在 M1 只是登记字段**：chat 模式的 task 不因此产生文件围栏
   （围栏仍归 S6a/`WORKSPACE_ROOT`）；项目隔离是 M2 的事。**明写**以免误读为
   「项目隔离已生效」。

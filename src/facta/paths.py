@@ -48,6 +48,10 @@ SESSIONS_DIR = DATA_ROOT / "memory" / "sessions"   # S8a 会话仓库：所有�
 # 运行时数据，不进 git（同 audit/）。
 CHECKPOINT_DIR = DATA_ROOT / "checkpoints"
 
+# ADR 115（M1）Task 快照目录：每个长期委派一个 JSON（`<task_id>.json`），
+# 状态迁移 + Run 边界时落盘（频率远低于事件级）。运行时数据，不进 git。
+TASKS_DIR = DATA_ROOT / "tasks"
+
 # M6.5 用户级记忆默认位置：仓库外单文件（~ 锚定，与仓库内 DATA_ROOT 族不同列）。
 # 跨项目共享、不进任何 git——M6.4 红线「位置没建好前不开桶」的
 # 兑现：用户级信息（偏好/习惯/行程）从「一律不记」变「分流到这里」。

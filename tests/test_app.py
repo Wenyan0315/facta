@@ -7,12 +7,14 @@ S8a 起 ctx 不带 session/agent（多会话并发要求「一段对话一套 ag
 
 import json
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from facta.core.llm import ScriptedLLM
+from facta.core.telemetry import UsageLedger
 from facta.core.types import Message
 from facta.memory.store import Session, SessionStore
 from facta.memory.todos import TodoStore
@@ -35,6 +37,8 @@ def _isolate_disk_state(tmp_path, monkeypatch):
     """
     monkeypatch.setattr("facta.server.app.LEARNED_DIR", tmp_path / "learned")
     monkeypatch.setattr("facta.orchestrator.assemble.LEARNED_DIR", tmp_path / "learned")
+    # ADR 115：Task 快照落盘（TaskStore 构造时懒取 TASKS_DIR，此处置换生效）
+    monkeypatch.setattr("facta.orchestrator.task.TASKS_DIR", tmp_path / "tasks")
     # ADR 078：settle 尾部的 sleep-time 整理会读 user.md（不隔离会摸真 home
     # 的隐私文件，超限时还会真 sweep 它的墓碑——测试副作用不可接受）
     monkeypatch.setenv("FACTA_USER_MEMORY", str(tmp_path / "user.md"))
@@ -56,7 +60,7 @@ def _make_ctx(reply: str = "你好！", llm=None, registry=None) -> AppContext:
 
     return AppContext(
         provider="mock",
-        ledger=None,
+        ledger=UsageLedger(),   # 真账本（ADR 115 分账链路要有账可查）
         embedder=None,
         llm=llm or ScriptedLLM([Message(role="assistant", content=reply)]),
         internal_llm=ScriptedLLM([]),
@@ -1071,3 +1075,98 @@ def test_concurrent_sends_only_one_claims_mailbox():
 
     assert sum("ONLY = 1" in _user_text_of(client, r["session_id"], "抢") for r in runs) == 1
     assert client.get("/api/ide/context").json() is None
+
+
+# ---------- ADR 115（M1）：Task 端点 ----------
+
+_TASK_TERMINAL_STATES = ("done", "failed", "cancelled", "blocked", "waiting-steer")
+
+
+def _wait_task(client: TestClient, task_id: str, timeout: float = 5.0) -> dict:
+    """轮询到任务离开 running/queued（worker 是真后台线程，用轮询不用 sleep 碰运气）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        d = client.get(f"/api/tasks/{task_id}").json()
+        if d["status"] in _TASK_TERMINAL_STATES:
+            return d
+        time.sleep(0.02)
+    raise AssertionError(f"任务未在 {timeout}s 内落等待/终态：{d['status']}")
+
+
+def _make_done_task(client: TestClient) -> tuple[dict, dict]:
+    """建一个一发即 done 的任务（无计划＝一发），返回（创建响应, 终态视图）。"""
+    resp = client.post("/api/tasks", json={"goal": "做个一发的小事"})
+    assert resp.status_code == 202
+    created = resp.json()
+    return created, _wait_task(client, created["task_id"])
+
+
+def test_task_create_to_done_with_kickoff_hint():
+    client = _make_client()
+    created, done = _make_done_task(client)
+    assert done["status"] == "done"
+    assert done["goal"] == "做个一发的小事"
+    assert len(done["run_ids"]) == 1
+    # 产物=引用，不新建存储
+    assert done["artifacts"] == {
+        "session_id": created["session_id"],
+        "run_ids": done["run_ids"],
+    }
+    # 首条消息 = goal + 极简 kickoff 提示
+    msgs = client.get(f"/api/sessions/{created['session_id']}/messages").json()
+    assert any("做个一发的小事" in m["content"] and "make_plan" in m["content"] for m in msgs)
+
+
+def test_task_empty_goal_is_400():
+    client = _make_client()
+    assert client.post("/api/tasks", json={"goal": "   "}).status_code == 400
+
+
+def test_task_list_get_and_billing_shape():
+    client = _make_client()
+    created, done = _make_done_task(client)
+    tid = created["task_id"]
+
+    listed = client.get("/api/tasks").json()
+    assert any(t["task_id"] == tid for t in listed)
+    assert client.get(f"/api/tasks/{tid}").json()["status"] == "done"
+
+    billing = client.get(f"/api/tasks/{tid}/billing").json()
+    assert set(billing) == {"totals", "runs", "approx_runs"}
+    assert billing["runs"][0]["run_id"] == done["run_ids"][0]
+    assert isinstance(billing["approx_runs"], list)
+
+
+def test_task_unknown_and_bad_id_are_404():
+    client = _make_client()
+    assert client.get("/api/tasks/nope").status_code == 404
+    assert client.get("/api/tasks/../../etc").status_code in (404, 400)
+
+
+def test_task_terminal_rejects_cancel_and_resume():
+    client = _make_client()
+    created, _ = _make_done_task(client)
+    tid = created["task_id"]
+    assert client.post(f"/api/tasks/{tid}/cancel").status_code == 409
+    assert client.post(f"/api/tasks/{tid}/resume", json={}).status_code == 409
+
+
+def test_steer_endpoint_validation():
+    client = _make_client()
+    created, done = _make_done_task(client)
+    rid = done["run_ids"][0]
+    # 未知 run / 空文本 / 终态 run 三档
+    assert client.post("/api/runs/nope/steer", json={"text": "x"}).status_code == 404
+    assert client.post(f"/api/runs/{rid}/steer", json={"text": "  "}).status_code == 400
+    assert client.post(f"/api/runs/{rid}/steer", json={"text": "改方向"}).status_code == 409
+
+
+def test_runs_response_fields_snapshot():
+    """/api/runs 响应是显式挑字段（ADR 115 评审问题 8 的钉子）：
+    Run 新增 task_id/usage 等字段不得漏进响应——形状变了先来改这条。"""
+    client = _make_client()
+    _, done = _make_done_task(client)
+    rows = client.get("/api/runs").json()
+    assert rows
+    for row in rows:
+        assert set(row) == {"run_id", "session_id", "status", "title", "preview"}
