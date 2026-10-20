@@ -18,8 +18,10 @@ import os
 import queue
 import re
 import threading
+import time
+from dataclasses import replace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -45,12 +47,37 @@ from facta.orchestrator.agent import Agent
 from facta.orchestrator.assemble import AppContext, settle_session
 from facta.orchestrator.checkpoint import CheckpointWriter, heal, ledger_path, read_ledger
 from facta.orchestrator.loop import RunResult, run_turn
+from facta.orchestrator.task import (
+    CONTINUE_RETRY_INTERVAL_S,
+    CONTINUE_RETRY_TIMES,
+    KICKOFF_HINT,
+    TASK_BLOCKED,
+    TASK_CANCELLED,
+    TASK_DONE,
+    TASK_FAILED,
+    TASK_QUEUED,
+    TASK_RUNNING,
+    TASK_TERMINAL,
+    TASK_WAITING_STEER,
+    Task,
+    TaskStore,
+    _is_task_done,
+    _plan_has_failed,
+    billing_add,
+    billing_totals,
+    continue_message,
+    fuse_expired,
+    should_continue,
+    usage_delta,
+)
+from facta.orchestrator.task import to_dict as task_to_dict
 from facta.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, WORKSPACE_ROOT, user_memory_path
 from facta.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_RUNNING,
+    STATUS_WAITING,
     Run,
     RunStore,
 )
@@ -204,6 +231,31 @@ class ConfirmRequest(BaseModel):
     approve: bool
 
 
+class CreateTaskRequest(BaseModel):
+    """创建 Task 的请求体（ADR 115）：一次长期委派。
+
+    goal 即首条消息（外加一句极简 kickoff 提示「复杂任务先立计划」）；
+    session_id 可省（新开一段对话）；repo_root 在 M1 **只登记不产生围栏**
+    （§1 明写——项目隔离是 M2 的事）。
+    """
+
+    goal: str
+    session_id: str | None = None
+    repo_root: str | None = None
+
+
+class SteerRequest(BaseModel):
+    """steering 投递的请求体（ADR 115）：给在飞 Run 纠偏改向。"""
+
+    text: str
+
+
+class ResumeRequest(BaseModel):
+    """任务恢复的请求体（ADR 115）：text 可省——省略即续跑注入消息代打。"""
+
+    text: str = ""
+
+
 class RenameSessionRequest(BaseModel):
     """会话重命名的请求体（2026-09-17 体验轮）：只改 title 标签。"""
 
@@ -267,6 +319,43 @@ def _agent_for_mode(
     return ctx.build_agent(session)
 
 
+def _drop_leftover_steer(run: Run, task: Task | None) -> None:
+    """ADR 115：交互轮收尾后仍在信箱里的 steer 已无处消化（收尾段不经过
+    检查点①）——发 steer.dropped 如实告知，不静默丢件。task 轮不取：
+    _task_worker 要拿它起新 Run（评审问题 7 的兜底在宿主循环）。
+    抽成独立函数：_run_worker 的 branch 预算（PLR0912）。
+    """
+    if task is not None:
+        return
+    leftover = run.take_steer()
+    if leftover:
+        run.emit("steer.dropped", {"text": leftover})
+
+
+def _billing_closeout(
+    run: Run,
+    task: Task | None,
+    store: RunStore | None,
+    usage_before: Any,
+    started_with_others: bool,
+    ledger: Any,
+    session: Session | None,
+) -> None:
+    """ADR 115 分账收尾（从 _run_worker finally 抽出，收 PLR0912 分支预算）。
+
+    第二次快照在 settle 之后（settle 的 LLM 也在窗口内——内部链与用户链
+    共享一本账，口径如此）。usage_approx 取窗口两端的 OR：进入时有并发、
+    或退出时别人还在飞。task 轮把终局 session 挂 run._final_session 供
+    宿主循环读 plan 做续跑判定，熔断标记同步到 run.fuse_fired。
+    """
+    if usage_before is not None and ledger is not None:
+        run.usage = usage_delta(usage_before, replace(ledger))
+    run.usage_approx = started_with_others or (store is not None and store.in_flight_count() > 0)
+    if task is not None:
+        run._final_session = session
+        run.fuse_fired = task.fuse_fired
+
+
 def _run_worker(
     ctx: AppContext,
     run: Run,
@@ -274,6 +363,8 @@ def _run_worker(
     *,
     mode: str = "chat",
     repo_root: Path | None = None,
+    store: RunStore | None = None,
+    task: Task | None = None,
 ) -> None:
     """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。
 
@@ -303,7 +394,20 @@ def _run_worker(
       代价是与「同会话的下一轮」失去准入串行：settle 的终态写因此改
       store.update 窄写（见 assemble.settle_session 头注记），messages
       的所有权仍在轮次 worker 手里，丢消息在结构上不可能。
+
+    ADR 115（M1）三件增量：
+      - steering：steer_source=run.take_steer 挂在检查点①（拉缝，loop 内）。
+        收尾段（_close_out）的模型调用不经过检查点①——留在信箱里的 steer
+        不在此消化：task 轮交给 _task_worker 兜底起新 Run，交互轮发
+        steer.dropped 告知（评审问题 7）。
+      - 分账：run_turn 前后各取一次 UsageLedger 快照，差值=run.usage
+        （settle 的 LLM 也在窗口内——内部链与用户链共享一本账，口径如此）。
+        窗口内有别的 Run 在飞 → run.usage_approx=True（显式标注，不假装精确）。
+      - task：终局 session 挂 run._final_session 供宿主循环读 plan；熔断
+        标记同步到 run.fuse_fired。
     """
+    usage_before = replace(ctx.ledger) if ctx.ledger is not None else None   # None=不记账（测试装配惯例）
+    started_with_others = store is not None and store.in_flight_count() > 1
     run.status = STATUS_RUNNING
     run.emit("run.started", {})
     status = STATUS_FAILED
@@ -336,6 +440,7 @@ def _run_worker(
             on_event=_forward,
             should_cancel=lambda: run.cancel_requested,
             on_confirm=run.request_confirm,
+            steer_source=run.take_steer,   # ADR 115：steering 拉缝（检查点① drain）
         )
         # 终态判定：RunResult 枚举替代 None 二义性（S4 评审 #3）
         if result is RunResult.COMPLETED and reply is not None:
@@ -358,6 +463,9 @@ def _run_worker(
                 ctx.store.save(run.session_id, session)   # ① 保底（毫秒级）：finish 前落盘
         except Exception as exc:   # 保底失败不吞终态：告知用户，流照常收口
             run.emit("error", {"message": f"会话保底落盘失败：{exc}"})
+        # ADR 115：交互轮收尾后仍在信箱里的 steer 发 steer.dropped 如实告知
+        # （评审问题 7 的兜底在宿主循环，task 轮不在此取）
+        _drop_leftover_steer(run, task)
         run.finish(status)   # ② 终态事件 + 释放准入——从这里起同会话可开下一轮
         # ADR 111：评审模式跳过后台固化——模型评审意见不自动升级为项目决定（098 红线）
         if session is not None and mode != "review":
@@ -365,13 +473,147 @@ def _run_worker(
                 settle_session(session, run.session_id, ctx.store, ctx.internal_llm)
             except Exception:   # 对话本体已保底落盘，游标未推进下轮重烧（P2-7 兜底）
                 logger.warning("异步收官失败：游标未推进，下轮重烧", exc_info=True)
+        # ADR 115 分账 + 终局 session 挂载（抽函数，见 _billing_closeout）
+        _billing_closeout(run, task, store, usage_before, started_with_others, ctx.ledger, session)
         run._settle_done.set()   # 测试同步点（ADR 076），生产只 set 不 wait
+
+
+# ---- ADR 115（M1）任务宿主循环：轮之外的推进者 ----
+
+_FUSE_TICK_S = 30.0   # 看守线程心跳（30s 一跳；保险丝粒度秒级足够，不追精确）
+
+
+def _fuse_guard(store: RunStore, tasks: TaskStore, task: Task) -> None:
+    """每任务看守线程（daemon，30s 一跳）——评审问题 2 的修复。
+
+    轮间检查不够：Run.request_confirm 是**无超时阻塞**，L2 确认挂起期间
+    _task_worker 拿不到控制权，时长保险丝会整个失效。看守独立于 worker：
+    到期即置 fuse_fired + request_cancel 在飞 Run（request_confirm 的等待
+    循环本就轮询 cancel_requested，顺带解开挂起）。
+    熔断后 Task 落 blocked 不落 cancelled——fuse_fired 与用户取消区分开。
+    随任务离开 running/queued 退出，不常驻（resume 会再起一只）。
+    """
+    while task.status in (TASK_QUEUED, TASK_RUNNING):
+        time.sleep(_FUSE_TICK_S)
+        reason = fuse_expired(task)
+        if reason is None:
+            continue
+        task.fuse_fired = True
+        task.blocked_reason = f"保险丝熔断：{reason}"
+        tasks.save(task)
+        active = store.active_run(task.session_id)
+        if active is not None and active.task_id == task.task_id:
+            active.request_cancel()
+        return
+
+
+def _create_run_with_backoff(store: RunStore, task: Task, title: str) -> Run | str | None:
+    """续跑起新 Run：create_if_idle 被全局上限拒 → 退避重试（评审问题 3）。
+
+    返回 Run=成功 / str=退避耗尽的被拒原因 / None=取消或熔断打断了退避。
+    不改 RunStore 并发语义、不为任务预留槽位（§3 裁定）——任务与聊天
+    争同一池槽位，抢不到就等，等不到落 blocked 并写明原因。
+    """
+    for _ in range(CONTINUE_RETRY_TIMES):
+        if task.cancel_requested or task.fuse_fired:
+            return None
+        run = store.create_if_idle(task.session_id, title=title[:60])
+        if not isinstance(run, str):
+            run.task_id = task.task_id
+            return run
+        time.sleep(CONTINUE_RETRY_INTERVAL_S)
+    return run   # 最后一次的被拒原因（str）
+
+
+def _task_verdict(task: Task, run: Run, session: Session | None) -> str | None:
+    """轮后判定（先人后机）：返回下一轮 user_text；None = 任务已落终态（status 已置）。
+
+    顺序：用户取消 > 保险丝 > 失败 > 等改向 > 续跑 > 收尾段 steer 兜底 > done。
+    收尾段（_close_out）的 steer 不经过内核检查点①——这里先 take_steer()，
+    有内容就拿它起新 Run 而不是直接 done（评审问题 7）。
+    抽成独立函数：_task_worker 的 branch 预算（PLR0912）。
+    """
+    if task.cancel_requested or run.status == STATUS_CANCELLED:
+        task.status = TASK_CANCELLED
+    elif task.fuse_fired:
+        task.status = TASK_BLOCKED
+        task.blocked_reason = task.blocked_reason or "保险丝熔断（续跑/时长/成本上限）"
+    elif run.status == STATUS_FAILED or (session is not None and _plan_has_failed(session)):
+        task.status = TASK_FAILED   # §1：Run failed 或计划含 failed 步骤
+    elif any(e.type == "stuck" for e in run.events):
+        task.status = TASK_WAITING_STEER   # 原地踏步：等人给方向，resume 续
+    else:
+        if session is not None and should_continue(task, run, session):
+            task.continuations += 1
+            return continue_message(session)
+        steer = run.take_steer()   # 收尾段到达的 steer → 拿它起新 Run
+        if steer is not None:
+            return steer
+        # done 自数判据（评审问题 4）：全 done/skipped 才 done
+        task.status = TASK_DONE if (session is None or _is_task_done(session)) else TASK_FAILED
+    return None
+
+
+def _task_worker(ctx: AppContext, store: RunStore, tasks: TaskStore, task: Task, user_text: str) -> None:
+    """任务宿主循环（§3）：循环调用既有 _run_worker，逐轮判定续跑/熔断/收尾。
+
+    零分叉原则：每轮照旧 save+finish+settle（076 保底不变式逐轮成立），
+    任务路径逐轮复用聊天路径的 _run_worker——两套执行体才是漂移温床。
+    载体 = 同一 Session 起**新 Run**（run_ids 追加），user_text 用显式标注的
+    续跑注入消息（刻意不用 user_text=None，那是 038 崩溃续跑语义）。
+    轮后判定见 _task_verdict（先人后机的顺序写在那里）。
+    """
+    threading.Thread(target=_fuse_guard, args=(store, tasks, task), daemon=True).start()
+    task.status = TASK_RUNNING
+    tasks.save(task)
+    text = user_text
+    while True:
+        # 轮间保险丝/取消快查（看守 30s 一跳，这里补即时性；退避窗口也算在内）
+        if task.cancel_requested:
+            task.status = TASK_CANCELLED
+            tasks.save(task)
+            return
+        reason = fuse_expired(task)
+        if reason is not None or task.fuse_fired:
+            task.fuse_fired = True
+            task.status = TASK_BLOCKED
+            task.blocked_reason = f"保险丝熔断：{reason or task.blocked_reason}"
+            tasks.save(task)
+            return
+
+        run = _create_run_with_backoff(store, task, text)
+        if run is None:   # 取消/熔断打断了退避 → 回顶部走终态判定
+            continue
+        if isinstance(run, str):   # 退避耗尽（全局槽位一直满）
+            task.status = TASK_BLOCKED
+            task.blocked_reason = f"续跑准入被拒：{run}；稍后 resume 可继续"
+            tasks.save(task)
+            return
+
+        task.run_ids.append(run.run_id)
+        tasks.save(task)   # Run 边界落盘（§1：状态迁移 + Run 边界两处时机）
+        _run_worker(ctx, run, text, store=store, task=task)
+        session = run._final_session
+        if run.usage:
+            billing_add(task, run.run_id, run.usage, run.usage_approx)
+        tasks.save(task)   # Run 边界落盘：run_ids/billing 逐轮进快照
+
+        next_text = _task_verdict(task, run, session)
+        tasks.save(task)   # 状态迁移落盘（续跑时也把 continuations+1 先落稳）
+        if next_text is not None:
+            text = next_text
+            continue
+        return
 
 
 def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     # 并发上限（S8a）：默认 3——「长任务在跑，我另开一段对话问点别的」是真实
     # 需求，而不是要上多进程（architecture.md 待讨论区「多进程演进」的关键修正）。
     store = store or RunStore(max_in_flight=int(os.environ.get("FACTA_MAX_CONCURRENT_RUNS", "3")))
+    # ADR 115：Task 快照仓库（内存快路径 + data/tasks/ 持久真值源）。住闭包
+    # ——每 app 实例一份，测试天然隔离（ide_ctx 同款理由）。
+    # 叫 task_store 不叫 tasks：/tasks 前端页路由函数已占了后者（F811）。
+    task_store = TaskStore()
     # IDE 上下文信箱（107）：单槽、内存态、覆盖式。住在闭包里 ⇒ 每个 app
     # 实例一份（测试天然隔离），不新建文件也不新建类（ponytail：一个字典
     # 加一把锁不值一个模块）。锁的口径照 RunStore——一把 threading.Lock
@@ -452,7 +694,7 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         threading.Thread(
             target=_run_worker,
             args=(ctx, run, _claim_ide_context(body)),
-            kwargs={"mode": body.mode, "repo_root": _review_repo(body)},
+            kwargs={"mode": body.mode, "repo_root": _review_repo(body), "store": store},
             daemon=True,
         ).start()
         return {"run_id": run.run_id, "session_id": sid}
@@ -485,7 +727,7 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         threading.Thread(
             target=_run_worker,
             args=(ctx, run, _claim_ide_context(body)),
-            kwargs={"mode": body.mode, "repo_root": _review_repo(body)},
+            kwargs={"mode": body.mode, "repo_root": _review_repo(body), "store": store},
             daemon=True,
         ).start()
         settled = run._settle_done.wait(timeout=timeout)   # 阻塞到终态 + 收官（076 同步点）
@@ -706,6 +948,149 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             }
             for r in store.list_runs(session_id)
         ]
+
+    # ---- ADR 115（M1）Task 端点：长期委派的 HTTP 面 ----
+    # 与 Run 端点同构（创建/查询/取消/恢复 + 账单），端点不推进状态机——
+    # 只校验外部输入、改开关、拉起 _task_worker 线程，推进权全在宿主循环。
+
+    def _require_task(task_id: str) -> Task:
+        """task_id 是 URL 路径来的外部输入：非法格式与不存在都归 404——对外
+        不区分「没这 id」和「id 写歪了」，不漏内部细节。get 对非法 id 返回
+        None（_path 的 ValueError 被它自己吞掉），一次判空即可。
+        """
+        task = task_store.get(task_id)
+        if task is None:
+            raise HTTPException(404, "task not found")
+        return task
+
+    def _task_view(task: Task) -> dict:
+        """Task 视图：序列化 + waiting-approval 派生映射（§1：不落 Task 字段）。
+
+        在飞 Run 挂在 L2 确认上时把状态显示成 waiting-approval——那是 Run
+        的状态，Task 真值仍是 running；映射只在读侧现推，不双写状态机。
+        """
+        d = task_to_dict(task)
+        active = store.active_run(task.session_id)
+        if (
+            d["status"] == TASK_RUNNING
+            and active is not None
+            and active.task_id == task.task_id
+            and active.status == STATUS_WAITING
+        ):
+            d["status"] = "waiting-approval"
+        return d
+
+    @app.post("/api/tasks", status_code=202)
+    def create_task(body: CreateTaskRequest):
+        """创建任务 + 起首 Run（§1）：goal 即首条消息，外加一句 kickoff 提示。
+
+        session_id 可省＝新开一段对话（与 POST /api/runs 同款语义）；
+        repo_root M1 只登记不产生围栏（§1 明写）。
+        """
+        goal = body.goal.strip()
+        if not goal:
+            raise HTTPException(400, "goal 不能为空")
+        sid = body.session_id
+        if sid is None:
+            sid = ctx.store.create(Session())
+        else:
+            _require_session(sid)
+            _require_writable(sid)
+        task = task_store.create(goal, session_id=sid, repo_root=body.repo_root or "")
+        threading.Thread(
+            target=_task_worker,
+            args=(ctx, store, task_store, task, f"{goal}\n\n{KICKOFF_HINT}"),
+            daemon=True,
+        ).start()
+        return {"task_id": task.task_id, "session_id": sid}
+
+    @app.get("/api/tasks")
+    def list_tasks():
+        return [_task_view(t) for t in task_store.list()]
+
+    @app.get("/api/tasks/{task_id}")
+    def get_task(task_id: str):
+        return _task_view(_require_task(task_id))
+
+    @app.get("/api/tasks/{task_id}/billing")
+    def get_task_billing(task_id: str):
+        """任务分账（§2）：合计 + per-Run 明细 + 并发近似标注。
+
+        合计是推导值（billing_totals 现算）——落盘的只有明细，合计永不漂移。
+        """
+        task = _require_task(task_id)
+        return {
+            "totals": billing_totals(task),
+            "runs": [{"run_id": rid, "usage": u} for rid, u in task.billing.get("runs", {}).items()],
+            "approx_runs": list(task.billing.get("approx_runs", [])),
+        }
+
+    @app.post("/api/tasks/{task_id}/cancel")
+    def cancel_task(task_id: str):
+        """取消任务：置 cancel_requested + 叫停在飞 Run。
+
+        挂起态（waiting-steer/blocked）没有 worker 在推进，就地落终态——
+        否则取消请求会一直悬着没人消费。终态任务拒（与 Run cancel 同款 409）。
+        """
+        task = _require_task(task_id)
+        if task.status in TASK_TERMINAL:
+            raise HTTPException(409, "任务已结束，无法取消")
+        task.cancel_requested = True
+        task_store.save(task)
+        active = store.active_run(task.session_id)
+        if active is not None and active.task_id == task.task_id:
+            active.request_cancel()
+        if task.status in (TASK_WAITING_STEER, TASK_BLOCKED):
+            task.status = TASK_CANCELLED
+            task_store.save(task)
+        return {"status": task.status}
+
+    @app.post("/api/tasks/{task_id}/resume")
+    def resume_task(task_id: str, body: ResumeRequest):
+        """恢复任务（§3）：只有 waiting-steer / blocked 可恢复，起新 _task_worker。
+
+        保险丝基线全部重置（continuations/started_at/cost_base/fuse_fired）——
+        不重置就「一恢复就再熔断」。text 可省：省略即续跑注入消息代打
+        （显式标注，不复用 038 崩溃续跑语义）。
+        """
+        task = _require_task(task_id)
+        if task.status not in (TASK_WAITING_STEER, TASK_BLOCKED):
+            raise HTTPException(409, f"状态 {task.status} 不可恢复（只有 waiting-steer / blocked）")
+        _require_session(task.session_id)   # 会话被删则无从续起，先挡（404）
+        _require_writable(task.session_id)
+        task.cancel_requested = False
+        task.fuse_fired = False
+        task.blocked_reason = ""
+        task.continuations = 0
+        task.started_at = time.time()
+        task.cost_base = billing_totals(task).get("llm_cost", 0.0)
+        task.status = TASK_QUEUED
+        task_store.save(task)
+        text = body.text.strip()
+        if not text:
+            text = continue_message(ctx.store.load(task.session_id))
+        threading.Thread(
+            target=_task_worker,
+            args=(ctx, store, task_store, task, text),
+            daemon=True,
+        ).start()
+        return _task_view(task)
+
+    @app.post("/api/runs/{run_id}/steer", status_code=202)
+    def steer(run_id: str, body: SteerRequest):
+        """steering 投递（§1）：给在飞 Run 的信箱塞纠偏内容，下次模型调用前进底片。
+
+        终态 Run 拒（409）——纠偏是给「还在跑」的东西改向，跑到一半的
+        历史不接受改写（request_steer 的 False 即终态）。
+        """
+        run = store.get(run_id)
+        if run is None:
+            raise HTTPException(404, "run not found")
+        if not body.text.strip():
+            raise HTTPException(400, "纠偏内容不能为空")
+        if not run.request_steer(body.text):
+            raise HTTPException(409, "Run 已结束，无法纠偏")
+        return {"status": "queued"}
 
     # 个人待办（014 语义：任务=个人待办）：UI 直连 store，与 agent 工具共用同一实例
     @app.get("/api/todos")

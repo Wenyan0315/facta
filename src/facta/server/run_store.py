@@ -21,6 +21,7 @@ import queue
 import threading
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 SCHEMA_VERSION = "1"   # 事件协议版本护栏：未知 type/字段出现时，旧客户端忽略而非崩溃
 
@@ -70,6 +71,12 @@ class Run:
     events: list[RunEvent] = field(default_factory=list)
     cancel_requested: bool = False
     confirm_pending: bool = False   # S4b：是否正挂着一个待裁决的 L2 确认（confirm 端点判据）
+    # ---- ADR 115（M1）：Task 归属 + steering 信箱 + per-Run 账单切片 ----
+    task_id: str = ""        # 所属 Task；""= 未纳入任务（既有调用方逐字节不受影响）
+    steer_pending: str = ""  # steering 信箱（累积式：两次纠偏都得进上下文，不互相覆盖）
+    fuse_fired: bool = False   # 任务保险丝熔断标记（与用户取消区分开，_task_worker 判定读）
+    usage: dict = field(default_factory=dict)   # per-Run 账单切片（UsageLedger 快照差，收尾时回填）
+    usage_approx: bool = False   # 窗口内有并发 Run 在飞 → 归因为近似（显式标注，绝不静默串账）
     _subscribers: list = field(default_factory=list, repr=False)   # 广播模型（评审修复轮）：每连接独立队列——此前单队列，聊天页+任务页同时订阅同一 Run 时事件被随机分食（竞争消费）
     _seq: int = 0
     _confirm_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -84,6 +91,13 @@ class Run:
     # `self._seq += 1` 非原子，并发下会重号（seq 是排序/去重/重放的位置键，
     # 重号=客户端可能漏读一条）。修共享收口点一次，不在调用侧各自加锁。
     _emit_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # ADR 115 steering 信箱锁：「取出」与「置空」必须原子（ide_ctx 闭包锁同款
+    # 理由），且与「投递」互斥——防止 append 与 take 交错丢件。独立于
+    # _emit_lock：信箱不发事件，两把锁各管各的临界区。
+    _steer_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # ADR 115：本轮终局 Session 挂给 _task_worker 判定读（续跑要看 session.plan
+    # ——session 是 _run_worker 的局部变量，不挂出来宿主循环拿不到）
+    _final_session: Any = field(default=None, repr=False)
     # ADR 076 收官同步点：worker 的异步 settle 跑在 SSE 流 sentinel 收口
     # 之后，测试无法再靠「读完事件流」推断收官完成——等这个 Event。
     # 生产逻辑零参与（只 set 不 wait）。
@@ -147,6 +161,26 @@ class Run:
             return False
         self.cancel_requested = True
         return True
+
+    def request_steer(self, text: str) -> bool:
+        """steering 投递（ADR 115）：仅非终态生效；信箱累积而非覆盖。
+
+        覆盖会静默丢掉用户前一条纠偏——两次改向都在下一次模型调用前进上下文。
+        """
+        if self.status in _TERMINAL:
+            return False
+        text = text.strip()
+        if not text:
+            return False
+        with self._steer_lock:
+            self.steer_pending = f"{self.steer_pending}\n{text}" if self.steer_pending else text
+        return True
+
+    def take_steer(self) -> str | None:
+        """清空并取出信箱（ADR 115）：「取出」与「置空」原子，空信箱给 None。"""
+        with self._steer_lock:
+            taken, self.steer_pending = self.steer_pending or None, ""
+        return taken
 
     def request_confirm(self, tool: str, arguments: dict) -> bool:
         """S4b L2 裁决挂起：worker 线程内调用，阻塞到用户落子或取消。
@@ -268,3 +302,9 @@ class RunStore:
                 if session_id is None or run.session_id == session_id:
                     return run
             return None
+
+    def in_flight_count(self) -> int:
+        """当前 in-flight 数（ADR 115 §4）：per-Run 账单归因的并发标注判据
+        ——快照窗口内 >1 就标 usage_approx（不假装精确、不禁并发）。"""
+        with self._lock:
+            return sum(1 for r in self._runs.values() if r.status in _IN_FLIGHT)

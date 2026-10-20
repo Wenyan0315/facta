@@ -125,6 +125,29 @@ def _stuck_check(
     return sig, streak, streak >= _STUCK_LIMIT - 1
 
 
+def _drain_steer(
+    session: Session,
+    payload: list[Message],
+    steer_source: Callable[[], str | None] | None,
+    on_event: Callable[[str, dict], None] | None,
+) -> None:
+    """ADR 115 steering 检查点：drain 信箱，有内容则以 user 消息进底片+投影。
+
+    底片与投影双写（与用户消息同待遇）——纠偏是对话事实，后续压缩与崩溃
+    恢复都要看得见它。抽成独立函数：run_turn 的 branch 预算（PLR0912）。
+    """
+    if steer_source is None:
+        return
+    steer = steer_source()
+    if not steer:
+        return
+    _steer_msg = Message(role="user", content=steer)
+    session.messages.append(_steer_msg)
+    payload.append(_steer_msg)
+    if on_event:
+        on_event("steer.applied", {"text": steer})
+
+
 class RunResult(Enum):
     """run_turn 的终态枚举——替代 None 二义性（S4 评审 #3）。
 
@@ -346,6 +369,7 @@ def run_turn(
     on_event: Callable[[str, dict], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     on_confirm: Callable[[str, dict], bool] | None = None,
+    steer_source: Callable[[], str | None] | None = None,
 ) -> tuple[RunResult, Message | None]:
     """跑一轮对话：用户消息入底片 → 投影 →（摘要）→ 工具循环 → 收尾。
 
@@ -367,6 +391,7 @@ def run_turn(
                         （id = tool_call id，P0-3 checkpoint 账本靠它配对意图与结果）
                         max_rounds    {}       保险丝熔断，强制收尾
                         stuck         {"tools": [str]}  P0-6 原地踏步熔断，升人审
+                        steer.applied {"text": str}  ADR 115 steering 纠偏已进上下文
                         error         {"message": str}  模型全挂，本轮无产出
                         sub.*         spawn 的子 agent 过程事件（059）：上面五种
                                       各有一个 sub. 前缀版，data 额外带 task 摘要
@@ -381,6 +406,11 @@ def run_turn(
                     registry.execute 裁决（名字+参数 → 批准/拒绝）。CLI 挂
                     input()，Web 挂 Event.wait()；None=无确认通道，标确认的
                     工具一律按拒绝处理（保守默认）
+        steer_source  steering 拉缝（ADR 115）：与 should_cancel 同构的 pull
+                    缝——检查点①（**同一 Run 内的下一次模型调用**前）drain 一次，
+                    非空则以 user 消息进底片与投影（steer.applied 事件）、继续
+                    本轮不 return（纠偏不杀 Run，与取消的本质区别）。
+                    None = 无 steering（零行为差异）。
 
     返回：
         (RunResult, Message | None)  终态 + 本轮最终 assistant 回答（仅 COMPLETED 时非 None）
@@ -440,6 +470,9 @@ def run_turn(
             if should_cancel and should_cancel():
                 trim_incomplete_round(session.messages)
                 return RunResult.CANCELLED, None
+            # ADR 115 steering 检查点（与取消共享检查点①，不新增 loop 缝）：
+            # drain 信箱，有内容则以 user 消息进底片+投影、继续本轮不 return。
+            _drain_steer(session, payload, steer_source, on_event)
 
             # 流式消费：分片边收边喂 on_text，收完 merge 拼回完整回复。
             # 点菜轮 content 通常为空（不冒字），模型偶尔先冒半句再点菜。
