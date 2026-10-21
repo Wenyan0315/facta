@@ -24,6 +24,7 @@ data/audit/
 data/checkpoints/
 data/worktrees/
 data/evals/
+data/tasks/   # 115：Task 快照（运行时数据，同 data/memory/ 口径）
 # 060 失败台账：plan 归档的派生索引（真值源＝session.json），可删可重建
 data/plan_failures.jsonl
 # 075 召回 x-ray：召回事件的派生索引（真值源＝make_plan 召回），可删可重建
