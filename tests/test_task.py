@@ -115,6 +115,34 @@ def test_done_judgement_failed_step_is_not_done():
     assert _plan_has_failed(s) is True
 
 
+def test_done_judgement_archive_does_not_absorb_failure():
+    """finish_plan 归档不吸收失败（ADR 问题 4 补口，实机验收发现）。
+
+    模型收官归档含 failed 的计划后 view() 为 None——判 done 就是给
+    「用 finish_plan 洗白失败」开后门（真机第二轮实测踩中）。裁决回落到
+    最后一份归档计划。
+    """
+    s = _session_with_plan("a", "b")
+    s.plan.update_step(1, "done", "好了")
+    s.plan.update_step(2, "failed", "没成")
+    s.plan.finish_plan("收官")
+    assert s.plan.view() is None   # 前提：活跃计划已归档
+    assert _is_task_done(s) is False
+    assert _plan_has_failed(s) is True
+
+
+def test_done_judgement_last_archived_plan_wins():
+    """多份归档只看最后一份：后续计划取代先前计划的失败（粒度裁定，ADR 补注）。"""
+    s = _session_with_plan("旧计划")
+    s.plan.update_step(1, "failed", "旧的没做成")
+    s.plan.finish_plan("旧收官")
+    s.plan.make_plan([{"title": "新计划"}])
+    s.plan.update_step(1, "done", "补做成功")
+    s.plan.finish_plan("新收官")
+    assert _is_task_done(s) is True
+    assert _plan_has_failed(s) is False
+
+
 # ---- 保险丝判据（§3，看守与轮间共用一份）----
 
 

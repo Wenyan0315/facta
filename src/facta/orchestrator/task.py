@@ -255,13 +255,29 @@ def fuse_expired(task: Task) -> str | None:
     return None
 
 
+def _verdict_plan(session: Any) -> Any:
+    """任务裁决用的计划快照：优先活跃计划，无活跃看最后一份归档。
+
+    归档不吸收失败（ADR 问题 4 裁定的补口，实机验收发现）：finish_plan 收官
+    后 plan.view() 为 None，只读活跃计划会把「含 failed 的计划一归档」洗白成
+    done——finish_plan 变成失败后门。与 tools/plan.py 的 _record_failures
+    同款 archive[-1] 姿势：收官时那一轮的计划就是本次裁决对象；更早归档的
+    计划视为被后续计划取代（多计划粒度裁定，ADR 115 补注）。
+    """
+    plan = session.plan.view()
+    if plan is not None:
+        return plan
+    archive = session.plan.archive
+    return archive[-1].view() if archive else None
+
+
 def _is_task_done(session: Any) -> bool:
     """done 自数判据：全 done/skipped 才算完；无计划的委派一发即 done。
 
     不能用 Plan.is_complete()——它把 FAILED 也算终态（plan.py:44-46），
     拿它当 done 会把「含失败步骤的任务」误判成成功（评审问题 4）。
     """
-    plan = session.plan.view()
+    plan = _verdict_plan(session)
     if plan is None:
         return True
     return all(s.status in (StepStatus.DONE, StepStatus.SKIPPED) for s in plan.steps)
@@ -269,7 +285,7 @@ def _is_task_done(session: Any) -> bool:
 
 def _plan_has_failed(session: Any) -> bool:
     """计划含 failed 步骤 → 任务 failed（§1 状态机：出现 failed 即 failed）。"""
-    plan = session.plan.view()
+    plan = _verdict_plan(session)
     return plan is not None and any(s.status is StepStatus.FAILED for s in plan.steps)
 
 
