@@ -253,7 +253,7 @@ M1 保持后端聚焦，任务面板归 M3（多任务视图）与 M4（VS Code 
 - [x] 中途 steering 改向一次成功（**在轮边界发送**；`steer.applied` 事件可见、
       方向进入同 Run 的后续模型调用）。
 - [x] `GET /api/tasks/{id}/billing` 返回 per-Run 切片、合计与 `approx` 标记。
-- [ ] 硬保险丝可触发（含 **L2 确认挂起期间**的时长熔断）并落 `blocked`；
+- [x] 硬保险丝可触发（含 **L2 确认挂起期间**的时长熔断）并落 `blocked`；
       `resume` 重置基线后可恢复。
 - [x] 既有路径零回归（`/api/runs` 响应字段快照、CLI、评测、同步端点）。
 - [x] M1 验收本身即 110/V02 自用任务（与 113 的 V02 第一例衔接）。
@@ -290,3 +290,29 @@ failed 的计划后 `plan.view()` 为 None，只读活跃计划的判定把任�
 （`_verdict_plan`，与 `tools/plan.py` 的 `_record_failures` 同款 `archive[-1]`
 姿势）；多份归档时以最后一份为准（后续计划取代先前计划的失败，后续如反转
 须回写本补注）。§1「含 `failed` → `failed`」的原裁定不变。
+
+## 补注二（保险丝实机验收，2026-10-31）
+
+「硬保险丝」验收项补完（`resume` 基线重置、L2 挂确认时长熔断、恢复闭环都实测）：
+
+- **场景 A（续跑保险丝 + resume）**：`FACTA_TASK_MAX_CONTINUATIONS=1`、3 步
+  分批任务 → 第 2 次续跑决策时熔断落 `blocked`（runs=2, cont=2）→ `resume`
+  不带 text（续跑注入消息代打）→ 基线重置（cont=0、时长重计）→ 跑完 `done`。
+- **场景 B（L2 挂确认期间时长熔断）**：`FACTA_TASK_MAX_WALL_CLOCK_S=60`、
+  故意不放行 `make_plan` 确认 → 看守线程解开挂起并熔断落 `blocked` →
+  `resume` + 放行 → `done`。
+
+**发现③——续跑保险丝 off-by-one（裁定：修，已修）**：原判据
+`continuations >= MAX` 在「决定续跑」+1 之后、起新 Run 之前检查，
+MAX=1 时连第一次续跑都执行不了（决策即断），实际执行数恒为 MAX-1。
+改为 `> MAX`：允许执行恰 MAX 次续跑，第 MAX+1 次决策才阻断——与
+§3「最多续跑 N 次」口径对齐。
+
+**发现④——熔断被 cancelled 分支 shadow（真 bug，已修）**：看守线程解开
+L2 挂起的手段是 `request_cancel` 在飞 Run，Run 以 `cancelled` 终态回到
+`_task_verdict`，而原判定 `cancel_requested or run.status==CANCELLED` 排在
+fuse 分支之前 → 挂确认期间熔断的任务落 `cancelled` 而非 `blocked`，违反
+`_fuse_guard` 注释「熔断落 blocked 不落 cancelled」的裁定。修复：分支顺序
+改为「任务级取消标志 > fuse_fired > Run 级取消」——任务级用户取消优先
+（cancel_requested 恒置），Run 级取消（用户直接取消 Run）仍落 cancelled。
+补两条回归测试（fuse+run.cancelled→blocked；纯 Run 取消→cancelled）。

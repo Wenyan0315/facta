@@ -147,7 +147,11 @@ def test_done_judgement_last_archived_plan_wins():
 
 
 def test_fuse_continuations():
+    # 边界语义（实机验收发现的 off-by-one 修复）：允许执行恰 MAX 次续跑，
+    # 第 MAX+1 次决策时才判定达上限（>= 会把第 MAX 次拦在起跑前）
     task = Task(task_id="t1", goal="g", started_at=time.time(), continuations=TASK_MAX_CONTINUATIONS)
+    assert fuse_expired(task) is None
+    task.continuations = TASK_MAX_CONTINUATIONS + 1
     assert "续跑" in (fuse_expired(task) or "")
     task.continuations = 0
     assert fuse_expired(task) is None

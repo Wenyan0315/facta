@@ -244,7 +244,10 @@ def fuse_expired(task: Task) -> str | None:
     看守线程与轮间判定共用这一份（单一判据不漂移）。成本口径 = 任务启动/
     resume 以来的增量（cost_base 是基线，resume 重置——否则一恢复就再熔断）。
     """
-    if task.continuations >= TASK_MAX_CONTINUATIONS:
+    if task.continuations > TASK_MAX_CONTINUATIONS:
+        # > 而非 >=：计数在「决定续跑」时 +1、实际起新 Run 前才查本判据——
+        # >= 会把第 MAX 次续跑决策拦在起跑前（实机最多只执行 MAX-1 次）。
+        # 语义 = 允许执行恰 MAX 次续跑，第 MAX+1 次决策时才阻断（实机验收发现）。
         return f"续跑次数达上限（{TASK_MAX_CONTINUATIONS}）"
     if time.time() - task.started_at > TASK_MAX_WALL_CLOCK_S:
         return f"任务时长超上限（{TASK_MAX_WALL_CLOCK_S:.0f} 秒）"
