@@ -316,3 +316,38 @@ fuse 分支之前 → 挂确认期间熔断的任务落 `cancelled` 而非 `bloc
 改为「任务级取消标志 > fuse_fired > Run 级取消」——任务级用户取消优先
 （cancel_requested 恒置），Run 级取消（用户直接取消 Run）仍落 cancelled。
 补两条回归测试（fuse+run.cancelled→blocked；纯 Run 取消→cancelled）。
+
+## 补注三（长任务六轮验收，2026-11-01）
+
+「≥1h 无人值守」钉子专项：六轮真机尝试**未达成**，如实记录过程与归因
+（用户裁决：收束出报告，钉子留待后续再战，保持未勾）。
+
+| 轮 | 模型/装配 | 终态 | 墙钟 | 归因 |
+|---|---|---|---|---|
+| 1 | flash + 10 步巡检 | failed | 3.8 分 | 批量 skipped + finish_plan 弃跑 |
+| 2 | flash + 反弃跑 goal | failed | 39 分 | 改批量 failed 弃跑（耐力不足，预算未用满） |
+| 3 | deepseek + spawn_step 编排 | done | 16.6 分 | 10 步全 done 零弃跑（62 条发现），但活太轻墙钟不足 |
+| 4 | deepseek + 动态验证 | failed | 11.2 分 | 装配缺口（见下）；模型批量 failed 弃跑 |
+| 5 | deepseek + 修正装配 | done（假收官） | 9.8 分 | 7 步批量 skipped 混过 done 判定 |
+| 6 | deepseek + steering 反跳步 | 中断 | — | 监控中断连带服务停机（step1-3 已有真探针证据） |
+
+结论分层：
+
+- **机制层全通**：续跑（第 5 轮单任务 6 次接新预算）、判据（含 failed→failed、
+  归档回落）、保险丝、分账、L2 机械放行全部按设计工作——六轮失败无一例是
+  调度机制故障。
+- **失败模式收敛为一个**：模型在重活步骤前弃跑/跳步（flash 显性弃跑；deepseek
+  换 skipped 马甲）。goal 文字铁律拦不住；机械护栏（steering 纠偏）第六轮
+  未及验证。
+- **done 判定语义暴露缺口**：`skipped` 算终态（§1 原裁定）可被批量滥用成假
+  收官后门；是否加机械约束（如 skipped 超阈值不落 done、转 waiting-steer）
+  ——**语义变更，待裁决**。
+- **装配真值**（后续再战照抄）：write_file 有工作区围栏写不了 /tmp（探针写
+  `data/checkpoints/probes/`）；run_command 60s 强杀（探针 <30s 全 mock）；
+  run_command 白名单含 `pytest`（探针 = pytest 文件，禁 shell 元字符形态）；
+  write_note 不追加已有笔记（走 `PUT /api/notes`）；update_plan_step 终态
+  不可逆；spawn_step 子 agent 工具集由父 agent 指定。
+- **附带疑点（待裁决）**：spawn_step 会把无动态证据的子步骤自动标 done。
+
+62 条巡检发现（9 高危）的动态复现改由普通 subagent 直接补完，结论追加在
+`data/notes/robustness_patrol.md`（不走 Task 通道，与本钉子解耦）。
