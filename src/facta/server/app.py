@@ -533,11 +533,14 @@ def _task_verdict(task: Task, run: Run, session: Session | None) -> str | None:
     有内容就拿它起新 Run 而不是直接 done（评审问题 7）。
     抽成独立函数：_task_worker 的 branch 预算（PLR0912）。
     """
-    if task.cancel_requested or run.status == STATUS_CANCELLED:
+    if task.cancel_requested:
         task.status = TASK_CANCELLED
     elif task.fuse_fired:
         task.status = TASK_BLOCKED
         task.blocked_reason = task.blocked_reason or "保险丝熔断（续跑/时长/成本上限）"
+    elif run.status == STATUS_CANCELLED:
+        # Run 级取消（用户直接取消 Run，未置任务级标志）→ 任务取消
+        task.status = TASK_CANCELLED
     elif run.status == STATUS_FAILED or (session is not None and _plan_has_failed(session)):
         task.status = TASK_FAILED   # §1：Run failed 或计划含 failed 步骤
     elif any(e.type == "stuck" for e in run.events):

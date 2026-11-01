@@ -18,7 +18,7 @@ from facta.orchestrator.task import (
     Task,
 )
 from facta.server.app import _drop_leftover_steer, _task_verdict
-from facta.server.run_store import STATUS_COMPLETED, STATUS_FAILED, Run
+from facta.server.run_store import STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, Run
 from facta.tools.registry import ToolRegistry
 
 
@@ -124,6 +124,27 @@ def test_verdict_fuse_blocks():
     assert _task_verdict(task, run, None) is None
     assert task.status == TASK_BLOCKED
     assert task.blocked_reason   # blocked 必写原因（§3）
+
+
+def test_verdict_fuse_beats_run_cancel():
+    """L2 挂确认期间熔断：看守 request_cancel 在飞 Run，Run 以 cancelled 回来——
+    那是熔断的手段不是用户取消，任务须落 blocked。实机验收发现：修复前
+    run.status==CANCELLED 分支排在前，把熔断 shadow 成 cancelled（违反
+    ADR「熔断落 blocked 不落 cancelled」）。"""
+    task = Task(task_id="t1", goal="g", fuse_fired=True)
+    run = Run(run_id="r1", session_id="s1")
+    run.status = STATUS_CANCELLED
+    assert _task_verdict(task, run, None) is None
+    assert task.status == TASK_BLOCKED
+
+
+def test_verdict_run_cancel_marks_cancelled():
+    """用户直接取消 Run（未置任务级标志，如 /api/runs/{id}/cancel）→ 任务取消。"""
+    task = Task(task_id="t1", goal="g")
+    run = Run(run_id="r1", session_id="s1")
+    run.status = STATUS_CANCELLED
+    assert _task_verdict(task, run, None) is None
+    assert task.status == TASK_CANCELLED
 
 
 def test_verdict_failed_run():
