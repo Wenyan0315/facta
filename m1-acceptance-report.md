@@ -92,5 +92,5 @@
 
 - 任务快照：`data/tasks/*.json`（de4be3fc=第三轮 done；23e32340/b3b656ec=前两轮 failed）
 - 会话底片：`data/memory/sessions/20261101-134939.json`（轮1）、`20261101-135954.json`（轮2）
-- 巡检报告：`data/notes/robustness_patrol.md`（62 条 + 覆盖表 + 局限）
+- 巡检报告：`docs/robustness-patrol.md`（库内存档；运行时原稿在 `data/notes/`——该目录 15 篇为 frozen-eval 语料钉，不入新件。62 条 + 覆盖表 + 局限）
 - 代码修复：PR #58（归档回落）、PR #59（gitignore）、PR #60（熔断两修复）、PR #61（ADR 补注三）
