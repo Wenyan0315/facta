@@ -53,7 +53,7 @@ def _make_ctx(reply: str = "你好！", llm=None, registry=None) -> AppContext:
     """
     tools = registry or ToolRegistry()
 
-    def build_agent(session: Session) -> Agent:
+    def build_agent(session: Session, repo_root=None) -> Agent:
         agent = Agent(name="test", system_prompt="测试人设", registry=tools)
         ensure_persona(session, agent)
         return agent

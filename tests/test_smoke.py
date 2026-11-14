@@ -78,7 +78,7 @@ def _make_ctx(
     """
     sub_llm = internal_llm or ScriptedLLM([])
 
-    def build_agent(session: Session) -> Agent:
+    def build_agent(session: Session, repo_root=None) -> Agent:
         registry = ToolRegistry()
         tool_ctx = ToolContext(
             notes_dir=None,

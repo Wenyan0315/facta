@@ -42,7 +42,7 @@ from facta.tools.registry import ToolRegistry
 root = Path(sys.argv[1])
 
 
-def build_agent(session):
+def build_agent(session, repo_root=None):
     agent = Agent(name="browser-smoke", system_prompt="测试人设", registry=ToolRegistry())
     ensure_persona(session, agent)
     return agent

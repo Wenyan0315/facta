@@ -21,7 +21,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -63,6 +63,7 @@ from facta.orchestrator.task import (
     TaskStore,
     _is_task_done,
     _plan_has_failed,
+    _plan_skipped_over_limit,
     billing_add,
     billing_totals,
     continue_message,
@@ -72,6 +73,7 @@ from facta.orchestrator.task import (
 )
 from facta.orchestrator.task import to_dict as task_to_dict
 from facta.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, WORKSPACE_ROOT, user_memory_path
+from facta.projects import ProjectsManifest, resolve_learned_dir
 from facta.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -195,10 +197,11 @@ class CreateRunRequest(BaseModel):
     text: str
     session_id: str | None = None
     ide_context: bool = False
-    # ADR 111（D01/110-V01）：mode="review" 走评审 Agent（只读证据菜单），
-    # repo_root 指定被评审仓库根。缺省 chat ⇒ 全部既有调用方逐字节不受影响。
-    mode: Literal["chat", "review"] = "chat"
-    repo_root: str | None = None
+    # ADR 116：mode 从枚举扩为 str——"chat" 或任一已加载技能名（ctx.skills），
+    # 未知值 422 在端点拦（_check_mode）。缺省 chat ⇒ 全部既有调用方逐字节
+    # 不受影响；新增技能 = 新增 data/skills/*.md，零 py 改动。
+    mode: str = "chat"
+    repo_root: str | None = None   # 技能 mode 的目标仓（校验存在；缺省=本仓；chat 忽略）
 
 
 class IdeContextBody(BaseModel):
@@ -303,20 +306,38 @@ class McpServerBody(BaseModel):
     base_hash: str   # GET /api/mcp 拿到的整文件 hash（乐观锁）
 
 
+class CreateProjectRequest(BaseModel):
+    """ADR 116 §3 项目登记（POST /api/projects）。"""
+
+    name: str
+    repo_root: str
+    memory_mode: str = "centralized"   # "centralized"（data/projects/<name>/learned）| "in-repo"（<repo>/.facta/learned）
+    confirm_repo_write: bool = False   # 就地式要往工作仓写目录，须显式确认（114 拍板）
+
+
+class UpdateProjectRequest(BaseModel):
+    """PUT /api/projects/{name}：切换 memory_mode；migrate=true 复制三桶到新址。"""
+
+    memory_mode: str
+    migrate: bool = False
+    confirm_repo_write: bool = False
+
+
 def _agent_for_mode(
     ctx: AppContext, session: Session, mode: str, repo_root: Path | None
 ) -> Agent:
-    """按 mode 选本轮 agent（ADR 111）。
+    """按 mode 选本轮 agent（ADR 116 §1）：技能表查找，不再每技能一个分支。
 
-    review 走评审工厂（只读证据菜单、文件锚点=被评审仓库）；装配缺失
-    =编程错误，报错而非静默降级成 chat（否则评审会悄悄跑成普通对话）。
+    chat → 主 agent 工厂（repo_root 传归属，任务轮记忆按项目注入）；
+    其余 → 技能工厂（只读证据菜单、文件锚点=repo_root）。装配缺失
+    =编程错误，报错而非静默降级成 chat（否则技能会悄悄跑成普通对话）。
     抽成独立函数：_run_worker 的 branch 预算与 TRY301 都收在这里。
     """
-    if mode == "review":
-        if ctx.build_review_agent is None:
-            raise RuntimeError("评审模式不可用：AppContext 未装配 build_review_agent")
-        return ctx.build_review_agent(session, repo_root or WORKSPACE_ROOT)
-    return ctx.build_agent(session)
+    if mode == "chat":
+        return ctx.build_agent(session, repo_root)
+    if ctx.build_skill_agent is None:
+        raise RuntimeError(f"技能模式不可用：AppContext 未装配 build_skill_agent（mode={mode}）")
+    return ctx.build_skill_agent(session, mode, repo_root or WORKSPACE_ROOT)
 
 
 def _drop_leftover_steer(run: Run, task: Task | None) -> None:
@@ -375,9 +396,11 @@ def _run_worker(
     用户记忆的快照因此每轮都是新的——常驻 agent 会让本轮刚固化的记忆
     要等重启才进 prompt。
 
-    ADR 111（mode="review"）：走 `ctx.build_review_agent(session, repo_root)`
-    ——只读证据菜单、文件锚点=被评审仓库；评审**不跑 settle**（模型意见不自动
-    升级为项目决定，只做保底落盘），标题在此就地补。
+    ADR 116（mode=技能名）：走 `ctx.build_skill_agent(session, mode, repo_root)`
+    ——只读证据菜单、文件锚点=目标仓。技能文件 settle 节=skip 的（评审/Brief）
+    **不跑 settle**（模型产出是给用户过目的草稿，不自动升级为项目决定，只做
+    保底落盘），标题在此就地补——判定按 `skip_settle` 布尔属性（预计算在 try
+    前），不按 mode 名字硬编码，第三、第四个技能零 worker 改动。
 
     P0-3（038）崩溃恢复：user_text=None 即「续跑」——不追加新提问，先把
     上次被杀留下的悬挂工具轮次 heal 成合法底片，再让 run_turn 从现场往前走。
@@ -408,6 +431,13 @@ def _run_worker(
     """
     usage_before = replace(ctx.ledger) if ctx.ledger is not None else None   # None=不记账（测试装配惯例）
     started_with_others = store is not None and store.in_flight_count() > 1
+    # ADR 116（评审问题 3 异常路径）：skip_settle 在 try **之前**按技能表预计算。
+    # agent 构造在 try 内可能抛（技能名未装配等），finally 里若读 agent.skip_settle
+    # 会 NameError 放大成 sync 端点半挂——收尾两处只读这个布尔。
+    skip_settle = mode != "chat" and bool(ctx.skills.get(mode) and ctx.skills[mode].skip_settle)
+    # 固化归属（ADR 116 §3）：按 repo_root 解析项目 learned 目录；None 回落
+    # 本仓全局（＝现状：未登记仓的内容固化进全局，116 触发信号挂档）
+    settle_learned = resolve_learned_dir(repo_root, LEARNED_DIR) or LEARNED_DIR
     run.status = STATUS_RUNNING
     run.emit("run.started", {})
     status = STATUS_FAILED
@@ -415,7 +445,7 @@ def _run_worker(
     writer: CheckpointWriter | None = None
     try:
         session = ctx.store.load(run.session_id)
-        # ADR 111：评审模式用评审 Agent（只读证据菜单、文件锚点=被评审仓库）
+        # ADR 116：技能模式用技能 Agent（只读证据菜单、文件锚点=目标仓）
         agent = _agent_for_mode(ctx, session, mode, repo_root)
         ledger = ledger_path(run.session_id)
         # 绑定 save：writer 因此不懂 SessionStore，测试可注入
@@ -449,8 +479,8 @@ def _run_worker(
             status = STATUS_COMPLETED
         elif result is RunResult.CANCELLED:
             status = STATUS_CANCELLED
-        # ADR 111：评审不跑 settle（不固化记忆），标题就地补一个（首句派生）
-        if mode == "review" and session.title is None:
+        # ADR 116：settle 节=skip 的技能不跑 settle（不固化记忆），标题就地补一个
+        if skip_settle and session.title is None:
             session.title = derive_title(session)
     except Exception as exc:   # 防御性兜底：run_turn 已捕获 LLMUnavailableError，这里是意外
         run.emit("error", {"message": str(exc)})
@@ -467,10 +497,11 @@ def _run_worker(
         # （评审问题 7 的兜底在宿主循环，task 轮不在此取）
         _drop_leftover_steer(run, task)
         run.finish(status)   # ② 终态事件 + 释放准入——从这里起同会话可开下一轮
-        # ADR 111：评审模式跳过后台固化——模型评审意见不自动升级为项目决定（098 红线）
-        if session is not None and mode != "review":
+        # ADR 116：settle 节=skip 的技能跳过后台固化——产出是草稿不自动升级
+        # 为项目决定（098 红线）。固化落盘目录按归属（116 §3）。
+        if session is not None and not skip_settle:
             try:
-                settle_session(session, run.session_id, ctx.store, ctx.internal_llm)
+                settle_session(session, run.session_id, ctx.store, ctx.internal_llm, learned_dir=settle_learned)
             except Exception:   # 对话本体已保底落盘，游标未推进下轮重烧（P2-7 兜底）
                 logger.warning("异步收官失败：游标未推进，下轮重烧", exc_info=True)
         # ADR 115 分账 + 终局 session 挂载（抽函数，见 _billing_closeout）
@@ -552,6 +583,13 @@ def _task_verdict(task: Task, run: Run, session: Session | None) -> str | None:
         steer = run.take_steer()   # 收尾段到达的 steer → 拿它起新 Run
         if steer is not None:
             return steer
+        # ADR 115 补注四（116 顺手件 3）：本可 done 但 skipped 超闸 → 不落 done，
+        # 转 waiting-steer（skipped 被批量滥用成假收官后门的机械约束）。解锁 =
+        # resume 后模型修订计划（skipped 改回 pending/done 或新建计划），再次
+        # 判定过闸才落 done
+        if session is not None and _is_task_done(session) and _plan_skipped_over_limit(session):
+            task.status = TASK_WAITING_STEER
+            return None
         # done 自数判据（评审问题 4）：全 done/skipped 才 done
         task.status = TASK_DONE if (session is None or _is_task_done(session)) else TASK_FAILED
     return None
@@ -595,7 +633,16 @@ def _task_worker(ctx: AppContext, store: RunStore, tasks: TaskStore, task: Task,
 
         task.run_ids.append(run.run_id)
         tasks.save(task)   # Run 边界落盘（§1：状态迁移 + Run 边界两处时机）
-        _run_worker(ctx, run, text, store=store, task=task)
+        # ADR 116 §3：任务轮带 Task.repo_root 归属——learned 注入与固化按项目
+        # 目录分流（115 §1 的 repo_root 从「只登记」接上消费）；无归属照旧全局
+        _run_worker(
+            ctx,
+            run,
+            text,
+            store=store,
+            task=task,
+            repo_root=Path(task.repo_root).expanduser().resolve() if task.repo_root else None,
+        )
         session = run._final_session
         if run.usage:
             billing_add(task, run.run_id, run.usage, run.usage_approx)
@@ -666,24 +713,35 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         if store.active_run(sid) is not None:
             raise HTTPException(409, "该会话有任务在运行，请等它结束")
 
-    def _review_repo(body: CreateRunRequest) -> Path | None:
-        """校验并解析被评审仓库根（ADR 111）。非评审模式恒 None。
+    def _check_mode(body: CreateRunRequest) -> None:
+        """mode 校验（ADR 116 §1）："chat" 或任一已加载技能名，否则 422。
 
-        外部输入（HTTP）：必须存在且为目录——评审的文件锚点会指向它，
-        读取范围随之限制在该仓库内（复用 S6a 锚点缝，不放宽全局权限）。
-        省略时为 Facta 本仓（评审自己）。
+        技能表（ctx.skills）是真值源——新增 data/skills/*.md 即新增 mode，
+        这里零改动。放在 run 创建之前：非法 mode 不该留下半截 Run。
         """
-        if body.mode != "review":
+        if body.mode != "chat" and body.mode not in ctx.skills:
+            raise HTTPException(422, f"未知 mode：{body.mode!r}（可用技能：{sorted(ctx.skills)}）")
+
+    def _resolve_repo_root(body: CreateRunRequest) -> Path | None:
+        """校验并解析技能 mode 的目标仓根（ADR 116 §3，111 _review_repo 的泛化）。
+
+        chat 恒 None（111 的忽略语义不动：chat 不因带 repo_root 而变）；
+        技能 mode：省略回落本仓，带值则必须存在且为目录（外部输入，HTTP）——
+        文件锚点会指向它，读取范围随之限制在该仓库内（复用 S6a 锚点缝，
+        不放宽全局权限）。
+        """
+        if body.mode == "chat":
             return None
         if not body.repo_root:
             return WORKSPACE_ROOT
         p = Path(body.repo_root).expanduser()
         if not p.is_dir():
-            raise HTTPException(400, f"被评审仓库路径不存在或不是目录：{body.repo_root}")
+            raise HTTPException(400, f"仓库路径不存在或不是目录：{body.repo_root}")
         return p.resolve()
 
     @app.post("/api/runs", status_code=202)
     def create_run(body: CreateRunRequest):
+        _check_mode(body)   # 422 先于任何落盘：非法 mode 不留半截会话/Run
         sid = body.session_id
         if sid is None:
             sid = ctx.store.create(Session())   # 省略 session_id = 新开一段对话
@@ -697,7 +755,7 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         threading.Thread(
             target=_run_worker,
             args=(ctx, run, _claim_ide_context(body)),
-            kwargs={"mode": body.mode, "repo_root": _review_repo(body), "store": store},
+            kwargs={"mode": body.mode, "repo_root": _resolve_repo_root(body), "store": store},
             daemon=True,
         ).start()
         return {"run_id": run.run_id, "session_id": sid}
@@ -719,6 +777,7 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         供外部自动化（Kimi Work 定时任务、CI）非交互驱动。阻塞不堵事件循环——
         FastAPI 同步端点跑默认线程池。
         """
+        _check_mode(body)   # 422 先于任何落盘：非法 mode 不留半截会话/Run
         sid = body.session_id
         if sid is None:
             sid = ctx.store.create(Session())   # 省略 session_id = 新开一段对话
@@ -730,7 +789,7 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         threading.Thread(
             target=_run_worker,
             args=(ctx, run, _claim_ide_context(body)),
-            kwargs={"mode": body.mode, "repo_root": _review_repo(body), "store": store},
+            kwargs={"mode": body.mode, "repo_root": _resolve_repo_root(body), "store": store},
             daemon=True,
         ).start()
         settled = run._settle_done.wait(timeout=timeout)   # 阻塞到终态 + 收官（076 同步点）
@@ -1437,6 +1496,41 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     def notes_page():
         return FileResponse(static_dir / "fw" / "notes.html")
 
+    # ---- ADR 116 §3 项目记忆归属：登记表 API ----
+    # M2 验收靠 API（钉子②「归属是否隔离」）；项目设置 Web 页归 M4 宿主层（115 前端节同款理由）
+
+    manifest = ProjectsManifest()
+
+    @app.get("/api/projects")
+    def list_projects():
+        return {"projects": manifest.list()}
+
+    @app.post("/api/projects", status_code=201)
+    def create_project(body: CreateProjectRequest):
+        """登记项目并建 learned 目录。拒登记本仓（repo_root==WORKSPACE_ROOT → 400）：
+        本仓恒走全局记忆，双读入口会漂移（评审问题 6 裁定）。
+        """
+        if manifest.get(body.name) is not None:
+            raise HTTPException(409, f"项目已登记：{body.name}")
+        try:
+            entry = manifest.register(body.name, body.repo_root, body.memory_mode, body.confirm_repo_write)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"project": entry}
+
+    @app.put("/api/projects/{name}")
+    def update_project(name: str, body: UpdateProjectRequest):
+        """切换 memory_mode；migrate=true 复制三桶到新址（复制不删源，045/064）。"""
+        if manifest.get(name) is None:
+            raise HTTPException(404, f"项目未登记：{name}")
+        try:
+            entry = manifest.update(
+                name, body.memory_mode, migrate=body.migrate, confirm_repo_write=body.confirm_repo_write
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"project": entry}
+
     # MCP 配置面板页面（FW 第五入口，106）：与四入口同款伺服
     @app.get("/mcp")
     def mcp_page():
@@ -1446,6 +1540,11 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     def review_page():
         """方案评审页（ADR 111，FW 第六入口）：提交分节材料 + 被评审仓库根。"""
         return FileResponse(static_dir / "fw" / "review.html")
+
+    @app.get("/brief")
+    def brief_page():
+        """开工 Brief 页（ADR 113，FW 第七入口）：任务意图 + 目标仓库根。"""
+        return FileResponse(static_dir / "fw" / "brief.html")
 
     # 前端静态文件挂根路径；check_dir=False 让本模块先于前端文件就位（测试友好）。
     # no-cache（每次 revalidate，未变时 304 也快）：浏览器对无 Cache-Control 的

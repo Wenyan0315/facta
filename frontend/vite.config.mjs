@@ -21,6 +21,7 @@ export default defineConfig({
         notes: resolve(import.meta.dirname, "notes.html"),
         mcp: resolve(import.meta.dirname, "mcp.html"),
         review: resolve(import.meta.dirname, "review.html"),
+        brief: resolve(import.meta.dirname, "brief.html"),
       },
       output: {
         entryFileNames: "assets/[name].js",

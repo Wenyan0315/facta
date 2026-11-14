@@ -26,6 +26,8 @@ data/worktrees/
 data/evals/
 # 115：Task 快照（运行时数据，同 data/memory/ 口径）
 data/tasks/
+# 116：项目登记表与项目 learned（运行时数据；「要进版本控制就切就地式」）
+data/projects/
 # 060 失败台账：plan 归档的派生索引（真值源＝session.json），可删可重建
 data/plan_failures.jsonl
 # 075 召回 x-ray：召回事件的派生索引（真值源＝make_plan 召回），可删可重建

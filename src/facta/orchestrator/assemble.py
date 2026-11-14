@@ -26,7 +26,6 @@ from facta.core.gateway import SemanticCacheLLM
 from facta.core.jev import JevClient, ScenarioRouter
 from facta.core.llm import LLM, get_llm
 from facta.core.telemetry import CallLedger, UsageLedger
-from facta.core.types import Message
 from facta.knowledge.extract import sync_graph
 from facta.knowledge.graph import GraphStore
 from facta.knowledge.knowledge_base import (
@@ -41,17 +40,24 @@ from facta.memory.consolidate import consolidate, maintain_memory
 from facta.memory.store import Session, SessionStore, derive_title
 from facta.memory.title import summarize_title
 from facta.memory.todos import TodoStore
-from facta.orchestrator.agent import DEFAULT_SYSTEM_PROMPT, Agent, build_default_agent
+from facta.orchestrator.agent import (
+    DEFAULT_SYSTEM_PROMPT,
+    Agent,
+    build_default_agent,
+    ensure_persona,
+)
 from facta.paths import (
     DATA_ROOT,
     GRAPH_PATH,
     LEARNED_DIR,
     NOTES_DIR,
     SESSIONS_DIR,
+    SKILLS_DIR,
     WORKSPACE_ROOT,
     user_memory_path,
 )
-from facta.review import REVIEW_MAX_TOOL_ROUNDS, REVIEW_SYSTEM_PROMPT, REVIEW_TOOLS
+from facta.projects import resolve_learned_dir
+from facta.skills import SkillSpec, build_skill_agent, build_skill_registry, load_skills
 from facta.tools.builtin import register_builtin
 from facta.tools.context import ToolContext
 from facta.tools.graph import register_graph_tools
@@ -124,10 +130,12 @@ class AppContext:
     internal_llm: LLM   # 内部链（无语义档），给压缩器/工具内调用
     kb: KnowledgeBase
     store: SessionStore   # S8a：会话仓库（身份=文件名，见 memory/store.py 头注记）
-    # S8a：per-session agent 工厂。契约：给一个 Session，还一个【已保证带人设】
-    # 的 Agent（ensure_persona 在工厂内部执行，调用方无处可忘）。
-    # 副作用：会往空会话里种 system 消息 —— 那是人设不变量本身，不是意外。
-    build_agent: Callable[[Session], Agent]
+    # S8a：per-session agent 工厂。契约：给一个 Session（可选 repo_root，
+    # ADR 116 记忆归属：None=交互 chat 走本仓全局，Task 轮传 Task.repo_root），
+    # 还一个【已保证带人设】的 Agent（ensure_persona 在工厂内部执行，调用方
+    # 无处可忘）。副作用：会往空会话里种 system 消息 —— 那是人设不变量本身，
+    # 不是意外。Callable[..., Agent]：第二参可选，精确 Callable 表达不了。
+    build_agent: Callable[..., Agent]
     todos: TodoStore    # 个人待办仓库（2026-09-17）：工具与 Web API 共用同一实例
     mcp_clients: list = field(default_factory=list)   # 最终退出时统一 close，不留孤儿进程
     # 106：已实际接入的服务器名（面板「文件 vs 运行时」对照的运行时半边；
@@ -135,60 +143,20 @@ class AppContext:
     mcp_active: list[str] = field(default_factory=list)
     graph: GraphStore = field(default_factory=GraphStore)   # S7a/S7b 知识图谱（活对象：查询原语与图表面板共用最新图）
     call_ledger: CallLedger = field(default_factory=CallLedger)   # 108：明细账（逐笔 call_id），供交叉核验与退出告警
-    # ADR 111：评审 Agent 工厂（D01/110-V01）。给一个会话与被评审仓库根，还一个
-    # 【只读证据菜单 + 已保证人设】的评审 Agent；仓库锚点与记忆归属由工厂按
-    # repo_root 决定（见 assemble 内实现）。默认 None = 未装配（最小测试 ctx），
-    # 仅 review 模式消费它；放在尾部是因为 dataclass 默认值须排在无默认字段之后。
-    build_review_agent: Callable[[Session, Path], Agent] | None = None
+    # ADR 116：技能表（assemble 启动时扫 SKILLS_DIR 一次）。mode 校验与技能
+    # 分派的真值源：新增技能 = 新增 data/skills/*.md，零 py 改动。
+    skills: dict[str, SkillSpec] = field(default_factory=dict)
+    # ADR 116：技能 Agent 工厂（111 评审工厂的泛化）。契约：给一个会话、技能名
+    # 与 repo_root，还一个【只读证据菜单 + 已保证人设】的技能 Agent——router=None
+    # 钉死、记忆归属按 repo_root 解析、settle 节 → skip_settle（见 skills.py）。
+    # 默认 None = 未装配（最小测试 ctx），仅技能 mode 消费它；放在尾部是因为
+    # dataclass 默认值须排在无默认字段之后。
+    build_skill_agent: Callable[[Session, str, Path], Agent] | None = None
 
 
-def ensure_persona(session: Session, agent: Agent) -> None:
-    """人设保证（装配不变量，S2 验收修复轮）：会话必须带着 agent 的 system_prompt 开工。
-
-    「空会话种人设」原本只住在 CLI 壳——Web 入口曾跑过无人设会话（真实使用
-    踩中：语言漂移、信息政策失效、自我认知靠模型编）。三分支：
-    - 空会话：种人设（与 cli.py 的守卫幂等——双方都判 messages 是否为空）
-    - 历史遗留的无 system 会话（早期 Web 保存的文件）：头部补插；
-      摘要游标随位移 +1 对齐（summarized_upto 数的是消息位置）
-    - 有 system 但内容过期（P1-4 评审修复）：就地刷新为 agent.system_prompt。
-      messages[0] 的 system 是【人设 + learned/用户记忆快照】的冻结副本，
-      不是历史存档真值——记忆面板新增/编辑/删除后，旧快照若不刷新，旧会话
-      仍把被删的记忆发给模型（评审实测：删了照样进 payload）。Web 每轮
-      build_agent 重读盘，刷新后下一轮即生效；CLI 固化发生在收尾，下次
-      进程自然拿新快照。替换只动 content 不动位置：summarized_upto（位置
-      计数）与压缩器/账本（都只碰尾部）不受影响。
-
-    调用时机（S8a 收口）：只有一个——build_agent 工厂内部。
-    S8a 之前有三个调用点（服务启动 / 归档清空后 / 切回换血后），漏一个就是
-    裸会话（真实复踩过：英文回复再现）。现在 agent 与人设同时诞生，
-    「有 agent 但没人设」这个状态在结构上不存在了。
-    幂等，重复调用无副作用（CLI 壳里的老守卫可安全并存）。
-
-    自愈（浏览器验收补）：头部连续多条 system（换血 bug 时期的残留）合并为
-    一条——保留第一条，删其余；摘要游标随删除数左移。
-    """
-    # 自愈：合并头部重复 system（历史残留数据修复，游标对齐）
-    if session.messages and session.messages[0].role == "system":
-        dup = 0
-        for m in session.messages[1:]:
-            if m.role == "system":
-                dup += 1
-            else:
-                break
-        if dup:
-            del session.messages[1 : 1 + dup]
-            if session.summarized_upto:
-                session.summarized_upto = max(1, session.summarized_upto - dup)
-
-    if not session.messages:
-        session.messages.append(Message(role="system", content=agent.system_prompt))
-    elif session.messages[0].role != "system":
-        session.messages.insert(0, Message(role="system", content=agent.system_prompt))
-        if session.summarized_upto:
-            session.summarized_upto += 1
-    elif session.messages[0].content != agent.system_prompt:
-        # P1-4：快照过期 → 刷新。不把历史存档里的 system 当当前记忆真值。
-        session.messages[0].content = agent.system_prompt
+# ensure_persona 的实现 116 起住 orchestrator/agent.py（skills.py 要用，不能
+# 反向 import assemble）；上面 from ... import 同名 re-export，既有 import 路径
+# （tests/evals 从 assemble 导）零改动。
 
 
 def settle_session(
@@ -198,6 +166,7 @@ def settle_session(
     internal_llm: LLM,
     *,
     flush: bool = False,
+    learned_dir: Path | None = None,
 ) -> str:
     """收尾一段对话的 LLM 重活：补标题 → 增量固化 → 窄写落盘。返回固化报告。
 
@@ -219,7 +188,15 @@ def settle_session(
     游标单调推进且仅当前缀共享（len(fresh) ≥ 目标）时才推，否则
     不动——下轮重烧，重复优于跳过（P2-7 语义）。
     flush=True → 阈值降到 1：没有「下一轮」了，把剩下的全冲掉。
+    learned_dir（ADR 116 §3）：固化落盘目录——项目归属的 learned 三桶；
+    缺省 = 本仓全局 LEARNED_DIR（既有调用方零改动）。consolidate 与
+    maintain_memory（078 sleep-time 整理）**共用同一个目录**：项目目录
+    settle 后整理只动项目目录（评审问题 4，078 整理曾漏换目录）。
     """
+
+    # 懒取 LEARNED_DIR（函数体里读全局）：测试 monkeypatch 模块常量即可隔离。
+    # 叫 learned 不叫 target：_merge 闭包里已有 target（游标 int），别撞名
+    learned = learned_dir if learned_dir is not None else LEARNED_DIR
 
     # 标题（每段对话只提炼一次）：手工名优先——title 非空说明用户 rename 过，
     # 不用 LLM 顶掉（「自动生成用于填空，不覆盖用户主动编辑」，计划名/记忆标签同此原则）
@@ -237,7 +214,7 @@ def settle_session(
             report, ok = consolidate(
                 session,
                 internal_llm,
-                LEARNED_DIR,
+                learned,
                 since=since,
                 user_memory_path=user_memory_path(),
                 # ADR 045：基础 prompt 当冗余对照物（memory 层不能反向 import
@@ -267,7 +244,8 @@ def settle_session(
 
     # ADR 078 sleep-time 整理：常驻注入超预算才跑（平时零成本）；settle
     # 本身已是异步后台（076），「会话结束后跑、不占在线延迟」由此成立。
-    tail = maintain_memory(LEARNED_DIR, user_memory_path())
+    # 116 §3：整理与固化共用 learned（评审问题 4——曾写死全局漏换目录）。
+    tail = maintain_memory(learned, user_memory_path())
     if tail:
         report = report + "\n" + tail
     return report
@@ -307,55 +285,6 @@ def _sync_notes_and_graph(kb: KnowledgeBase, graph_llm: LLM | None) -> GraphStor
         if g_report.extracted or g_report.removed:
             graph.save(GRAPH_PATH)
     return graph
-
-
-def build_review_registry(mother_ctx: ToolContext, audit: AuditLog, repo_root: Path) -> ToolRegistry:
-    """评审 registry（ADR 111）：只装只读证据族，文件锚点指向被评审仓库。
-
-    复用 S6a 锚点注入缝（`ctx.workspace_root`）——围栏与黑名单随之相对
-    `repo_root` 判定，读取范围自动限制在所选项目，**不放宽全局权限**。
-    session/history 恒 None：不注册计划/历史工具（评审不用计划板，
-    「历史决定」走 learned 注入而非会话检索）。write_file 由
-    register_file_tools 照常注册，但被 REVIEW_TOOLS 过滤掉——「不改代码」
-    是结构性事实。模块级而非闭包：可直接用一次性 ctx 单测（见
-    tests/test_review.py），不必跑整套 assemble。
-    """
-    reg = ToolRegistry(audit=audit)
-    rctx = replace(mother_ctx, workspace_root=repo_root, session=None, history=None)
-    register_builtin(reg, rctx)     # time + notes（history 两件因 history=None 自跳）
-    register_file_tools(reg, rctx)  # 文件四件（只读三件进 REVIEW_TOOLS）
-    return reg
-
-
-def build_review_agent(
-    registry: ToolRegistry,
-    session: Session,
-    repo_root: Path,
-    *,
-    workspace_root: Path = WORKSPACE_ROOT,
-    learned_dir: Path | None = LEARNED_DIR,
-) -> Agent:
-    """评审 Agent 工厂（ADR 111）：只读证据菜单 + 按归属决定的项目决定注入。
-
-    项目记忆归属（110 §4）：learned 三桶**只在评审 Facta 本仓**
-    （repo_root == workspace_root）时注入；评审外部仓库不注入 Facta 的决定，
-    避免把不同项目的决定混作当前约束。用户级记忆不注入（陪伴者语境，
-    与评审无关）。评审 run 不挂场景路由（router=None，保确定性）。
-    """
-    learned = learned_dir if (learned_dir is not None and repo_root == workspace_root) else None
-    agent = build_default_agent(
-        registry,
-        learned,
-        router=None,
-        user_memory_path=None,
-        base_prompt=REVIEW_SYSTEM_PROMPT,
-    )
-    # 只读证据子集 + 评审证据预算（ADR 112）：schemas() 与 execute() 双重过滤
-    # ——评审不能改代码/跑命令；预算 12 替默认 5（评审要读完文件才能核实前提，
-    # V01 真机 3/4 例被 5 轮截断）。两笔都是 replace 注入，全局默认不动。
-    agent = replace(agent, allowed_tools=REVIEW_TOOLS, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS)
-    ensure_persona(session, agent)
-    return agent
 
 
 def assemble(provider: str) -> AppContext:
@@ -542,25 +471,41 @@ def assemble(provider: str) -> AppContext:
     #（env 可覆写，测试注入点）。文件不存在=空收敛，无注入零开销
     umem = user_memory_path()
 
-    def build_agent(session: Session) -> Agent:
+    # ADR 116：技能表一次扫盘（SKILLS_DIR）。坏技能文件在这里就抛——装配报错
+    # 不静默，服务宁可起不来也不带残缺技能表对外。技能热加载不做（重启生效，
+    # MCP 面板同款，116 边界）。
+    skills = load_skills(SKILLS_DIR)
+
+    def build_agent(session: Session, repo_root: Path | None = None) -> Agent:
         """给一个会话造一个专属 agent，并保证它带着人设开工。
 
         ensure_persona 收口在这里（S8a）：agent 与人设同时诞生，
         「有 agent 但没人设」在结构上不存在——不用靠三个调用点各自记得。
+        repo_root（ADR 116 §3）：记忆归属——交互 chat 传 None → 本仓全局；
+        任务轮传 Task.repo_root → 按登记归属注入（未登记外部仓 = None 不注入）。
+        归属判定只有 resolve_learned_dir 一个入口（projects.py），chat 主 agent
+        与 task run 走同一条路（「projects.json 是归属唯一真值源」口径合一）。
         """
         agent = build_default_agent(
-            session_registry(session), LEARNED_DIR, router=router, user_memory_path=umem
+            session_registry(session),
+            resolve_learned_dir(repo_root, LEARNED_DIR),
+            router=router,
+            user_memory_path=umem,
         )
         ensure_persona(session, agent)
         return agent
 
-    def _review_agent_factory(session: Session, repo_root: Path) -> Agent:
-        """绑进程级资源（mother_ctx / audit）的评审工厂（ADR 111）。
+    def _skill_agent_factory(session: Session, name: str, repo_root: Path) -> Agent:
+        """绑进程级资源（mother_ctx / audit）的技能工厂（ADR 116）。
 
-        构造逻辑住在模块级 build_review_registry/build_review_agent（可直接
-        单测）；这里只把 assemble 手里的 mother_ctx 与 audit 递进去。
+        构造逻辑住在模块级 skills.py（可直接单测）；这里只把 assemble 手里的
+        mother_ctx/audit 递进去 + 解析记忆归属（resolve_learned_dir）。
         """
-        return build_review_agent(build_review_registry(mother_ctx, audit, repo_root), session, repo_root)
+        spec = skills[name]
+        registry = build_skill_registry(mother_ctx, audit, repo_root)
+        return build_skill_agent(
+            spec, registry, session, learned_dir=resolve_learned_dir(repo_root, LEARNED_DIR)
+        )
 
     return AppContext(
         provider=provider,
@@ -572,9 +517,10 @@ def assemble(provider: str) -> AppContext:
         kb=kb,
         store=store,
         build_agent=build_agent,
-        build_review_agent=_review_agent_factory,
         todos=todos,
         mcp_clients=mcp_clients,
         mcp_active=mcp_active,
         graph=graph,   # S7b：图谱挂上 AppContext——surface 面板端点在 server 层读
+        skills=skills,
+        build_skill_agent=_skill_agent_factory,
     )

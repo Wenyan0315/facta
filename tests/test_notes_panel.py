@@ -67,7 +67,7 @@ def _client(monkeypatch, tmp_path, *, kb=None):
         internal_llm=ScriptedLLM([]),
         kb=kb,
         store=SessionStore(tmp_path / "sessions"),
-        build_agent=lambda session: Agent(
+        build_agent=lambda session, repo_root=None: Agent(
             name="test", system_prompt="测试人设", registry=ToolRegistry()
         ),
         todos=None,

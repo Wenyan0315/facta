@@ -47,6 +47,12 @@ TASK_MAX_COST = (
 CONTINUE_RETRY_INTERVAL_S = 2.0
 CONTINUE_RETRY_TIMES = 15
 
+# ADR 115 补注四（116 顺手件 3）：skipped 被批量滥用成假收官后门的机械闸。
+# done 判定前数最终计划（活跃/最后归档，同 _verdict_plan 计数口径）的 skipped：
+# ≥ 闸值 → 不落 done，转 waiting-steer。解锁 = resume 后模型修订计划
+# （skipped 改回 pending/done 或新建计划），再次判定过闸才落 done。
+PLAN_SKIPPED_LIMIT = int(os.environ.get("FACTA_PLAN_SKIPPED_LIMIT", "3"))
+
 # ---- Task 状态常量 ----
 
 TASK_QUEUED = "queued"
@@ -290,6 +296,19 @@ def _plan_has_failed(session: Any) -> bool:
     """计划含 failed 步骤 → 任务 failed（§1 状态机：出现 failed 即 failed）。"""
     plan = _verdict_plan(session)
     return plan is not None and any(s.status is StepStatus.FAILED for s in plan.steps)
+
+
+def _plan_skipped_over_limit(session: Any) -> bool:
+    """补注四闸（116 顺手件 3）：skipped 批量滥用成假收官后门的机械约束。
+
+    计数口径与 _verdict_plan 一致（活跃/最后归档计划）：skipped ≥
+    PLAN_SKIPPED_LIMIT → 有假收官嫌疑，本可 done 也不落 done。
+    """
+    plan = _verdict_plan(session)
+    return (
+        plan is not None
+        and sum(1 for s in plan.steps if s.status is StepStatus.SKIPPED) >= PLAN_SKIPPED_LIMIT
+    )
 
 
 def continue_message(session: Any) -> str:
