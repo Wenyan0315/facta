@@ -5,7 +5,6 @@
 端到端一例在 test_zero_code_add_skill_end_to_end。
 """
 
-import json
 import tempfile
 from pathlib import Path
 
@@ -20,7 +19,7 @@ from facta.orchestrator.agent import Agent
 from facta.orchestrator.assemble import AppContext, ensure_persona
 from facta.server.app import create_app
 from facta.server.run_store import RunStore
-from facta.skills import SKILL_TOOLS, SkillSpec, build_skill_agent, load_skill, load_skills
+from facta.skills import SkillSpec, build_skill_agent, load_skill, load_skills
 from facta.tools.registry import ToolRegistry
 
 VALID = "# demo\n\n你是演示助手。\n"
