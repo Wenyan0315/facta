@@ -365,6 +365,7 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
                 "工具范围会自动继承并对子任务生效），max_rounds 是子任务的工具循环"
                 "预算（默认 3）。worktree=True 时子任务在独立 git worktree 沙箱里"
                 "改文件，改动经确认后合回。"
+                "纪律：子任务结论须含复核方法/证据，无证据须明说（不许空口断言）。"
             ),
             parameters={
                 "type": "object",

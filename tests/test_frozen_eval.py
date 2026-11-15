@@ -604,7 +604,7 @@ class _FakeCtx:
     def save(self, sid: str, session) -> None:
         self.saved.append(sid)
 
-    def build_agent(self, session):
+    def build_agent(self, session, repo_root=None):
         return object()
 
 

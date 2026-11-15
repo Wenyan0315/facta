@@ -39,7 +39,7 @@ def _client(monkeypatch, tmp_path, *, mcp_active=None):
         internal_llm=ScriptedLLM([]),
         kb=None,
         store=SessionStore(tmp_path / "sessions"),
-        build_agent=lambda session: Agent(
+        build_agent=lambda session, repo_root=None: Agent(
             name="test", system_prompt="测试人设", registry=ToolRegistry()
         ),
         todos=None,

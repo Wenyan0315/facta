@@ -9,16 +9,19 @@ import time
 from facta.core.telemetry import UsageLedger
 from facta.memory.store import Session
 from facta.orchestrator.task import (
+    PLAN_SKIPPED_LIMIT,
     RUN_STATUS_COMPLETED,
     TASK_DONE,
     TASK_MAX_CONTINUATIONS,
     TASK_MAX_COST,
     TASK_MAX_WALL_CLOCK_S,
     TASK_QUEUED,
+    TASK_WAITING_STEER,
     Task,
     TaskStore,
     _is_task_done,
     _plan_has_failed,
+    _plan_skipped_over_limit,
     billing_add,
     billing_totals,
     continue_message,
@@ -27,6 +30,7 @@ from facta.orchestrator.task import (
     to_dict,
     usage_delta,
 )
+from facta.server.app import _task_verdict
 from facta.server.run_store import STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, Run
 
 
@@ -270,3 +274,65 @@ def test_to_dict_shape(tmp_path):
     # 产物=引用，不新建存储
     assert d["artifacts"] == {"session_id": "s9", "run_ids": ["r1"]}
     assert d["billing"]["totals"] == {}
+
+
+# ---- 补注四闸（115 补注四 / 116 顺手件 3）：skipped ≥ 闸值 → waiting-steer ----
+
+
+def test_skipped_over_limit_blocks_done(monkeypatch):
+    """3 步全 skipped 的「假收官」不落 done：本可 done 也转 waiting-steer。
+
+    解锁 = resume 后模型修订计划再判（下一测试）。闸值钉 3（env 缺省），
+    monkeypatch 摆脱对运行环境变量的依赖。
+    """
+    monkeypatch.setattr("facta.orchestrator.task.PLAN_SKIPPED_LIMIT", 3)
+    task = Task(task_id="t1", goal="g")
+    s = _session_with_plan("a", "b", "c")
+    for i in (1, 2, 3):
+        s.plan.update_step(i, "skipped", "不需要了")
+
+    assert _is_task_done(s) is True          # 前提：done 判据本身放行
+    assert _plan_skipped_over_limit(s) is True
+    assert _task_verdict(task, _run(), s) is None
+    assert task.status == TASK_WAITING_STEER
+
+
+def test_skipped_under_limit_still_done(monkeypatch):
+    # 2 skipped 不到闸（闸值 3）：照常落 done——闸抓的是批量滥用不是零星跳过
+    monkeypatch.setattr("facta.orchestrator.task.PLAN_SKIPPED_LIMIT", 3)
+    task = Task(task_id="t1", goal="g")
+    s = _session_with_plan("a", "b", "c")
+    s.plan.update_step(1, "done", "好了")
+    s.plan.update_step(2, "skipped", "不需要了")
+    s.plan.update_step(3, "skipped", "不需要了")
+
+    assert _plan_skipped_over_limit(s) is False
+    assert _task_verdict(task, _run(), s) is None
+    assert task.status == TASK_DONE
+
+
+def test_gate_unlocks_after_resume_revises_plan(monkeypatch):
+    # 解锁语义：resume 后模型修订计划（终态步骤不可再改 → 走 make_plan 新建
+    # 计划取代），再次判定过闸才 done——计数口径看活跃/最后归档的最新计划
+    monkeypatch.setattr("facta.orchestrator.task.PLAN_SKIPPED_LIMIT", 3)
+    task = Task(task_id="t1", goal="g")
+    s = _session_with_plan("a", "b", "c")
+    for i in (1, 2, 3):
+        s.plan.update_step(i, "skipped", "不需要了")
+    assert _task_verdict(task, _run(), s) is None
+    assert task.status == TASK_WAITING_STEER
+
+    # 修订＝新建计划（修订要求每步显式 status，对照旧计划继承）
+    s.plan.make_plan(
+        [{"title": "补做一", "status": "pending"}, {"title": "补做二", "status": "pending"}],
+        reason="假收官嫌疑，补做",
+    )
+    s.plan.update_step(1, "done", "补做完成")
+    s.plan.update_step(2, "done", "补做完成")
+    assert _task_verdict(task, _run(), s) is None
+    assert task.status == TASK_DONE
+
+
+def test_plan_skipped_limit_default():
+    # env 缺省闸值 3（FACTA_PLAN_SKIPPED_LIMIT 覆写点）；≥2 才有闸义
+    assert PLAN_SKIPPED_LIMIT >= 2

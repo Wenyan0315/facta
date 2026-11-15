@@ -351,3 +351,24 @@ fuse 分支之前 → 挂确认期间熔断的任务落 `cancelled` 而非 `bloc
 
 62 条巡检发现（9 高危）的动态复现改由普通 subagent 直接补完，结论追加在
 `data/notes/robustness_patrol.md`（不走 Task 通道，与本钉子解耦）。
+
+## 补注四（skipped 假收官闸 + spawn_step 证据纪律，2026-11-14）
+
+补注三的两处「待裁决」随 [116](116-m2-bounding-and-skills.md) 顺手清掉（语义裁定
+已在 116 §4 拍板，机制回写本注）：
+
+1. **done 判定加机械约束**（补注三「done 判定语义暴露缺口」的裁决）：最终
+   计划（活跃/最后归档，计数口径同 `_verdict_plan`）中 `skipped` 数 ≥ 常量
+   `PLAN_SKIPPED_LIMIT`（默认 3，env `FACTA_PLAN_SKIPPED_LIMIT` 可覆写）→
+   **不落 done**，转 `waiting-steer`（skipped 仍算终态——§1 原裁定只拦「假
+   收官」不改终态语义）。解锁路径：resume 后须由模型修订计划（skipped 改回
+   pending/done 或新建计划），再次判定过闸才落 done。落点：`task.py`
+   `_plan_skipped_over_limit` + `app.py` `_task_verdict` done 判定分支；
+   测试三条（3 skipped → waiting-steer / 2 skipped → done / resume 修订后
+   → done）。
+2. **spawn_step 无动态证据自动标 done**（补注三「附带疑点」的裁决）：不改
+   机制——083 的「按 RunResult 枚举回写」自动语义保留；加一条纪律进
+   `spawn_step` 工具描述：子任务结论须含复核方法/证据，无证据须明说
+   （不许空口断言）。证据的**机械强制**不做，归 M3 授权档一起做。
+
+§1「含 `failed` → `failed`」与 skipped 终态语义均不变。

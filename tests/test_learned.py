@@ -183,7 +183,7 @@ def _client(monkeypatch, tmp_path):
         kb=None,
         store=SessionStore(tmp_path / "sessions"),
         # 记忆面板端点不跑 worker，工厂只需满足类型（不会真被调用）
-        build_agent=lambda session: Agent(
+        build_agent=lambda session, repo_root=None: Agent(
             name="test", system_prompt="测试人设", registry=ToolRegistry()
         ),
         todos=None,

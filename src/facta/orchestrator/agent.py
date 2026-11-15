@@ -22,8 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from facta.core.jev import ScenarioRouter
+from facta.core.types import Message
 from facta.memory.consolidate import CATEGORIES, memory_budget_units
 from facta.memory.learned import LearnedLine, read_learned, render
+from facta.memory.store import Session
 from facta.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -80,10 +82,13 @@ DEFAULT_SYSTEM_PROMPT = (
 
 @dataclass(frozen=True)
 class Agent:
-    """一个 agent 的行为定义。六个字段，多一个都是过度设计。
+    """一个 agent 的行为定义。八个字段，多一个都是过度设计。
 
     注意 Agent 不持 llm：LLM 链是进程级资源（网关/缓存/账本挂链上），
     多 agent 共享同一链是常态（S6 显性化）。行为与资源正交。
+    skip_settle（ADR 116）：收尾跳固化 + 标题就地补——评审/Brief 类技能的
+    产出是「给用户过目的草稿」，不固化进项目记忆。worker 按这个属性判断，
+    不按 mode 名字硬编码（第三、第四个技能零 worker 改动）。
     """
 
     name: str
@@ -93,6 +98,7 @@ class Agent:
     max_tool_rounds: int = 5                       # 预算：原 _MAX_TOOL_ROUNDS 全局常量归位
     learned_dir: Path | None = None                # None=不注入；有值=快照已在 prompt 里
     router: ScenarioRouter | None = None           # M10 场景路由：None=无路由（原生路径，v0.57 行为）
+    skip_settle: bool = False                      # ADR 116 技能 settle 节；chat 恒 False
 
     def schemas(self) -> list[dict]:
         """我的菜单：registry 全量按 allowed_tools 过滤——子集是菜单视图，
@@ -256,3 +262,54 @@ def build_default_agent(
         # max_tool_rounds / allowed_tools 省略：默认值住 dataclass，
         # 工厂里再写一遍 = 将来改默认要改两处
     )
+
+
+def ensure_persona(session: Session, agent: Agent) -> None:
+    """人设保证（装配不变量，S2 验收修复轮）：会话必须带着 agent 的 system_prompt 开工。
+
+    「空会话种人设」原本只住在 CLI 壳——Web 入口曾跑过无人设会话（真实使用
+    踩中：语言漂移、信息政策失效、自我认知靠模型编）。三分支：
+    - 空会话：种人设（与 cli.py 的守卫幂等——双方都判 messages 是否为空）
+    - 历史遗留的无 system 会话（早期 Web 保存的文件）：头部补插；
+      摘要游标随位移 +1 对齐（summarized_upto 数的是消息位置）
+    - 有 system 但内容过期（P1-4 评审修复）：就地刷新为 agent.system_prompt。
+      messages[0] 的 system 是【人设 + learned/用户记忆快照】的冻结副本，
+      不是历史存档真值——记忆面板新增/编辑/删除后，旧快照若不刷新，旧会话
+      仍把被删的记忆发给模型（评审实测：删了照样进 payload）。Web 每轮
+      build_agent 重读盘，刷新后下一轮即生效；CLI 固化发生在收尾，下次
+      进程自然拿新快照。替换只动 content 不动位置：summarized_upto（位置
+      计数）与压缩器/账本（都只碰尾部）不受影响。
+
+    调用时机（S8a 收口）：只有一个——build_agent / build_skill_agent 工厂内部。
+    S8a 之前有三个调用点（服务启动 / 归档清空后 / 切回换血后），漏一个就是
+    裸会话（真实复踩过：英文回复再现）。现在 agent 与人设同时诞生，
+    「有 agent 但没人设」这个状态在结构上不存在了。
+    幂等，重复调用无副作用（CLI 壳里的老守卫可安全并存）。
+
+    自愈（浏览器验收补）：头部连续多条 system（换血 bug 时期的残留）合并为
+    一条——保留第一条，删其余；摘要游标随删除数左移。
+    （ADR 116 随 skill 装配从 assemble.py 原样迁入本模块：skills.py 要用它，
+    而 skills 不能反向 import assemble——人设保证本来就长在 Agent 身边。）
+    """
+    # 自愈：合并头部重复 system（历史残留数据修复，游标对齐）
+    if session.messages and session.messages[0].role == "system":
+        dup = 0
+        for m in session.messages[1:]:
+            if m.role == "system":
+                dup += 1
+            else:
+                break
+        if dup:
+            del session.messages[1 : 1 + dup]
+            if session.summarized_upto:
+                session.summarized_upto = max(1, session.summarized_upto - dup)
+
+    if not session.messages:
+        session.messages.append(Message(role="system", content=agent.system_prompt))
+    elif session.messages[0].role != "system":
+        session.messages.insert(0, Message(role="system", content=agent.system_prompt))
+        if session.summarized_upto:
+            session.summarized_upto += 1
+    elif session.messages[0].content != agent.system_prompt:
+        # P1-4：快照过期 → 刷新。不把历史存档里的 system 当当前记忆真值。
+        session.messages[0].content = agent.system_prompt

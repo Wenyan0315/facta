@@ -52,6 +52,15 @@ CHECKPOINT_DIR = DATA_ROOT / "checkpoints"
 # 状态迁移 + Run 边界时落盘（频率远低于事件级）。运行时数据，不进 git。
 TASKS_DIR = DATA_ROOT / "tasks"
 
+# ADR 116（M2）skill 数据化：一个技能 = 一个 markdown 文件（data/skills/*.md），
+# 人设/工具/预算/固化策略都住文件里，改词不改码。知识资产，进 git（与 notes 同口径）。
+SKILLS_DIR = DATA_ROOT / "skills"
+
+# ADR 116（M2）项目登记表：data/projects/projects.json + 每项目一份集中式
+# learned 目录（归属判定的唯一真值源，见 facta/projects.py）。运行时数据，
+# 不进 git（与 tasks/ 同口径；「要进版本控制就切就地式」正是 114 双模式的理由）。
+PROJECTS_DIR = DATA_ROOT / "projects"
+
 # M6.5 用户级记忆默认位置：仓库外单文件（~ 锚定，与仓库内 DATA_ROOT 族不同列）。
 # 跨项目共享、不进任何 git——M6.4 红线「位置没建好前不开桶」的
 # 兑现：用户级信息（偏好/习惯/行程）从「一律不记」变「分流到这里」。
