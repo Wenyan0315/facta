@@ -8,20 +8,18 @@
     ## tools            # 可选：工具名一行一个；缺省 = 技能 registry 全量
     ## budget           # 可选：工具轮预算；缺省 = Agent 默认 5
     ## settle           # 可选：skip = 跳固化 + 就地标题；缺省 = 正常固化
+    ## authorization    # 可选：readonly（缺省）/ write——M3 授权档（ADR 117 §3）
 
 校验不静默（build_review_agent「不静默降级」先例）：未知节名、H1 与文件名
-不一致、tools 声明的名字不在技能 registry、budget 非正整数、settle 未知值、
-保留字 chat——全部装配报错。拼错＝该工具静默不上菜单（review.py 头注记过
-的坑），宁可服务起不来。
+不一致、tools 声明的名字不在技能 registry（按档位）、budget 非正整数、
+settle 未知值、authorization 未知值、保留字 chat——全部装配报错。拼错＝该
+工具静默不上菜单（review.py 头注记过的坑），宁可服务起不来。
 
-技能 registry（M2 唯一形态：只读锚点注册表）＝ time 1 件 + notes 只读 4 件
-（list/read/search/search_and_summarize）+ files 只读 3 件（read_file/
-search_code/list_dir，锚点按 repo_root replace，111 锚点缝复用）= **恰 8 件
-只读**，恰＝REVIEW_TOOLS 同集。write_note/write_file/terminal/spawn/plan/历史
-一律不注册——写与跑命令在结构上缺席（review「不改代码不跑命令」同一事实），
-allowed_tools=None 的技能也越不了界。技能需要写工具 = M3 授权档一起做
-（负决策）。技能一律不注入用户记忆（陪伴者语境噪音，111 先例；触发信号＝
-某技能真需要用户偏好，再加节）。
+技能 registry 两档（ADR 117 §3）：readonly = 只读锚点注册表，恰 8 件
+（M2 现状）；write = 8 件 + write_file/write_note（标 write-auth 确认，
+任务级首写授权由 app 层 on_confirm 包装置位）+ run_command（019 动态规则
+原样：白名单免确认/危险停确认）。锚点全按 repo_root replace（111 锚点缝，
+M3 从只读泛化到写与终端——写围栏机制不变只换根）。
 """
 
 from __future__ import annotations
@@ -36,6 +34,7 @@ from facta.tools.builtin import register_builtin
 from facta.tools.context import ToolContext
 from facta.tools.files import register_file_tools
 from facta.tools.registry import ToolRegistry
+from facta.tools.terminal import register_terminal_tools
 
 # 技能 registry 的工具全集（唯一真值源）：只读 8 件，见模块头。
 SKILL_TOOLS = frozenset({
@@ -49,19 +48,32 @@ SKILL_TOOLS = frozenset({
     "list_dir",
 })
 
-_SECTIONS = frozenset({"tools", "budget", "settle"})
+# ADR 117 §3：write 档扩池三件（写两件 + 终端一件）。
+SKILL_WRITE_TOOLS = frozenset({"write_file", "write_note", "run_command"})
+
+# 授权档位值（## authorization 节的合法取值）
+AUTH_READONLY = "readonly"
+AUTH_WRITE = "write"
+
+# write 档写工具的确认归因名（050 guard 先例）：进审计 extra["guard"]，
+# app 层 on_confirm 包装按「工具名 + 此标记」识别写首停、approve 后置位
+# Task.authorized_write（117 §3 任务级一次性写授权）。
+WRITE_AUTH_GUARD = "write-auth"
+
+_SECTIONS = frozenset({"tools", "budget", "settle", "authorization"})
 _DEFAULT_BUDGET = 5   # 与 Agent.max_tool_rounds 缺省同值；改一处记得看另一处
 
 
 @dataclass(frozen=True)
 class SkillSpec:
-    """一个技能的解析产物。tools=None = registry 全量（8 件只读）。"""
+    """一个技能的解析产物。tools=None = registry 全量（按档位 8 或 11 件）。"""
 
     name: str
     system_prompt: str
     tools: frozenset[str] | None = None
     max_tool_rounds: int = _DEFAULT_BUDGET
     skip_settle: bool = False
+    authorization: str = AUTH_READONLY   # ADR 117 §3：readonly（缺省）/ write
 
 
 def _split_sections(path: Path) -> tuple[str, str, dict[str, list[str]]]:
@@ -98,15 +110,36 @@ def load_skill(path: Path) -> SkillSpec:
     if not system_prompt:
         raise ValueError(f"技能缺人设正文（首个 ## 之前）：{path}")
 
+    skip_settle = False
+    if "settle" in sections:
+        raw = "\n".join(sections["settle"]).strip()
+        if raw == "skip":
+            skip_settle = True
+        elif raw:
+            raise ValueError(f"settle 只支持 skip（或留空走正常固化）：{raw!r}：{path}")
+
+    authorization = AUTH_READONLY
+    if "authorization" in sections:
+        raw = "\n".join(sections["authorization"]).strip()
+        if raw not in (AUTH_READONLY, AUTH_WRITE):
+            raise ValueError(
+                f"authorization 只支持 {AUTH_READONLY}/{AUTH_WRITE}：{raw!r}：{path}"
+            )
+        authorization = raw
+
+    # tools 校验按档位：readonly 只认只读 8 件；write 才认写三件（117 §3——
+    # readonly 档声明 write_file 是配置错误，装配期拦住而非静默少给）
+    allowed = SKILL_TOOLS | (SKILL_WRITE_TOOLS if authorization == AUTH_WRITE else frozenset())
     tools: frozenset[str] | None = None
     if "tools" in sections:
         names = [ln.strip() for ln in sections["tools"] if ln.strip()]
         if not names:
             raise ValueError(f"tools 节为空（缺省全量就整节不写）：{path}")
-        unknown = sorted(set(names) - SKILL_TOOLS)
+        unknown = sorted(set(names) - allowed)
         if unknown:
             raise ValueError(
-                f"tools 声明了不在技能 registry 的工具 {unknown}（registry 全集：{sorted(SKILL_TOOLS)}）：{path}"
+                f"tools 声明了不在技能 registry 的工具 {unknown}"
+                f"（{authorization} 档全集：{sorted(allowed)}）：{path}"
             )
         tools = frozenset(names)
 
@@ -120,20 +153,13 @@ def load_skill(path: Path) -> SkillSpec:
         if max_tool_rounds < 1:
             raise ValueError(f"budget 须 ≥ 1：{path}")
 
-    skip_settle = False
-    if "settle" in sections:
-        raw = "\n".join(sections["settle"]).strip()
-        if raw == "skip":
-            skip_settle = True
-        elif raw:
-            raise ValueError(f"settle 只支持 skip（或留空走正常固化）：{raw!r}：{path}")
-
     return SkillSpec(
         name=name,
         system_prompt=system_prompt,
         tools=tools,
         max_tool_rounds=max_tool_rounds,
         skip_settle=skip_settle,
+        authorization=authorization,
     )
 
 
@@ -148,20 +174,39 @@ def load_skills(directory: Path) -> dict[str, SkillSpec]:
     return specs
 
 
-def build_skill_registry(mother_ctx: ToolContext, audit: AuditLog, repo_root: Path) -> ToolRegistry:
-    """只读锚点注册表：恰 SKILL_TOOLS 8 件，文件锚点 = repo_root（111 锚点缝复用）。
+def build_skill_registry(
+    mother_ctx: ToolContext,
+    audit: AuditLog,
+    repo_root: Path,
+    authorization: str = AUTH_READONLY,
+) -> ToolRegistry:
+    """按档位构建技能 registry（ADR 117 §3），锚点 = repo_root（111 锚点缝）。
 
     与 review 先例同款 replace 摆脱共享库写器携的全局 ctx 句柄；rctx.history=None
-    → 历史工具自跳过（技能不挂编排历史）。写工具的「不注册」由 unregister 落实：
-    家族注册入口（register_builtin/register_file_tools）是整族注册，拿掉
-    write_note/write_file 后 registry 里结构上只剩只读 8 件。
+    → 历史工具自跳过（技能不挂编排历史）。
+
+    readonly（M2 现状）：家族注册后 unregister 写两件，结构上恰只读 8 件。
+    write：写两件**留下并改标 WRITE_AUTH_GUARD 确认**（任务级首写授权的
+    工具侧半边；app 层 on_confirm 包装是另一半——见 app.py），run_command
+    整件注册（019 动态规则原样：白名单免确认/危险停确认+沙箱），锚点同样
+    repo_root（写围栏机制不变只换根，117 §4）。菜单边界仍由 spec.tools
+    过滤——这里只管池子里有什么。
     """
+    if authorization not in (AUTH_READONLY, AUTH_WRITE):
+        raise ValueError(f"未知授权档位：{authorization!r}（{AUTH_READONLY}/{AUTH_WRITE}）")
     reg = ToolRegistry(audit=audit)
     rctx = replace(mother_ctx, workspace_root=repo_root, session=None, history=None)
-    register_builtin(reg, rctx)   # time + notes 族（含 write_note，下面拿掉）
-    register_file_tools(reg, rctx)   # files 族（含 write_file，下面拿掉）
-    reg.unregister("write_note")
-    reg.unregister("write_file")
+    register_builtin(reg, rctx)   # time + notes 族（含 write_note，下面按档位处置）
+    register_file_tools(reg, rctx)   # files 族（含 write_file，下面按档位处置）
+    if authorization == AUTH_WRITE:
+        for name in ("write_note", "write_file"):
+            tool = reg.get(name)
+            if tool is not None:
+                reg.register(replace(tool, needs_confirmation=WRITE_AUTH_GUARD))
+        register_terminal_tools(reg, rctx)   # run_command：019 动态确认 + 沙箱，锚点 repo_root
+    else:
+        reg.unregister("write_note")
+        reg.unregister("write_file")
     return reg
 
 

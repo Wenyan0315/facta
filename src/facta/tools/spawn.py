@@ -40,6 +40,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -99,6 +100,17 @@ _SUB_EVENT_MAP = {
 }
 
 _SUB_TASK_LEN = 60   # 事件里带的 task 摘要长度：够区分并行兄弟，不撑爆事件流
+
+# ADR 117 §5 证据锚点机械闸：spawn_step 自动标 done 前，结论串须含至少一个
+# 可验证锚点——checkpoint/tool call id（call_xxx）/ 文件路径 / run_id（32 位
+# hex）/ 会话 id（YYYYMMDD-HHMMSS）任一可正则匹配。只挡「空口断言」，
+# 不判断证据真伪（真伪核验在 M3 外，负决策）。
+_EVIDENCE_ANCHOR_RE = re.compile(
+    r"call_[A-Za-z0-9]+"          # checkpoint 账本 id（tool call id）
+    r"|[\w.\-/]+\.[A-Za-z][A-Za-z0-9]{0,5}\b"  # 文件路径（扩展名首字符须字母：挡 "3.5" 类数字）
+    r"|\b[0-9a-f]{32}\b"          # run_id（uuid4 hex）
+    r"|\b\d{8}-\d{6}\b"           # 会话 id
+)
 
 
 def _sub_emitter(
@@ -340,11 +352,21 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             )
 
             # 083：按 RunResult 枚举回写 done/failed，不再靠字符串前缀（撞前缀即误判）
-            step_status, prefix = (
-                ("failed", "执行失败")
-                if result_status is not RunResult.COMPLETED
-                else ("done", "执行完成")
-            )
+            if result_status is not RunResult.COMPLETED:
+                step_status, prefix = "failed", "执行失败"
+            elif not _EVIDENCE_ANCHOR_RE.search(conclusion):
+                # ADR 117 §5 证据闸：空口断言不标 done。步骤层无 waiting-steer
+                # 态（那是 Task 态）——等价物＝留 in_progress 挂起待人核；
+                # finish_plan 会因悬空步骤拒收官，人工核过再 update_plan_step。
+                board.update_step(step_id, "in_progress", note="缺可验证证据，待人工核")
+                return (
+                    f"步骤 #{step_id} 未标 done：子任务结论缺可验证证据"
+                    "（无 checkpoint id/文件路径/run_id/会话 id 锚点），待人工核。\n"
+                    f"子任务结论：\n{conclusion}\n\n"
+                    f"当前计划：\n{format_view(board.view())}"
+                )
+            else:
+                step_status, prefix = "done", "执行完成"
             try:
                 board.update_step(step_id, step_status, note=conclusion)
             except ValueError as e:   # 理论上不会（前面已校验 + 同步执行）

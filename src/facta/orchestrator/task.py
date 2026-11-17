@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, fields
@@ -52,6 +53,10 @@ CONTINUE_RETRY_TIMES = 15
 # ≥ 闸值 → 不落 done，转 waiting-steer。解锁 = resume 后模型修订计划
 # （skipped 改回 pending/done 或新建计划），再次判定过闸才落 done。
 PLAN_SKIPPED_LIMIT = int(os.environ.get("FACTA_PLAN_SKIPPED_LIMIT", "3"))
+
+# ADR 117 §2：任务级并发上限（M3）。计数口径 = running 任务数（worker 起线程
+# 起，含 waiting-approval 挂起与退避等待——worker 线程活着就是真并发）。
+TASK_MAX_CONCURRENT_TASKS = int(os.environ.get("FACTA_MAX_CONCURRENT_TASKS", "3"))
 
 # ---- Task 状态常量 ----
 
@@ -98,6 +103,11 @@ class Task:
     cancel_requested: bool = False
     fuse_fired: bool = False
     blocked_reason: str = ""   # 落 blocked 的原因（否则「在跑」与「被拒」分不清）
+    # ---- ADR 117（M3）----
+    skill: str = ""            # 绑定的技能名；空 = 主 agent（现状全池，档位不作用）
+    authorization: str = "readonly"   # 生效档位（技能声明 ∩ 请求收严；主 agent 任务不消费）
+    authorized_write: bool = False    # write 档首写 approve 后置位（TaskStore 落盘，重启不丢）
+    next_text: str = ""        # 起跑注入消息（创建=goal+kickoff；resume=用户指令/代打；空=续跑代打）
 
 
 def usage_delta(before: Any, after: Any) -> dict[str, float]:
@@ -149,6 +159,11 @@ def to_dict(task: Task) -> dict:
         "cancel_requested": task.cancel_requested,
         "fuse_fired": task.fuse_fired,
         "blocked_reason": task.blocked_reason,
+        # ADR 117：队列/授权三件（skill/authorization 恒报；authorized_write
+        # 供验收与排查「首写授权是否已落」）
+        "skill": task.skill,
+        "authorization": task.authorization,
+        "authorized_write": task.authorized_write,
     }
 
 
@@ -163,6 +178,9 @@ class TaskStore:
         # 懒取 TASKS_DIR（函数体里读全局）：测试 monkeypatch 模块常量即可隔离
         self.root = root or TASKS_DIR
         self._tasks: dict[str, Task] = {}
+        # ADR 117 §1：调度锁——护「扫描 queued + 置 running + 起 worker」的
+        # 原子性（防双起）。住实例：测试每 app 一把天然隔离（ide_lock 同款）。
+        self.sched_lock = threading.Lock()
 
     def _path(self, task_id: str) -> Path:
         # task_id 是程序生成的 uuid hex，不像会话 id 那样有自由字符串入口；
@@ -171,7 +189,16 @@ class TaskStore:
             raise ValueError(f"非法 task_id：{task_id}")
         return self.root / f"{task_id}.json"
 
-    def create(self, goal: str, session_id: str = "", repo_root: str = "") -> Task:
+    def create(
+        self,
+        goal: str,
+        session_id: str = "",
+        repo_root: str = "",
+        *,
+        skill: str = "",
+        authorization: str = "readonly",
+        next_text: str = "",
+    ) -> Task:
         now = time.time()
         task = Task(
             task_id=uuid.uuid4().hex,
@@ -181,6 +208,9 @@ class TaskStore:
             started_at=now,
             created_at=now,
             updated_at=now,
+            skill=skill,
+            authorization=authorization,
+            next_text=next_text,
         )
         self._tasks[task.task_id] = task
         self.save(task)   # 创建即落盘（状态迁移的第一次）
@@ -324,3 +354,33 @@ def continue_message(session: Any) -> str:
         return "[自动续跑] 计划已无未终态步骤，请核对完成情况；若已全部完成请明确声明。"
     marks = "/".join(f"#{i}" for i in ids)
     return f"[自动续跑] 计划尚有未终态步骤 {marks}，请继续推进；若已全部完成请明确声明。"
+
+
+def requeue_on_boot(tasks: TaskStore) -> int:
+    """ADR 117 §1 重启恢复：落盘任务里非终态的按语义回落，返回处理条数。
+
+    - queued：本就在队（next_text 已有则保留，无则空——worker 起跑时代打）。
+    - running 且干净（未熔断未取消）：回落 queued 重入队（任务级不做无缝
+      续跑，保守回落；Run 级崩溃续跑 038 通道不动）；next_text 清空 →
+      worker 起跑时以续跑注入消息代打，不重发 goal（会话已有进展）。
+    - running 且 fuse_fired / cancel_requested：保持语义落 blocked /
+      cancelled——熔断不因重启洗白（评审问题 4），取消不留悬案。
+    - waiting-steer / blocked：等人工，不动。
+
+    只在服务启动（create_app）时调一次；幂等（重跑不产生新状态）。
+    """
+    moved = 0
+    for task in tasks.list():
+        if task.status != TASK_RUNNING:
+            continue
+        if task.fuse_fired:
+            task.status = TASK_BLOCKED
+            task.blocked_reason = task.blocked_reason or "重启恢复：保险丝已熔断，待人工 resume"
+        elif task.cancel_requested:
+            task.status = TASK_CANCELLED
+        else:
+            task.status = TASK_QUEUED
+            task.next_text = ""
+        tasks.save(task)
+        moved += 1
+    return moved

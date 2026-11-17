@@ -151,7 +151,7 @@ class AppContext:
     # 钉死、记忆归属按 repo_root 解析、settle 节 → skip_settle（见 skills.py）。
     # 默认 None = 未装配（最小测试 ctx），仅技能 mode 消费它；放在尾部是因为
     # dataclass 默认值须排在无默认字段之后。
-    build_skill_agent: Callable[[Session, str, Path], Agent] | None = None
+    build_skill_agent: Callable[[Session, str, Path, str | None], Agent] | None = None
 
 
 # ensure_persona 的实现 116 起住 orchestrator/agent.py（skills.py 要用，不能
@@ -495,14 +495,23 @@ def assemble(provider: str) -> AppContext:
         ensure_persona(session, agent)
         return agent
 
-    def _skill_agent_factory(session: Session, name: str, repo_root: Path) -> Agent:
+    def _skill_agent_factory(
+        session: Session, name: str, repo_root: Path, authorization: str | None = None
+    ) -> Agent:
         """绑进程级资源（mother_ctx / audit）的技能工厂（ADR 116）。
 
         构造逻辑住在模块级 skills.py（可直接单测）；这里只把 assemble 手里的
         mother_ctx/audit 递进去 + 解析记忆归属（resolve_learned_dir）。
         """
         spec = skills[name]
-        registry = build_skill_registry(mother_ctx, audit, repo_root)
+        # ADR 117 §3：档位 = 技能声明 ∩ 请求收严。工厂信任 app 层已校验的
+        # 传入值（只允许 write→readonly）；None/空 = 用技能声明档。
+        effective = authorization or spec.authorization
+        registry = build_skill_registry(mother_ctx, audit, repo_root, effective)
+        spec = (
+            spec if effective == spec.authorization
+            else replace(spec, authorization=effective)   # 菜单边界跟着档位走
+        )
         return build_skill_agent(
             spec, registry, session, learned_dir=resolve_learned_dir(repo_root, LEARNED_DIR)
         )

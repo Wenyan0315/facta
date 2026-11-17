@@ -53,7 +53,8 @@ def _make_plan(session: Session) -> None:
 
 def test_spawn_step_executes_and_marks_done():
     # spawn_step 一步到位：步骤 1 自动 done（带子任务结论），步骤 2 保持 pending
-    sub_llm = ScriptedLLM([Message(role="assistant", content="结论：查到了 RAG 笔记")])
+    # ADR 117 §5：结论含证据锚点（notes/rag.md 文件路径）才标 done
+    sub_llm = ScriptedLLM([Message(role="assistant", content="结论：查到了 RAG 笔记（见 notes/rag.md）")])
     registry, session = _setup(sub_llm)
     _make_plan(session)
 
@@ -64,7 +65,7 @@ def test_spawn_step_executes_and_marks_done():
 
     view = session.plan.view()
     assert view.steps[0].status is StepStatus.DONE
-    assert view.steps[0].note == "结论：查到了 RAG 笔记"   # 结论即步骤产出
+    assert view.steps[0].note == "结论：查到了 RAG 笔记（见 notes/rag.md）"   # 结论即步骤产出
     assert view.steps[1].status is StepStatus.PENDING      # 未动的步骤不受影响
 
 
@@ -82,14 +83,47 @@ def test_spawn_step_conclusion_prefix_not_misjudged():
     # 083 对抗性用例：子 agent 正常完成（COMPLETED），但结论恰好以
     # 「子任务失败：」开头——改前 _FAILURE_PREFIXES 误判 failed，改后按
     # RunResult 枚举判 → 标 done
-    sub_llm = ScriptedLLM([Message(role="assistant", content="子任务失败：旧方案，改用新方案后成功")])
+    sub_llm = ScriptedLLM([Message(role="assistant", content="子任务失败：旧方案，改用新方案后成功（见 src/fix.py）")])
     registry, session = _setup(sub_llm)
     _make_plan(session)
 
     out = registry.execute("spawn_step", json.dumps({"step_id": 1, "task": "查资料"}))
     assert "执行完成" in out
     assert session.plan.view().steps[0].status is StepStatus.DONE
-    assert session.plan.view().steps[0].note == "子任务失败：旧方案，改用新方案后成功"
+    assert session.plan.view().steps[0].note == "子任务失败：旧方案，改用新方案后成功（见 src/fix.py）"
+
+
+# ---------- ADR 117 §5 证据锚点机械闸 ----------
+
+
+def test_spawn_step_no_evidence_anchor_not_marked_done():
+    # 空口断言（结论无任何可验证锚点）不标 done：步骤留 in_progress
+    # 挂起待人核，note 注明缺证据——finish_plan 会因悬空步骤拒收官
+    sub_llm = ScriptedLLM([Message(role="assistant", content="子任务完成")])
+    registry, session = _setup(sub_llm)
+    _make_plan(session)
+
+    out = registry.execute("spawn_step", json.dumps({"step_id": 1, "task": "查资料"}))
+    assert "未标 done" in out
+    assert "缺可验证证据" in out
+    view = session.plan.view()
+    assert view.steps[0].status is StepStatus.IN_PROGRESS
+    assert view.steps[0].note == "缺可验证证据，待人工核"
+
+
+def test_spawn_step_various_anchors_pass_gate():
+    # 四类锚点任一命中即放行：checkpoint id / 文件路径 / run_id / 会话 id
+    for conclusion in (
+        "核对了账本记录 call_a1b2c3",
+        "已修好 tests/test_x.py",
+        "run 32af32bc9aa04a22a4bb20f90914c79e 已完成",
+        "会话 20261117-091530 里复现过",
+    ):
+        registry, session = _setup(ScriptedLLM([Message(role="assistant", content=conclusion)]))
+        _make_plan(session)
+        out = registry.execute("spawn_step", json.dumps({"step_id": 1, "task": "查资料"}))
+        assert "执行完成" in out, conclusion
+        assert session.plan.view().steps[0].status is StepStatus.DONE, conclusion
 
 
 # ---------- 校验（board 统一闸门） ----------
@@ -130,7 +164,7 @@ def test_spawn_step_forwards_tools_and_max_rounds(monkeypatch):
                             confirm=None, on_event=None, should_cancel=None):
         seen["tools"] = tools
         seen["max_rounds"] = max_rounds
-        return sp.RunResult.COMPLETED, "子任务完成"
+        return sp.RunResult.COMPLETED, "子任务完成（见 notes/report.md）"
 
     monkeypatch.setattr(sp, "spawn_subagent", fake_spawn_subagent)
     registry, session = _setup(ScriptedLLM([]))

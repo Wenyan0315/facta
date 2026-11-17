@@ -270,6 +270,7 @@ def test_to_dict_shape(tmp_path):
         "task_id", "goal", "session_id", "repo_root", "status", "run_ids",
         "artifacts", "billing", "continuations", "started_at", "created_at",
         "updated_at", "cancel_requested", "fuse_fired", "blocked_reason",
+        "skill", "authorization", "authorized_write",   # ADR 117 §3/§4（next_text 刻意不外露）
     }
     # 产物=引用，不新建存储
     assert d["artifacts"] == {"session_id": "s9", "run_ids": ["r1"]}

@@ -47,7 +47,7 @@ def _make_ctx() -> tuple[AppContext, dict]:
         ensure_persona(session, agent)
         return agent
 
-    def build_skill(session: Session, name: str, repo_root: Path) -> Agent:
+    def build_skill(session: Session, name: str, repo_root: Path, authorization: str | None = None) -> Agent:
         calls["skill"].append((session, name, repo_root))
         agent = Agent(name=name, system_prompt=SPEC.system_prompt, registry=ToolRegistry())
         ensure_persona(session, agent)
