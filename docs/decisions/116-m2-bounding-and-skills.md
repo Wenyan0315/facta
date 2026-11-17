@@ -201,18 +201,26 @@ review 等价测试）。`build_review_agent` 字段随 review.py 一并删除�
 
 ## 待验收
 
-- [ ] 本 ADR 过开工前评审，意见逐条记录处置（见下节）。
-- [ ] 三门全绿：ruff / mypy / pytest（新：test_skills/test_brief/test_projects；
-      既有 suite 零回归、frozen-eval 语料钉不动）。
-- [ ] 钉子①：`data/skills/` 加一个文件 → `mode=该技能名` 真机跑通（curl
-      或既有页），全程零 py 改动。
-- [ ] 钉子②：登记第二个项目 → 在该项目 repo_root 上跑 task/skill——
+- [x] 本 ADR 过开工前评审，意见逐条记录处置（见下节）。
+- [x] 三门全绿：ruff / mypy / pytest（新：test_skills/test_brief/test_projects；
+      既有 suite 零回归、frozen-eval 语料钉不动）。（PR #63，997 passed）
+- [x] 钉子①：`data/skills/` 加一个文件 → `mode=该技能名` 真机跑通（curl
+      或既有页），全程零 py 改动。（probe.md 零 py 即用；未知技能 422 对照）
+- [x] 钉子②：登记第二个项目 → 在该项目 repo_root 上跑 task/skill——
       注入只见该项目决定；固化落该项目目录（注入与固化双向隔离测试）。
+      （in-repo 登记 + brief 锚点读 proj2 marker + 本仓 learned 零注入 +
+      本仓登记 400）
 - [ ] Brief 真机双轨例（113 验收第 2 条）：Brief 落地后的下一个真实任务
       （M3 草案开工前评审）——手工 Brief 与生成 Brief 同一时点独立写，对照
-      引用真实性/相关性/过时判定/长度与耗时。
-- [ ] review 迁移等价：评审 Agent 工具集/预算/跳固化/锚点行为与 111 验收
-      逐项一致（test_review 重锚全绿 + 真机一例）。
+      引用真实性/相关性/过时判定/长度与耗时。（**唯一未验项，挂 M3 草案
+      评审兑现**；六节结构与 ADR 引用抽查已过）
+- [x] review 迁移等价：评审 Agent 工具集/预算/跳固化/锚点行为与 111 验收
+      逐项一致（test_review 重锚全绿 + 真机一例）。（真机一例：skills.py
+      静态评审，只读无写；模型自核「review.py 已不存在」＝迁移坐实）
+
+> 真机验收全记录：[m2-acceptance-report.md](../../m2-acceptance-report.md)
+> （2026-11-15，commit 8588a3b）；两条观察项（重复登记 4xx 码不一、
+> 工具输出截断）均挂档不改码。
 
 ## 开工前评审记录
 
