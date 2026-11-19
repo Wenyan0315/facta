@@ -2,16 +2,17 @@
   "name": "facta",
   "displayName": "Facta",
   "description": "Facta 个人 AI Agent 的 VS Code 宿主——连接本地 facta.server，界面原样复用（做壳不重写 UI）",
-  "version": "0.2.0",
+  "version": "2.0.0",
   "publisher": "facta",
   "license": "MIT",
   "engines": { "vscode": "^1.85.0" },
   "categories": ["Other"],
-  "activationEvents": ["onCommand:facta.open"],
+  "activationEvents": ["onCommand:facta.open", "onCommand:facta.openTasks"],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       { "command": "facta.open", "title": "打开面板", "category": "Facta" },
+      { "command": "facta.openTasks", "title": "打开任务面板", "category": "Facta" },
       { "command": "facta.attachContext", "title": "发送当前文件/选中区到 Facta", "category": "Facta" }
     ],
     "configuration": {

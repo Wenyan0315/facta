@@ -48,3 +48,21 @@ jobs:
         run: |
           set -o pipefail
           python -m pytest -q
+
+  # ADR 118 §4：扩展演进超出最小版（openTasks + 常驻状态栏轮询），104 的触发信号
+  # 成立 → 壳进 CI。只跑类型检查：不打包（vsce 外部提供、不进 devDependencies）、
+  # 不跑 e2e（@vscode/test-electron 要下 VS Code 二进制，太重）。.vsix 仍本地打包。
+  vscode:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 扩展类型检查（tsc --noEmit）
+        run: |
+          npm ci
+          npx tsc -p . --noEmit
+        working-directory: vscode

@@ -12,16 +12,16 @@
   <aside id="sidebar">
     <div class="sidebar-head">
       <button id="new-session" onclick="location.href='/'">← 返回对话</button>
-      <span class="muted" style="font-size:12px;">本次服务进程内的运行记录（重启后清空）</span>
+      <span class="muted" style="font-size:12px;">委派长期任务 / 队列 / 账单 / 确认 / 项目设置（ADR 118）。任务清单持久在 data/tasks；Run 明细只活在本进程</span>
     </div>
     <ul id="session-list"><li class="muted">任务视图</li></ul>
   </aside>
 
   <main id="chat">
     <div id="messages">
-      <h2 class="tasks-title">任务运行</h2>
+      <h2 class="tasks-title">任务</h2>
       <!-- FW 站 v2：容器空着，内容由 Preact 状态驱动渲染（对照 v1 的 innerHTML 拼接） -->
-      <div id="run-list"></div>
+      <div id="tasks-app"></div>
     </div>
   </main>
 

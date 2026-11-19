@@ -4,7 +4,6 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "facta"
-version = "0.9.0"   # 与 src/facta/__main__.py 的 VERSION 保持一致（版本号单一语义）
 description = "从零自研的个人 AI Agent：ReAct 执行主轴 + 多层记忆 + 工具/MCP 外延"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,12 +15,15 @@ dependencies = [
     "openai>=1.0",
     "python-dotenv>=1.0",
 ]
+# ADR 118 §6：版本号单一真值源 = src/facta/__init__.py 的 __version__。
+# 此前这里与 __main__.VERSION 双写、靠行内注释「保持一致」的人肉纪律。
+dynamic = ["version"]
 
 [project.urls]
 Homepage = "https://github.com/Wenyan0315/facta"
 Repository = "https://github.com/Wenyan0315/facta"
 Issues = "https://github.com/Wenyan0315/facta/issues"
-Changelog = "https://github.com/Wenyan0315/facta/commits/main"
+Changelog = "https://github.com/Wenyan0315/facta/releases"   # ADR 118 §6：不建 CHANGELOG.md，变更历史真值源 = ADR + Release notes
 
 [project.optional-dependencies]
 dev = [
@@ -40,6 +42,9 @@ web = [
     "fastapi>=0.110",  # S2 Web 壳：SSE 走 Starlette 的 StreamingResponse，零新协议库
     "uvicorn>=0.27",   # ASGI server，只绑 127.0.0.1（OpenClaw 调研：安全默认只绑 loopback）
 ]
+
+[tool.setuptools.dynamic]
+version = { attr = "facta.__version__" }   # __init__.py 保持零重导入：attr 静态可读，不拖依赖
 
 [tool.setuptools.packages.find]
 where = ["src"]

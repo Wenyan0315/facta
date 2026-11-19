@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from facta import __version__
 from facta.core.llm import ScriptedLLM
 from facta.core.telemetry import UsageLedger
 from facta.core.types import Message
@@ -602,6 +603,7 @@ def test_status_endpoint_reflects_env_levels(monkeypatch):
     monkeypatch.setenv("FACTA_APPROVAL_POLICY", "untrusted")
     body = _make_client().get("/api/status").json()
     assert body == {
+        "version": __version__,   # ADR 118 §6：跑的是哪个版本，端点上可观测
         "sandbox_level": "none",
         "sandbox_backend": None,
         "approval_policy": "untrusted",
@@ -615,6 +617,20 @@ def test_status_endpoint_reflects_env_levels(monkeypatch):
     assert body["sandbox_level"] == "workspace-write"
     assert body["approval_policy"] == "on-request"
     assert body["sandbox_backend"] in (None, "seatbelt", "bwrap")
+
+
+def test_version_single_source_of_truth():
+    """ADR 118 §6：版本号搬家后的单点化钉子——CLI / 端点 / 打包元数据同源。
+
+    pyproject 用 dynamic version（attr = facta.__version__），故元数据与源码
+    结构上不可能漂移；此前 pyproject + __main__ 双写靠行内注释人肉同步。
+    """
+    import importlib.metadata
+
+    from facta.__main__ import VERSION
+
+    assert __version__ == VERSION
+    assert importlib.metadata.version("facta") == __version__
 
 
 def test_session_guards():
