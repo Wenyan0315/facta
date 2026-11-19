@@ -184,16 +184,33 @@ execute 收口）、审计/围栏/checkpoint 全部沿用；演进集中在**调
 - [ ] 本 ADR 过开工前评审（评审对象含 **Brief 双轨例**：116 待验收唯一
       未验项——M3 草案评审时，手工 Brief 与生成 Brief 同一时点独立写、
       对照引用真实性/相关性/过时判定/长度与耗时）。
-- [ ] 三门全绿：ruff / mypy / pytest（新 test_queue/test_authorization；
-      既有 suite 零回归）。
-- [ ] 钉子①：3 任务并行互不阻塞——真机 3 任务同时 running、各自推进到
-      终态，互不 blocked（API 全程可观测）。
-- [ ] 钉子②：涉写任务停 L2 等确认——write 档技能任务首写 waiting-approval
-      → approve → 后续写免停 → 任务跑完终态；reject 路径对照。
-- [ ] readonly 结构性缺席：readonly 档技能任务菜单无写/终端工具。
-- [ ] 队列行为：第 4 任务排队、终态触发下一任务启动、重启回落重入队。
-- [ ] 零回归抽查：主 agent 任务/聊天/既有 sync 端点行为不变。
-- [ ] spawn_step 证据闸：无锚点结论不落 done。
+      → **草案评审已做**（见文末评审记录：9 条候选问题全部采纳修订）；
+      **Brief 双轨对照仍未覆盖**（本期验收未排入），随 M4 一并做。
+- [x] 三门全绿：ruff / mypy / pytest（新 test_queue/test_authorization；
+      既有 suite 零回归）。→ PR #67 CI 三检查全绿；本地 1002 passed / 7 skipped
+      （MCP 两文件 deselect＝本地代理 502 环境性预存失败）。
+- [x] 钉子①：3 任务并行互不阻塞——真机 3 任务同时 running、各自推进到
+      终态，互不 blocked（API 全程可观测）。→ 1s 采样 trace：`t+0s` 三 running
+      + 第四 queued，`t+8s` 四个全 done，无一 blocked。
+- [x] 钉子②：涉写任务停 L2 等确认——write 档技能任务首写 waiting-approval
+      → approve → 后续写免停 → 任务跑完终态；reject 路径对照。→ approve 链
+      实测（同 run 内第二写零 confirm、`authorized_write=true`、文件落 repo_root
+      内）；reject 对照不置位、文件不落盘。
+- [x] readonly 结构性缺席：readonly 档技能任务菜单无写/终端工具。→ 模型自陈
+      菜单恰只读 8 件，回 `NO_TOOL write_file`，`confirm.request=0`。
+- [x] 队列行为：第 4 任务排队、终态触发下一任务启动、重启回落重入队。
+      → 终态同拍拉起（未等巡检）；`kill -9` 后以 `FACTA_MAX_CONCURRENT_TASKS=1`
+      重启，脏 running 回落 queued 且受新上限约束，FIFO 排空全 done；
+      熔断/取消不因重启洗白；resume 亦走队列（槽满时稳定停 queued）。
+- [x] 零回归抽查：主 agent 任务/聊天/既有 sync 端点行为不变。→ chat sync 200
+      completed；主 agent 任务 `write_file` 免确认直写（`confirm.request=0`）。
+- [x] spawn_step 证据闸：无锚点结论不落 done。→ 真机复现：闸拦下后步骤留
+      `in_progress`、`finish_plan` 拒收官，模型空转至续跑熔断落 blocked。
+      证据与三条观察见 [m3-acceptance-report.md](../../m3-acceptance-report.md)。
+
+**验收结论（2026-11-19，main=`ec0aca4`）**：除「Brief 双轨对照」（116 遗留，
+随 M4）外全部通过，未发现 P0，无阻断项。真机证据、账单（20 单 ¥0.9862）与
+四条观察处置见 [m3-acceptance-report.md](../../m3-acceptance-report.md)。
 
 ## 开工前评审记录
 
@@ -256,3 +273,26 @@ execute 收口）、审计/围栏/checkpoint 全部沿用；演进集中在**调
 
 另：起跑注入消息落 `Task.next_text`（刻意不进 `to_dict`——它是指令载荷不是
 状态）；创建=goal+kickoff 提示，resume=用户指令/续跑代打，重启回落清空防重发。
+
+### 验收期观察（2026-11-19 真机验收，四条均**不改码**、挂触发信号）
+
+4. **确认文案未明示授权语义**：§3 要求「确认消息明示『本任务写授权（批准后
+   后续写免停）』」，实测 SSE `confirm.request` 只携 `tool` + `arguments`（与
+   `run_command` 常规确认同形）。**机制正确**（首停-approve-免停、reject 不置位
+   均真机成立），差的是 UI 文案；补文案要动 `Run.request_confirm` 形参 + 前端
+   确认卡 → 归 M4 宿主层。触发信号＝M4 面板落地时一并补。
+5. **证据闸有绕行路径**：闸只在 `spawn_step` 自动标 done 这条路径生效；当
+   `make_plan` 的 tools 未声明 `spawn_step` 时，模型可走 `spawn_subagent` +
+   `update_plan_step` **手工**标 done 绕过（§5 落点本就只裁 spawn_step，属既定
+   范围而非实现偏差）。触发信号＝首例「手工标 done 掩盖无证据步骤」造成实际
+   损失，再把闸下移到 `update_plan_step`/`finish_plan` 侧。
+6. **闸拦下后模型会空转到熔断**：子任务结论天然不含锚点时模型无合规出路，
+   实测重试至 21 次续跑触发 M1 保险丝落 `blocked`（单均账单最高一单 ¥0.30）。
+   「宁可 blocked 不假 done」＝设计意图；触发信号＝真实任务反复出现「闸→熔断」
+   空转，再在返回串里给出可走的下一步（如「先推进其他步骤或如实汇报受阻」）。
+7. **主 agent 任务的 `authorization` 字段易误读**：不绑技能的任务视图显示
+   `readonly`，而实测其 `write_file` 免确认直写（§3「档位只作用于技能任务」）。
+   字段语义＝技能档位，无技能即无档位实效。触发信号＝前端面板上线时决定是否
+   对 `skill` 为空的任务隐藏该字段。
+
+证据、账单与逐项结论见 [m3-acceptance-report.md](../../m3-acceptance-report.md)。
