@@ -237,3 +237,22 @@ execute 收口）、审计/围栏/checkpoint 全部沿用；演进集中在**调
   （M2 报告观察项 #3，继续挂档）。双轨全文存
   `/tmp/facta-accept-20261117/`（验收材料，不入库）。
 - **状态**：修订后待用户定稿，定稿后开工。
+
+## 实现注记（2026-11-17，实施期收口）
+
+落点清单三处按更薄方案落（结论不变，载体减重），照实留档：
+
+1. **`Run.confirm_kind` 不加**——写首停改在 `_run_worker` 的 `on_confirm`
+   包装实现（技能任务 + write 档时：写两件直接放行、其余走 `run.request_confirm`，
+   approve 后置位 `Task.authorized_write` 落盘再放行）。包装在 worker 线程内
+   「先置位后放行」原子性比 confirm 端点拆两步更不易漏，run_store 零改动。
+2. **files.py/notes.py 不挂动态确认规则**——写两件的 `needs_confirmation` 改标
+   在 `build_skill_registry`（write 档 `replace(tool, needs_confirmation=
+   WRITE_AUTH_GUARD)`）完成：档位是技能池的属性而非工具的全局属性，主 agent 的
+   `write_file` 免确认直写逐字节不变（零回归半边）。
+3. **spawn 证据闸的「落 waiting-steer」在步骤层折算为留 `in_progress`** +
+   note「缺可验证证据，待人工核」——StepStatus 无 waiting-steer 态（那是 Task 态）；
+   机械后果同构：`finish_plan` 因悬空步骤拒收官，人工核过再 `update_plan_step`。
+
+另：起跑注入消息落 `Task.next_text`（刻意不进 `to_dict`——它是指令载荷不是
+状态）；创建=goal+kickoff 提示，resume=用户指令/续跑代打，重启回落清空防重发。

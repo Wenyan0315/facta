@@ -127,7 +127,7 @@ def test_zero_code_add_skill_end_to_end(tmp_path, monkeypatch):
 
     calls = []
 
-    def build_skill(session, name, repo_root):
+    def build_skill(session, name, repo_root, authorization=None):
         calls.append((name, repo_root))
         agent = Agent(name=name, system_prompt=skills[name].system_prompt, registry=ToolRegistry())
         ensure_persona(session, agent)

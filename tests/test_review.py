@@ -60,7 +60,7 @@ def _make_ctx(reply: str = "收到") -> tuple[AppContext, dict]:
         ensure_persona(session, agent)
         return agent
 
-    def build_skill(session: Session, name: str, repo_root: Path) -> Agent:
+    def build_skill(session: Session, name: str, repo_root: Path, authorization: str | None = None) -> Agent:
         calls["skill"].append((session, name, repo_root))
         agent = Agent(name=name, system_prompt=SPEC.system_prompt, registry=ToolRegistry())
         ensure_persona(session, agent)
@@ -283,7 +283,7 @@ def test_skill_factory_failure_still_finishes_run_and_sync(monkeypatch):
     monkeypatch.setattr("facta.server.app.settle_session", lambda *a, **k: settled.append("settle"))
     ctx, _calls = _make_ctx()
 
-    def broken_factory(session, name, repo_root):
+    def broken_factory(session, name, repo_root, authorization=None):
         raise RuntimeError("技能构造炸了")
 
     ctx = replace(ctx, build_skill_agent=broken_factory)
