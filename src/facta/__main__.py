@@ -10,13 +10,14 @@ import logging
 import sys
 import threading
 
+from facta import __version__
 from facta.cli import EXIT_NEW, run_chat
 from facta.core.telemetry import verify_calls
 from facta.memory.store import Session, derive_title
 from facta.orchestrator.assemble import assemble, settle_session
 from facta.orchestrator.checkpoint import heal, ledger_path, read_ledger
 
-VERSION = "0.9.0"   # 与 pyproject [project].version 保持一致（版本号单一语义，改动时同步两处）
+VERSION = __version__   # ADR 118 §6：真值源在 facta/__init__.py（pyproject 也从那里 dynamic 取）
 
 
 def _settle_async(session, sid, ctx) -> threading.Thread:

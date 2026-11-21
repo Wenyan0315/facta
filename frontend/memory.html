@@ -18,6 +18,11 @@
   <main id="chat">
     <div id="messages">
       <h2 class="tasks-title">记忆面板</h2>
+      <!-- ADR 118 §5：项目设置（记忆归属双模式切换）并入 /tasks 页折叠区块，此处只留动线链接 -->
+      <p class="muted" style="font-size:13px;">
+        项目级记忆的<strong>归属模式</strong>（集中式 ↔ 就地式）在
+        <a href="/tasks">任务页</a>底部的「项目设置」区块切换。
+      </p>
       <div id="memory-root"></div>
     </div>
   </main>

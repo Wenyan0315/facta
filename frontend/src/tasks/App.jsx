@@ -1,73 +1,100 @@
-// 任务视图 v2 主组件（FW 站试点）——对照 v1（已删，git 史可查）的三个根本区别：
-// ① 状态即真相：runs 是唯一数据源，UI 是它的投影；
-//    v1 是 fetch 完手动 innerHTML + querySelector 逐个填（改数据+改 DOM 两步）
-// ② 声明式列表：runs.map(...) 描述「列表长什么样」，不描述「怎么改 DOM」
-// ③ JSX 文本节点自动转义——v1 靠纪律手写 textContent 防注入，v2 结构性免疫
-// S5c：TaskItem 加展开态——点条目展开 RunDetail（计划面板：SSE 消费 plan.* 事件）
+// 任务视图主组件（FW 站 /tasks 入口）——ADR 118 §2 把它从「Run 列表」升级为
+// **Task 一等视图**：委派表单在页首，任务卡是一等公民，Run 降为卡内下钻。
+//
+// 三条不变的旧纪律（沿用本页 v2 的写法）：
+// ① 状态即真相：tasks/runs 是唯一数据源，UI 是它的投影，不手动改 DOM；
+// ② 声明式列表：tasks.map(...) 描述「列表长什么样」；
+// ③ JSX 文本节点自动转义（goal/报错串都来自外部）。
+//
+// 118 §2 负决策：**不新建任务级 SSE**——面板要的状态翻转（queued→running→…）
+// 都是低频粗粒度，20s 轮询够用；实时性留给「展开时才订阅」的既有 per-Run SSE
+// （RunDetail 的 plan.*、ConfirmCard 的 confirm.*），订阅数 = 展开数。
 import { useEffect, useState } from "preact/hooks";
-import { fetchRuns } from "./api.js";
-import RunDetail from "./RunDetail.jsx";
+import { fetchIdeContext, fetchProjects, fetchRuns, fetchSkills, fetchStatus, fetchTasks } from "./api.js";
+import NewTaskForm from "./NewTaskForm.jsx";
+import ProjectsPanel from "./ProjectsPanel.jsx";
+import TaskCard from "./TaskCard.jsx";
 
-const STATUS_ZH = {
-  pending: "排队中",
-  running: "运行中",
-  waiting_approval: "等待确认",
-  completed: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-};
-
-const REFRESH_MS = 5000; // 与 v1 同节奏：5 秒轮询
-
-function TaskItem({ run }) {
-  // 展开态是条目自己的局部状态（列表只管列表；详情的生命周期随条目卸载）
-  const [open, setOpen] = useState(false);
-  return (
-    <div class="task-item">
-      <div class="task-head" onClick={() => setOpen(!open)}>
-        <span class={`task-badge ${run.status}`}>
-          {STATUS_ZH[run.status] || run.status}
-        </span>
-        <span class="task-title">{run.title || "(无标题)"}</span>
-        <span class="task-caret">{open ? "▾" : "▸"}</span>
-      </div>
-      <div class="task-preview">{run.preview || "（无交付摘要）"}</div>
-      {open ? <RunDetail runId={run.run_id} /> : null}
-    </div>
-  );
-}
+const REFRESH_MS = 20000;   // 118 §2：沿用本页既有轮询节奏，不为 Task 新造通道
 
 export default function App() {
-  // 三态合一：{loading} 初始 / {error} 失败 / {runs} 到货
-  // 轮询不停：失败态会被下一次成功轮询自然覆盖（瞬时网络抖动自愈）
-  const [state, setState] = useState({ loading: true });
+  const [tasks, setTasks] = useState(null);
+  const [runs, setRuns] = useState([]);
+  const [skills, setSkills] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [ideContext, setIdeContext] = useState(null);
+  const [version, setVersion] = useState("");
+  const [error, setError] = useState(null);
+
+  // 列表：任务 + Run 摘要（Run 供卡内下钻；一次刷新两跳并发）
+  const refreshList = async () => {
+    try {
+      const [t, r] = await Promise.all([fetchTasks(), fetchRuns()]);
+      setTasks(t);
+      setRuns(r);
+      setError(null);
+    } catch (e) {
+      // 失败态不覆盖旧数据（瞬时抖动下一次轮询自愈），只如实报一行
+      setError(e.message);
+    }
+  };
+
+  // 侧料：技能表 / 项目表 / IDE 信箱 / 版本。信箱要跟着轮询走——壳里「附上当前
+  // 上下文」可能发生在面板已经打开之后（118 §4.3 预填的动线）。
+  const refreshSide = async () => {
+    const [sk, pj, ide, st] = await Promise.allSettled([
+      fetchSkills(), fetchProjects(), fetchIdeContext(), fetchStatus(),
+    ]);
+    if (sk.status === "fulfilled") setSkills(sk.value);
+    if (pj.status === "fulfilled") setProjects(pj.value);
+    if (ide.status === "fulfilled") setIdeContext(ide.value);   // 空槽 = null（正常）
+    if (st.status === "fulfilled") setVersion(st.value.version || "");
+  };
 
   useEffect(() => {
-    let alive = true; // 竞态守卫：卸载后的迟到响应不再 setState
-    const refresh = async () => {
-      try {
-        const runs = await fetchRuns();
-        if (alive) setState({ runs });
-      } catch {
-        if (alive) setState({ error: true });
+    let alive = true;   // 竞态守卫：卸载后的迟到响应不再 setState
+    const tick = () => {
+      if (alive) {
+        refreshList();
+        refreshSide();
       }
     };
-    refresh();
-    const timer = setInterval(refresh, REFRESH_MS);
+    tick();
+    const timer = setInterval(tick, REFRESH_MS);
     return () => {
-      alive = false; // 卸载即清理：定时器和迟到响应一起带走
+      alive = false;
       clearInterval(timer);
     };
   }, []);
 
-  if (state.loading) return <p class="muted">加载中…</p>;
-  if (state.error) return <p class="muted">加载失败</p>;
-  if (!state.runs.length) return <p class="muted">暂无任务运行</p>;
+  if (tasks === null) return <p class="muted">加载中…</p>;
+
   return (
-    <div>
-      {state.runs.map((run) => (
-        <TaskItem key={run.run_id} run={run} />
-      ))}
+    <div class="tp-page">
+      <NewTaskForm
+        skills={skills}
+        projects={projects}
+        ideContext={ideContext}
+        onCreated={() => { refreshList(); refreshSide(); }}
+        onIdeCleared={() => refreshSide()}
+      />
+
+      {error ? <div class="tp-err">刷新失败：{error}</div> : null}
+
+      {tasks.length === 0 ? (
+        <p class="muted">还没有委派任务。用上面的表单委派第一个。</p>
+      ) : (
+        tasks.map((task) => (
+          <TaskCard key={task.task_id} task={task} runs={runs} onChanged={refreshList} />
+        ))
+      )}
+
+      <ProjectsPanel projects={projects} onChanged={refreshSide} />
+
+      {/* ADR 118 §6：版本号在页脚可观测（端点 /api/status 同源，不再靠猜） */}
+      <div class="tp-footer muted" data-testid="footer-version">
+        Facta {version || "?"} · 委派/批准/纠偏/取消都在本页；聊天与确认卡另见 <a href="/">对话页</a>
+      </div>
     </div>
   );
 }

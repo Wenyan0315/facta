@@ -476,3 +476,70 @@ body {
 .notes-banner-err { background: #fef2f2; border: 1px solid #fecaca; color: var(--danger); }
 .notes-banner-warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
 .notes-banner-warn a { color: var(--accent); }
+
+/* ============ M4 任务面板（ADR 118）============ */
+/* /tasks 从「Run 列表」升级为 Task 一等视图：委派表单 + 任务卡（含内嵌确认卡）
+   + 折叠的项目设置区块。新类一律 tp- 前缀（task panel），不与聊天页既有词汇撞车；
+   .task-item/.task-head/.task-badge/.confirm-* 复用既有规则（同一份 style.css）。 */
+.tp-page { display: flex; flex-direction: column; gap: 12px; }
+
+/* Task 状态徽章：与 Run 状态是两套词汇（Task 持久在 data/tasks，Run 只活本进程） */
+.task-badge.queued { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+.task-badge.waiting-approval { background: #fef3c7; color: #b45309; }
+.task-badge.waiting-steer { background: #e0f2fe; color: #0369a1; }
+.task-badge.blocked { background: #fee2e2; color: #b91c1c; font-weight: 600; }
+.task-badge.done { background: #dcfce7; color: #15803d; }
+.tp-alert { background: #fee2e2; color: var(--danger); font-weight: 600; }  /* 未展开也看得见的「待确认」 */
+
+/* 委派表单 */
+.tp-form { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.tp-form-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.tp-goal { width: 100%; box-sizing: border-box; background: #fff; color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px; font: inherit; resize: vertical; }
+.tp-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; align-items: flex-start; }
+.tp-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.tp-grow { flex: 1 1 220px; }
+.tp-form input, .tp-form select, .tp-steer { background: #fff; color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font: inherit; }
+.tp-steer { flex: 1 1 260px; }
+.tp-ide { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 6px 8px;
+  background: #fff; border: 1px dashed var(--border); border-radius: 6px;
+  font-size: 12px; color: var(--text); word-break: break-all; }
+.tp-hint { font-size: 12px; }
+.tp-warn { font-size: 12px; color: #b45309; }
+.tp-err { margin-top: 8px; font-size: 13px; color: var(--danger); white-space: pre-wrap; word-break: break-word; }
+
+/* 操作行与按钮 */
+.tp-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.tp-btn { background: #fff; color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 4px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+.tp-btn:hover:not(:disabled) { border-color: var(--muted); }
+.tp-btn:disabled { opacity: 0.5; cursor: default; }
+.tp-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tp-btn-danger { background: #fff; border-color: var(--danger); color: var(--danger); }
+.tp-btn-mini { padding: 1px 6px; font-size: 12px; }
+.tp-time { font-size: 12px; }
+
+/* 任务卡内容 */
+.tp-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+.tp-chip { font-size: 12px; color: var(--muted); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
+.tp-ok { color: #15803d; border-color: #bbf7d0; background: #f0fdf4; }
+.tp-blocked { margin-top: 4px; font-size: 13px; color: var(--danger); white-space: pre-wrap; }
+.tp-billing { margin-top: 8px; padding: 8px; background: #fff;
+  border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+.tp-billing-row { display: flex; gap: 8px; padding: 2px 0; }
+.tp-detail { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 8px; }
+.tp-run { margin: 6px 0; padding-left: 8px; border-left: 2px solid var(--border); }
+.tp-kind-note { margin: 4px 0; font-size: 13px; color: #b45309; }  /* 写授权提示（117 观察 3 收口） */
+
+/* 项目设置折叠区块（118 §5：并入本页，不新建第八入口） */
+.tp-projects { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+.tp-projects summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+.tp-project { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.tp-project-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; }
+.tp-project-path { font-size: 12px; margin: 2px 0 6px; word-break: break-all; }
+.tp-confirm-row { margin-top: 6px; padding: 8px; background: #fff;
+  border: 1px solid var(--border); border-radius: 6px; }
+
+.tp-footer { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; }

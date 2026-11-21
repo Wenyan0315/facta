@@ -100,12 +100,12 @@ def test_create_if_idle_allows_other_sessions_up_to_cap():
 
 # ---------- S4b：waiting_approval 确认挂起 ----------
 
-def _start_confirm(run: Run) -> tuple[threading.Thread, dict]:
+def _start_confirm(run: Run, kind: str = "") -> tuple[threading.Thread, dict]:
     """后台线程发起确认挂起，等到 confirm_pending 生效（模拟 worker 阻塞）。"""
     result: dict = {}
 
     def worker():
-        result["approved"] = run.request_confirm("run_command", {"command": "rm x"})
+        result["approved"] = run.request_confirm("run_command", {"command": "rm x"}, kind)
 
     t = threading.Thread(target=worker)
     t.start()
@@ -128,8 +128,22 @@ def test_request_confirm_blocks_until_user_resolves():
     assert run.status == STATUS_RUNNING                 # 裁决后回到原状态
     # 两条事件进 append-only 流（断线重放的原料）
     assert [e.type for e in run.events] == ["confirm.request", "confirm.resolved"]
-    assert run.events[0].data == {"tool": "run_command", "arguments": {"command": "rm x"}}
+    assert run.events[0].data == {"tool": "run_command", "arguments": {"command": "rm x"}, "kind": ""}
     assert run.events[1].data == {"tool": "run_command", "approved": True}
+
+
+def test_request_confirm_kind_in_payload():
+    """ADR 118 §3：kind 透传进事件载荷——write 档 UI 文案的唯一承载。
+
+    第三形参有缺省值，故既有两参调用一字不改（上一条即钉子：kind 空串）。
+    """
+    from facta.skills import WRITE_AUTH_GUARD
+
+    run = Run(run_id="r1", status=STATUS_RUNNING)
+    t, _ = _start_confirm(run, kind=WRITE_AUTH_GUARD)
+    assert run.events[0].data["kind"] == WRITE_AUTH_GUARD
+    run.resolve_confirm(True)
+    t.join(timeout=2)
 
 
 def test_request_confirm_reject_path():

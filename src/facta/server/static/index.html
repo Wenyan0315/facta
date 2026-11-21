@@ -46,6 +46,9 @@
     <div class="confirm-box">
       <div class="confirm-title">⚠️ agent 请求执行高危操作</div>
       <div id="confirm-tool" class="confirm-tool"></div>
+      <!-- ADR 118 §3：确认的「语义类别」文案（kind=write-auth 时明示本任务写授权）。
+           与 FW 任务面板内嵌确认卡同一份语义，只是这里的载体是聊天页模态。 -->
+      <div id="confirm-kind" class="tp-kind-note" hidden></div>
       <pre id="confirm-args" class="confirm-args"></pre>
       <div class="confirm-actions">
         <button id="confirm-reject" type="button">拒绝</button>
