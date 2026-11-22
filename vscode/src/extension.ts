@@ -1,6 +1,7 @@
 // N04（ADR 104）：VS Code 壳最小可用。本文件是「宿主」不是「UI」——
-// 界面 100% 由 facta.server 伺服（单跳 iframe），这里只有三件事：
-// 服务生命周期（拉起/探活/回收）、单跳 iframe 壳、IDE 上下文直投（107）。
+// 界面 100% 由 facta.server 伺服（单跳 iframe），这里只有四件事：
+// 服务生命周期（拉起/探活/回收）、单跳 iframe 壳、状态栏只读计数（118 §4.2）、
+// IDE 上下文直投（107）。
 // 三条 D01 评审裁定落点：①数据目录只经 FACTA_DATA_DIR env 注入；
 // ②端口经 FACTA_SERVER_PORT 注入（serverUrl 语义=拉起或连接的地址）；
 // ③单跳 iframe 保住页内 app 的同源执行（见 shellHtml 注释）。
@@ -65,7 +66,7 @@ async function ensureServer(): Promise<string> {
   );
 }
 
-function shellHtml(url: string): string {
+function shellHtml(url: string, path = "/"): string {
   // VS Code 的 webview 结构上不能直接是远程 origin（HTML 串在
   // vscode-webview:// 沙箱里执行）——单跳 iframe src=服务地址让聊天 app
   // 在服务 origin 内跑，页内 EventSource 与 /api/* 同源不受损；CSP 只
@@ -87,6 +88,7 @@ function shellHtml(url: string): string {
 <iframe sandbox="allow-scripts allow-forms allow-same-origin allow-downloads"></iframe>
 <script>
   const u = new URL("${url}");
+  u.pathname = "${path}";   // ADR 118 §4.1：壳只决定「打开哪个视图」，视图仍全由服务端伺服
   u.searchParams.set("id", new URLSearchParams(location.search).get("id") || "");
   u.searchParams.set("vscodeBrowserReqId", String(Date.now()));
   document.querySelector("iframe").src = u.toString();
@@ -95,31 +97,82 @@ function shellHtml(url: string): string {
 </html>`;
 }
 
+/** 打开服务端某个视图（ADR 118 §4.1）：命令间只差 path 与标题，装配一份。 */
+async function openShell(path: string, title: string): Promise<void> {
+  let url: string;
+  try {
+    url = await ensureServer();
+  } catch (e) {
+    vscode.window.showErrorMessage(
+      `Facta 服务不可达：${e instanceof Error ? e.message : String(e)}`,
+    );
+    return;
+  }
+  const panel = vscode.window.createWebviewPanel(
+    "facta",
+    title,
+    vscode.ViewColumn.Beside,
+    // iframe 内的页面自带脚本（app.js/SSE），宿主壳自身零脚本；
+    // enableForms：webview 沙箱的 allow-forms 标志会被嵌套 iframe 继承——
+    // 不开则壳内输入框打字正常但 Cmd+V 粘贴被沙箱吞掉（实测对照：VS Code
+    // 自带 Simple Browser 开了此标志、粘贴可用，2026-10-11 实测定位）；
+    // 嵌套 iframe 的显式 sandbox 四标志同样照抄 Simple Browser（对齐后才可粘）
+    { enableScripts: true, enableForms: true, retainContextWhenHidden: true },
+  );
+  panel.webview.html = shellHtml(url, path);
+}
+
+/**
+ * 状态栏只读计数（ADR 118 §4.2）：`$(sync) Facta 2⟳ 1⏸`。
+ *
+ * 只读派生显示——读与面板同一个 `GET /api/tasks`、无写路径、坏了不影响决策，
+ * 故不构成第二个前端真值源（操作面仍只在 Web 面板）。30s 一跳 + 单次 1.5s 超时
+ * （与 healthy() 同口径）+ 失败静默隐藏；点击＝执行 facta.openTasks。
+ */
+function createTaskStatusBar(): vscode.Disposable {
+  const item = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    100,
+  );
+  item.command = "facta.openTasks";
+  item.tooltip = "Facta 任务：⟳ 运行中　⏸ 待确认（点击打开任务面板）";
+
+  const tick = async () => {
+    try {
+      const resp = await fetch(`${serverUrl()}/api/tasks`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const tasks = (await resp.json()) as Array<{ status: string }>;
+      const running = tasks.filter((t) => t.status === "running").length;
+      const waiting = tasks.filter((t) => t.status === "waiting-approval").length;
+      const bits = [running && `${running}⟳`, waiting && `${waiting}⏸`]
+        .filter(Boolean)
+        .join(" ");
+      item.text = bits ? `$(sync) Facta ${bits}` : "$(sync) Facta";
+      item.show();
+    } catch {
+      item.hide();   // 服务没起/网络抖动：藏起来，不弹错不打扰编码
+    }
+  };
+  void tick();
+  const timer = setInterval(() => void tick(), 30_000);
+  return {
+    dispose: () => {
+      clearInterval(timer);
+      item.dispose();
+    },
+  };
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand("facta.open", async () => {
-      let url: string;
-      try {
-        url = await ensureServer();
-      } catch (e) {
-        vscode.window.showErrorMessage(
-          `Facta 服务不可达：${e instanceof Error ? e.message : String(e)}`,
-        );
-        return;
-      }
-      const panel = vscode.window.createWebviewPanel(
-        "facta",
-        "Facta",
-        vscode.ViewColumn.Beside,
-        // iframe 内的聊天页自带脚本（app.js/SSE），宿主壳自身零脚本；
-        // enableForms：webview 沙箱的 allow-forms 标志会被嵌套 iframe 继承——
-        // 不开则壳内输入框打字正常但 Cmd+V 粘贴被沙箱吞掉（实测对照：VS Code
-        // 自带 Simple Browser 开了此标志、粘贴可用，2026-10-11 实测定位）；
-        // 嵌套 iframe 的显式 sandbox 四标志同样照抄 Simple Browser（对齐后才可粘）
-        { enableScripts: true, enableForms: true, retainContextWhenHidden: true },
-      );
-      panel.webview.html = shellHtml(url);
-    }),
+    vscode.commands.registerCommand("facta.open", () => openShell("/", "Facta")),
+    // 任务面板：委派/批准/纠偏/取消全在页里（壳不复刻操作面，只换 path）
+    vscode.commands.registerCommand("facta.openTasks", () =>
+      openShell("/tasks", "Facta · 任务"),
+    ),
+    createTaskStatusBar(),
     // IDE 桥（ADR 107，推翻 104 的剪贴板模式）：直投服务端单槽信箱。
     // 剪贴板路线在壳内走不通（issue #42：Cmd+V 不达嵌套 iframe，三轮对齐
     // 未解锁），而且它总要用户多做一步；改成 POST 之后服务端在发送那一刻

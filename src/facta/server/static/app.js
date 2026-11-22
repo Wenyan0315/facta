@@ -117,8 +117,20 @@ const confirmModal = document.getElementById("confirm-modal");
 const confirmToolEl = document.getElementById("confirm-tool");
 const confirmArgsEl = document.getElementById("confirm-args");
 
-function showConfirm(runId, tool, args) {
+// kind（ADR 118 §3）：确认的语义类别，来自 confirm.request 事件载荷。
+// 缺省空串 = 普通确认（run_command 动态停 / make_plan 人审），文案区直接隐藏 ⇒
+// 既有确认逐像素不变；write 档任务首写停传 "write-auth"，多一行授权语义说明
+// （117 观察 3：此前用户批准时不知道「批准的是本任务的写授权」）。
+const CONFIRM_KIND_NOTE = {
+  "write-auth": "本任务写授权：批准后本任务后续写操作免停（拒绝则保持只读）。",
+};
+
+function showConfirm(runId, tool, args, kind = "") {
   confirmToolEl.textContent = "工具：" + tool;
+  const kindEl = document.getElementById("confirm-kind");
+  const note = CONFIRM_KIND_NOTE[kind] || "";
+  kindEl.textContent = note;
+  kindEl.hidden = !note;
   // 事件里的 arguments 已是对象（SSE JSON 解析过）；字符串形态仅防御性兜底。
   // 验收踩坑：拿对象去 JSON.parse → 异常 → catch 里对象直进 textContent →
   // 弹窗显示 [object Object]，命令全文没露给用户（裁决依据缺失）
@@ -208,7 +220,7 @@ function setupEventSource(runId, turn) {
   // 断线重放时 request 无 resolved 配对则弹窗自然重现（确认不丢）。
   source.addEventListener("confirm.request", (e) => {
     const d = JSON.parse(e.data).data;
-    showConfirm(runId, d.tool, d.arguments);
+    showConfirm(runId, d.tool, d.arguments, d.kind);   // 118 §3：kind 承载授权语义文案
   });
   source.addEventListener("confirm.resolved", () => hideConfirm());
 
@@ -628,8 +640,9 @@ newSessionBtn.addEventListener("click", newSession);
 async function loadEnvBadge() {
   try {
     const st = await (await fetch("/api/status")).json();
+    // 118 §6：版本号进徽章——「跑的是哪个版本」在网页上可观测（此前只活在 pyproject/CLI）
     document.getElementById("env-badge").textContent =
-      `沙箱 ${st.sandbox_level}/${st.sandbox_backend ?? "无"} · 确认 ${st.approval_policy}`;
+      `v${st.version ?? "?"} · 沙箱 ${st.sandbox_level}/${st.sandbox_backend ?? "无"} · 确认 ${st.approval_policy}`;
   } catch (_) { /* 服务没起来或端点缺席：徽章留空 */ }
 }
 

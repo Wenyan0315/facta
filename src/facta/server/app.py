@@ -31,6 +31,7 @@ from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)   # ADR 076：finish 后的异步收官失败无人在听事件流，落日志
 
+from facta import __version__
 from facta.knowledge.extract import sync_graph
 from facta.knowledge.graph import GRAPH_LOCK
 from facta.knowledge.sync import file_hash, sync_notes
@@ -86,6 +87,7 @@ from facta.server.run_store import (
     RunStore,
 )
 from facta.server.sse import encode_heartbeat, encode_sse
+from facta.skills import WRITE_AUTH_GUARD
 from facta.tools.mcp_config import ServerSpec, load_server_specs
 from facta.tools.notes import record_provenance, resolve_note_path
 from facta.tools.registry import approval_policy
@@ -465,10 +467,17 @@ def _run_worker(
         and task.skill
         and task.authorization == "write"
     ):
-        def on_confirm(tool: str, arguments: dict) -> bool:   # noqa: F811
+        def on_confirm(tool: str, arguments: dict, kind: str = "") -> bool:   # noqa: F811
             if tool in ("write_file", "write_note") and task.authorized_write:
                 return True
-            approved = run.request_confirm(tool, arguments)
+            # ADR 118 §3：真挂起的写确认带 kind=write-auth，UI 据此明示
+            # 「批准后本任务后续写免停」（117 观察 3）。其余工具透传原 kind
+            # （现状全是空串），文案零变化。签名与 run.request_confirm 同形，
+            # mypy 才认这次「包装替换」不是不兼容重定义。
+            approved = run.request_confirm(
+                tool, arguments,
+                kind=WRITE_AUTH_GUARD if tool in ("write_file", "write_note") else kind,
+            )
             if approved and tool in ("write_file", "write_note"):
                 task.authorized_write = True
                 task_store.save(task)
@@ -1067,8 +1076,12 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         三个字段都是点用点读（086 同款纪律，不缓存）：配置写了
         workspace-write 而机器上没有可用后端时，backend 为 null——
         诚实降级做成可见，而不是藏在日志里。
+
+        version（ADR 118 §6）：跑的是哪个版本，在端点/前端页脚/壳三处可观测——
+        此前版本号只活在 pyproject 与 CLI，网页上无从判断。
         """
         return {
+            "version": __version__,
             "sandbox_level": sandbox_level(),
             "sandbox_backend": detect_backend(),
             "approval_policy": approval_policy(),
@@ -1153,6 +1166,25 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         ):
             d["status"] = "waiting-approval"
         return d
+
+    @app.get("/api/skills")
+    def list_skills():
+        """技能清单（ADR 118 §2）：委派表单的下拉数据源。
+
+        此前技能名只出现在 mode 校验 422 的报错串里——用户要知道有哪些技能
+        只能去翻 data/skills/ 目录。字段全是 SkillSpec 的只读投影（skills.py），
+        不含人设正文（那是 prompt，不是给表单用的）。
+        authorization 让前端能显示技能声明档并只允许收严（117 §3 覆盖规则）。
+        """
+        return [
+            {
+                "name": spec.name,
+                "authorization": spec.authorization,
+                "budget": spec.max_tool_rounds,
+                "settle": "skip" if spec.skip_settle else "normal",
+            }
+            for spec in sorted(ctx.skills.values(), key=lambda s: s.name)
+        ]
 
     @app.post("/api/tasks", status_code=202)
     def create_task(body: CreateTaskRequest):

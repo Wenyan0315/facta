@@ -182,13 +182,19 @@ class Run:
             taken, self.steer_pending = self.steer_pending or None, ""
         return taken
 
-    def request_confirm(self, tool: str, arguments: dict) -> bool:
+    def request_confirm(self, tool: str, arguments: dict, kind: str = "") -> bool:
         """S4b L2 裁决挂起：worker 线程内调用，阻塞到用户落子或取消。
 
         状态翻转 running→waiting_approval→running；confirm.request /
         confirm.resolved 都进 append-only 事件流——断线重放时，request
         无对应 resolved 则前端重新弹窗（确认不随断线丢失）。
         等待中取消视为拒绝：确认挂起不挡取消通道。
+
+        kind（ADR 118 §3）：确认的「语义类别」，进事件载荷供 UI 出文案。
+        缺省空串 = 普通确认（run_command 动态停 / make_plan 人审）——既有
+        调用方一字不改，前端对空 kind 零变化。write 档任务首写停传
+        WRITE_AUTH_GUARD（"write-auth"），UI 据此明示「批准后本任务后续写
+        免停」（117 观察 3：档位语义此前无载体，只能靠人记住）。
         """
         # S6b 并行确认锁：整个「挂起→等裁决→复位」临界区串行化。并行
         # spawn 的多个确认请求排队处理——单槽位不会被并发 clear/write 踩踏
@@ -199,7 +205,7 @@ class Run:
             self.confirm_pending = True
             self._confirm_event.clear()
             self._confirm_decision = None
-            self.emit("confirm.request", {"tool": tool, "arguments": arguments})
+            self.emit("confirm.request", {"tool": tool, "arguments": arguments, "kind": kind})
             while True:
                 if self._confirm_event.wait(timeout=0.2):
                     approved = bool(self._confirm_decision)

@@ -28,6 +28,7 @@ from facta.memory.todos import TodoStore
 from facta.orchestrator.agent import Agent, ensure_persona
 from facta.orchestrator.assemble import AppContext
 from facta.server.app import create_app
+from facta.server.run_store import RunStore
 from facta.skills import (
     AUTH_READONLY,
     AUTH_WRITE,
@@ -157,13 +158,18 @@ def _write_call(cid: str, path: str) -> Message:
     ])
 
 
-def _run_write_task(tmp_path: Path, llm: ScriptedLLM, *, approves: list[bool]) -> dict:
-    """跑一个 write 档技能任务：按 approves 序列裁决挂起的确认，返回任务视图。"""
+def _run_write_task(
+    tmp_path: Path, llm: ScriptedLLM, *, approves: list[bool], store: RunStore | None = None,
+) -> dict:
+    """跑一个 write 档技能任务：按 approves 序列裁决挂起的确认，返回任务视图。
+
+    store 可外部注入——要看确认事件载荷（kind）时从 Run 上取，不折腾 SSE。
+    """
     spec = SkillSpec(
         name="demo", system_prompt="测试技能", authorization=AUTH_WRITE,
         tools=frozenset(SKILL_TOOLS | SKILL_WRITE_TOOLS), max_tool_rounds=5,
     )
-    client = TestClient(create_app(_skill_ctx(tmp_path, spec, llm)))
+    client = TestClient(create_app(_skill_ctx(tmp_path, spec, llm), store=store or RunStore()))
     tid = client.post("/api/tasks", json={"goal": "改文件", "skill": "demo", "repo_root": str(tmp_path)}).json()["task_id"]
 
     run_id = None
@@ -231,6 +237,25 @@ def test_run_command_approve_does_not_set_write_auth(tmp_path):
     assert done["status"] == "done"
     assert done["authorized_write"] is False             # 只有写两件算写授权
     assert (tmp_path / "t.txt").exists()                 # 命令照常执行
+
+
+def test_confirm_event_kind_marks_write_auth(tmp_path):
+    """ADR 118 §3 钉子：write 档首写停的 confirm.request 载荷 kind=write-auth，
+    run_command 的常规确认 kind 保持空串（聊天页/面板文案零变化）。"""
+    store = RunStore()
+    llm = ScriptedLLM([
+        _write_call("c1", "a.txt"),
+        Message(role="assistant", content="", tool_calls=[
+            {"id": "c2", "name": "run_command", "arguments": json.dumps({"command": "touch t.txt"})},
+        ]),
+        Message(role="assistant", content="完事"),
+    ])
+    done = _run_write_task(tmp_path, llm, approves=[True, True], store=store)
+
+    assert done["status"] == "done"
+    run = store.get(done["run_ids"][0])
+    kinds = [e.data["kind"] for e in run.events if e.type == "confirm.request"]
+    assert kinds == [WRITE_AUTH_GUARD, ""]   # 写两件带档位语义，其余透传
 
 
 # ---------- 覆盖规则：缺省=声明档，请求只收严 ----------
