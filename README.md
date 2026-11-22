@@ -4,31 +4,116 @@
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**从零自研的个人 AI Agent：执行主轴 + 长期记忆 + 工具/MCP 通用外延。无 Agent 框架，分层全部手写，接口与实现分离、逐层可替换。**
+**Facta 是一个从零实现的个人 AI Agent。** 你可以按项目和技能委派长任务，让它在后台排队执行，在任务面板查看进度、审批写入、调整方向或继续任务。各项目可以维护独立记忆。
 
-**A personal AI agent built from scratch — execution-first, with durable memory, extensible via built-in tools and MCP. No agent framework: every layer is hand-written, interface/implementation separated, and individually replaceable.**
+**Facta is a personal AI agent built from scratch.** Delegate long-running tasks by project and skill, queue them in the background, and use the task panel to track progress, approve writes, steer work, or resume it. Projects can keep separate memory.
+
+## 快速开始 / Quick Start
+
+需要 Python 3.11+。以下命令在 macOS 或 Linux 上运行，mock 模式无需 API key。<br>
+Requires Python 3.11+. Run the commands below on macOS or Linux. Mock mode needs no API key.
+
+```bash
+git clone https://github.com/Wenyan0315/facta.git
+cd facta
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[web]"
+python -m facta mock
+```
+
+输入一句话试试，输入 `quit` 退出。要打开 Web 界面，在同一个环境运行下面的命令，然后访问 [本机任务面板](http://127.0.0.1:8000/tasks)。<br>
+Send a message, then type `quit` to exit. For the Web UI, run the command below in the same environment and open the [local task panel](http://127.0.0.1:8000/tasks).
+
+```bash
+FACTA_PROVIDER=mock python -m facta.server
+```
+
+mock 可以用来查看界面和测试对话。要委派实际工作，按下方配置真实模型。<br>
+Use mock mode to explore the UI and test chat. Configure a real model below to delegate work.
+
+## 委派长任务 / Delegate a Long-Running Task
+
+1. 在 `/tasks` 填写目标，选择或指定项目目录，并按需选择技能。<br>
+   In `/tasks`, describe the goal, choose or specify a project directory, and select a skill if needed.
+2. 提交后，任务进入后台队列。你可以查看进度和运行记录、在执行中补充指令，或恢复已暂停的任务。<br>
+   Tasks enter a background queue. Inspect progress and run history, steer a running task, or resume a paused one.
+3. 使用有写权限的技能时，首次触发文件或笔记写入会在任务面板等待授权。也可以在委派时将该技能的权限收紧为只读。<br>
+   For a write-enabled skill, the first file or note write waits for task-level approval in the panel. You can also restrict the skill to read-only when delegating.
+
+![Facta 任务面板，展示委派表单和待审批的写入 / Task panel with the delegation form and a pending write approval](docs/assets/screenshots/tasks.jpg)
+
+截图来自本地浏览器测试，使用脚本化模型和演示数据。<br>
+The screenshot uses a scripted model and demo data in a local browser test.
+
+你也可以从任务面板取消任务。已登记项目的记忆可集中存放，也可存放在项目目录下。从 VS Code 扩展源码构建后，可以用 **Facta: 打开任务面板**命令打开同一界面。<br>
+You can also cancel a task from the panel. Registered projects can keep memory centrally or inside the project directory. With the VS Code extension built from source, open the same panel using the **Facta: 打开任务面板** command.
+
+长任务面板已合入 `main`，源码版本为 `2.0.0`。设计与验收进展见 [ADR 115](docs/decisions/115-m1-controllable-long-tasks.md)、[ADR 116](docs/decisions/116-m2-bounding-and-skills.md)、[ADR 117](docs/decisions/117-m3-multitask-and-authorization.md) 和 [ADR 118](docs/decisions/118-m4-host-and-release.md)。<br>
+The task panel is available on `main`, where the source version is `2.0.0`. The ADRs above track the design and acceptance work.
+
+## 接入真实模型 / Configure a Real Model
+
+复制 `.env.example` 为 `.env`，再填入供应商对应的 API key。CLI 用位置参数选模型，Web 从环境变量或 `.env` 读取 `FACTA_PROVIDER`。<br>
+Copy `.env.example` to `.env` and add your provider’s API key. The CLI takes a positional provider argument. The Web server reads `FACTA_PROVIDER` from the environment or `.env`.
+
+```bash
+cp .env.example .env
+# 编辑 .env 后运行 / Run after editing .env
+python -m facta deepseek-flash
+# 或启动 Web / Or start the Web server
+FACTA_PROVIDER=deepseek python -m facta.server
+```
+
+省略供应商时，CLI 默认 `deepseek-flash`，Web 默认 `deepseek`。需要向量库或 HTTP MCP 客户端时，安装 `python -m pip install -e ".[rag,web]"`。<br>
+The CLI defaults to `deepseek-flash`, and the Web server defaults to `deepseek`. For the vector store or HTTP MCP client, install with `python -m pip install -e ".[rag,web]"`.
+
+### 支持的供应商 / Providers
+
+| 供应商 / Provider | 配置前缀 / Prefix | 默认 base_url / Default | 默认模型 / Default model | embedding 可用 / Embedding options |
+|---|---|---|---|---|
+| `mock` / `echo` / `repeat` | （无 key，教学 / no key, teaching） | — | — | 词袋 / bag-of-words |
+| `deepseek` / `deepseek-flash` | `DEEPSEEK_` | api.deepseek.com | deepseek-chat / deepseek-flash | — |
+| `siliconflow` | `SILICONFLOW_` | api.siliconflow.cn/v1 | DeepSeek-V3 | `siliconflow`（默认 / default）/ `openai` |
+| `openai` | `OPENAI_` | api.openai.com/v1 | gpt-4o-mini | `openai`（设 / set `FACTA_EMBED_PROVIDER=openai`）/ `siliconflow` |
+| `qwen` | `DASHSCOPE_` | dashscope.aliyuncs.com/compatible-mode/v1 | qwen-plus | `siliconflow` / `openai` |
+| `zhipu` | `ZHIPU_` | open.bigmodel.cn/api/paas/v4 | glm-4-flash | `siliconflow` / `openai` |
+| `moonshot` | `MOONSHOT_` | api.moonshot.cn/v1 | moonshot-v1-8k | `siliconflow` / `openai` |
+
+不在表里的中转商不必改代码：用 `{PREFIX}_BASE_URL` + `{PREFIX}_MODEL` 直接覆盖默认。embedding 通过 `FACTA_EMBED_PROVIDER`（默认 `siliconflow`）切换；缺 key 或未装 `[rag]` 时自动降级词袋嵌入，对话不报错（只是检索质量变差）。详见 [ADR 070](docs/decisions/070-multi-provider-compatibility.md)。
+
+Providers not listed need no code changes: override defaults directly with `{PREFIX}_BASE_URL` + `{PREFIX}_MODEL`. Embeddings switch via `FACTA_EMBED_PROVIDER` (default `siliconflow`); a missing key or uninstalled `[rag]` degrades to bag-of-words embeddings — chat keeps working (only retrieval quality drops). See [ADR 070](docs/decisions/070-multi-provider-compatibility.md).
+
+### 可选能力 / Optional capabilities
+
+这两件不配置也能跑，配了多两块能力（`.env.example` 里都有现成注释行）：
+
+- **联网搜索 / Web search**：填 `TAVILY_API_KEY`（或 `BOCHA_API_KEY`，博查优先）。不填则 `web_search`/`fetch_web` 自动不上工具菜单，其余功能不受影响。
+  Set `TAVILY_API_KEY` (or `BOCHA_API_KEY`, which takes precedence). Without it the `web_search`/`fetch_web` tools simply stay off the menu — everything else works.
+- **场景路由 / Scenario routing (M10)**：填 `JEV_API_KEY`（可选 `JEV_BASE_URL`）。轮首由 Jev 按 direct / single_tool / complex 决定工具菜单形状；不填走原生全菜单路径，mock 模式自动跳过。
+  Set `JEV_API_KEY` (optional `JEV_BASE_URL`) for per-turn direct / single_tool / complex routing; without it the agent uses the native full-menu path (skipped automatically in mock mode).
+
+### 测试 / Tests
+
+```bash
+python -m pip install -e ".[dev,rag,web]"
+python -m pytest
+ruff check src/ evals/ tests/
+mypy
+```
+
+浏览器冒烟用例另需 Chromium，可用 `python -m playwright install chromium` 安装。<br>
+The browser smoke tests also need Chromium. Install it with `python -m playwright install chromium`.
+
+## 系统架构 / Architecture
 
 ![系统架构图 / System Architecture](docs/assets/architecture.png)
 
-> 完整架构说明（中文）：[docs/architecture.md](docs/architecture.md)｜115 份决策记录见 [docs/decisions/](docs/decisions/)。
-> Full architecture docs are in Chinese; 115 decision records live in [docs/decisions/](docs/decisions/).
+Facta 无需 Agent 框架。编排、记忆、检索、工具和模型接入分层实现，可以独立替换。<br>
+Facta implements orchestration, memory, retrieval, tools, and model access without an agent framework. Each layer can be replaced independently.
 
----
-
-## 界面一览 / UI Tour
-
-以下为 Web 壳的四个面板，截自 mock 模式（`FACTA_PROVIDER=mock`），图中全部为演示数据（另有语料与 MCP 配置两个入口，暂无截图）：
-The four web panels below were captured in mock mode (`FACTA_PROVIDER=mock`); everything shown is demo data. (The corpus and MCP-config entries have no screenshots yet.)
-
-| 对话 / Chat | 任务视图 / Tasks |
-|---|---|
-| ![对话面板 / Chat panel](docs/assets/screenshots/chat.png) | ![任务视图 / Tasks panel](docs/assets/screenshots/tasks.png) |
-
-| 记忆面板 / Memory | 知识图谱 / Knowledge graph |
-|---|---|
-| ![记忆面板 / Memory panel](docs/assets/screenshots/memory.png) | ![知识图谱 / Knowledge graph panel](docs/assets/screenshots/graph.png) |
-
----
+完整设计见[架构文档](docs/architecture.md)与[决策记录](docs/decisions/)。<br>
+See the [architecture guide](docs/architecture.md) and [architecture decision records](docs/decisions/) for the full design.
 
 ## 特性 / Features
 
@@ -50,93 +135,26 @@ The four web panels below were captured in mock mode (`FACTA_PROVIDER=mock`); ev
   A ledger is persisted at tool boundaries; after a kill -9 the process self-heals on restart — recorded results are restored as-is, and side effects with unknown outcomes prompt the model to verify before continuing.
 - **安全收口 / Safety gates**：L0/L1 命令白名单 + L2 确认缝、外部命令三档执行隔离（`FACTA_SANDBOX`：none / workspace-write / container；后端按平台探测 seatbelt 或 bwrap，无可用后端时诚实降级不假装有围栏）× 三档确认策略（`FACTA_APPROVAL_POLICY`：untrusted / on-request / never）、记忆写入围栏、审计 append-only；当前档位与实际后端在 Web 侧栏徽章直接可见。<br>
   L0/L1 command whitelists + an L2 confirmation gate, three-tier sandboxing for external commands (`FACTA_SANDBOX`: none / workspace-write / container; seatbelt or bwrap backend detected per platform, with honest degradation when no backend is available) × three-tier approval policy (`FACTA_APPROVAL_POLICY`: untrusted / on-request / never), a memory-write fence, and append-only audit logs; the configured level and actual backend are visible on the web sidebar badge.
-- **CLI + Web 双壳 / CLI + Web shells**：FastAPI + SSE 流式（仅绑 127.0.0.1），零构建对话壳 + Preact 五入口（任务计划 / 记忆 / 知识图谱 / 语料 / MCP 配置）。<br>
-  FastAPI + SSE streaming (bound to 127.0.0.1 only): a zero-build chat shell plus five Preact entries — task plans / memory / knowledge graph / corpus / MCP config.
+- **CLI + Web 双壳 / CLI + Web shells**：FastAPI + SSE 流式（仅绑 127.0.0.1），零构建对话壳 + Preact 五入口（任务 / 记忆 / 知识图谱 / 语料 / MCP 配置）。<br>
+  FastAPI + SSE streaming (bound to 127.0.0.1 only): a zero-build chat shell plus five Preact entries — tasks / memory / knowledge graph / corpus / MCP config.
 - **离线评估 / Offline evaluation**：冻结题库 + git archive 副本剥离 + 注入金丝雀 + LLM-as-judge，CI 中与单元测试同跑。<br>
   A frozen scenario bank + git-archive copy isolation + injection canaries + LLM-as-judge, running in CI alongside unit tests.
 
----
+## 其他界面 / More Screens
 
-## 竞品对标 / Competitive Landscape
+<details>
+<summary>对话、记忆和知识图谱 / Chat, memory, and knowledge graph</summary>
 
-批判视角的 25 维对照（2026-09 口径，facta 数据来自实际读码）：明确领先的只有**工程诚实度**——公开的负面结果与失效边界；能力维度全面落后，第一个真对手不是 Claude Code，而是自己的 bash-only 基线。
-A deliberately critical 25-dimension comparison (as of 2026-09; facta data from actually reading the code): the only clear lead is **engineering honesty**—published negative results and failure boundaries. On capability it lags across the board; the first real competitor isn't Claude Code, it's its own bash-only baseline.
+| 对话 / Chat | 记忆 / Memory | 知识图谱 / Knowledge graph |
+|---|---|---|
+| ![对话面板 / Chat panel](docs/assets/screenshots/chat.png) | ![记忆面板 / Memory panel](docs/assets/screenshots/memory.png) | ![知识图谱 / Knowledge graph](docs/assets/screenshots/graph.png) |
 
-![facta × 主流 coding agent 25 维对标 / 25-dimension comparison with mainstream coding agents](docs/assets/competitive-comparison.png)
+</details>
 
----
+## 竞品对照 / Competitive Comparison
 
-## 快速开始 / Quick Start
-
-需要 Python 3.11+。 / Requires Python 3.11+.
-
-```bash
-git clone https://github.com/Wenyan0315/facta.git
-cd facta
-
-# 安装：dev=测试与工具链，rag=向量库，web=Web 壳（按需组合）
-# Install: dev=testing/tooling, rag=vector store, web=web server (combine as needed)
-pip install -e ".[dev,rag,web]"
-
-# 配置密钥（.env 已被 gitignore）/ Configure API keys (.env is gitignored)
-cp .env.example .env
-# 编辑 .env：填入一家 LLM 的 API_KEY 就能跑（教学模式只要 FACTA_PROVIDER=mock）
-# Edit .env: one LLM API key is enough to run (teaching mode only needs FACTA_PROVIDER=mock)
-```
-
-任意 OpenAI 兼容供应商均可通过 `{前缀}_API_KEY` / `{前缀}_BASE_URL` / `{前缀}_MODEL` 三个环境变量接入。不装 `[rag]` 时自动退化为词袋嵌入，零外部服务也能跑。
-
-Any OpenAI-compatible provider plugs in via three environment variables — `{PREFIX}_API_KEY` / `{PREFIX}_BASE_URL` / `{PREFIX}_MODEL`. Without `[rag]` installed, embeddings degrade to a bag-of-words fallback, so it runs with zero external services.
-
-### 支持的供应商 / Providers
-
-| `FACTA_PROVIDER` | 配置前缀 / Prefix | 默认 base_url / Default | 默认模型 / Default model | embedding 可用 / Embedding options |
-|---|---|---|---|---|
-| `mock` / `echo` / `repeat` | （无 key，教学 / no key, teaching） | — | — | 词袋 / bag-of-words |
-| `deepseek`（默认 / default）/ `deepseek-flash` | `DEEPSEEK_` | api.deepseek.com | deepseek-chat / deepseek-flash | — |
-| `siliconflow` | `SILICONFLOW_` | api.siliconflow.cn/v1 | DeepSeek-V3 | `siliconflow`（默认 / default）/ `openai` |
-| `openai` | `OPENAI_` | api.openai.com/v1 | gpt-4o-mini | `openai`（设 / set `FACTA_EMBED_PROVIDER=openai`）/ `siliconflow` |
-| `qwen` | `DASHSCOPE_` | dashscope.aliyuncs.com/compatible-mode/v1 | qwen-plus | `siliconflow` / `openai` |
-| `zhipu` | `ZHIPU_` | open.bigmodel.cn/api/paas/v4 | glm-4-flash | `siliconflow` / `openai` |
-| `moonshot` | `MOONSHOT_` | api.moonshot.cn/v1 | moonshot-v1-8k | `siliconflow` / `openai` |
-
-不在表里的中转商不必改代码：用 `{PREFIX}_BASE_URL` + `{PREFIX}_MODEL` 直接覆盖默认。embedding 通过 `FACTA_EMBED_PROVIDER`（默认 `siliconflow`）切换；缺 key 或未装 `[rag]` 时自动降级词袋嵌入，对话不报错（只是检索质量变差）。详见 [ADR 070](docs/decisions/070-multi-provider-compatibility.md)。
-
-Providers not listed need no code changes: override defaults directly with `{PREFIX}_BASE_URL` + `{PREFIX}_MODEL`. Embeddings switch via `FACTA_EMBED_PROVIDER` (default `siliconflow`); a missing key or uninstalled `[rag]` degrades to bag-of-words embeddings — chat keeps working (only retrieval quality drops). See [ADR 070](docs/decisions/070-multi-provider-compatibility.md).
-
-### 可选能力 / Optional capabilities
-
-这两件不配置也能跑，配了多两块能力（`.env.example` 里都有现成注释行）：
-
-- **联网搜索 / Web search**：填 `TAVILY_API_KEY`（或 `BOCHA_API_KEY`，博查优先）。不填则 `web_search`/`fetch_web` 自动不上工具菜单，其余功能不受影响。
-  Set `TAVILY_API_KEY` (or `BOCHA_API_KEY`, which takes precedence). Without it the `web_search`/`fetch_web` tools simply stay off the menu — everything else works.
-- **场景路由 / Scenario routing (M10)**：填 `JEV_API_KEY`（可选 `JEV_BASE_URL`）。轮首由 Jev 按 direct / single_tool / complex 决定工具菜单形状；不填走原生全菜单路径，mock 模式自动跳过。
-  Set `JEV_API_KEY` (optional `JEV_BASE_URL`) for per-turn direct / single_tool / complex routing; without it the agent uses the native full-menu path (skipped automatically in mock mode).
-
-### CLI
-
-```bash
-python -m facta          # 真模型（默认 deepseek-flash）/ real model (default deepseek-flash)
-python -m facta mock     # 假模型：不花钱、不联网，适合体验流程 / mock model: free & offline, good for a first tour
-```
-
-### Web
-
-```bash
-python -m facta.server   # http://127.0.0.1:8000（只绑 loopback，默认 deepseek / loopback only, default deepseek）
-```
-
-> **默认模型差异 / Default model differs by entry point**（ADR 069 P2-8）：CLI 默认 `deepseek-flash`（便宜主力 / cheap workhorse），Web 默认 `deepseek`（chat 档 / chat tier）。任一处都可用 `.env` 里的 `FACTA_PROVIDER=<name>` 覆盖。详见 [支持的供应商](#支持的供应商--providers)。<br>
-> Either entry point can be overridden with `FACTA_PROVIDER=<name>` in `.env`. See [Providers](#支持的供应商--providers).
-
-### 测试 / Tests
-
-```bash
-pytest                  # 700+ 用例 / 700+ tests
-ruff check && mypy src/facta
-```
-
----
+[2026 年 9 月的 25 维对标图](docs/assets/competitive-comparison.png)记录了当时的能力、负面结果与失效边界。<br>
+The [September 2026 comparison across 25 dimensions](docs/assets/competitive-comparison.png) records the capabilities, negative results, and failure modes observed at the time.
 
 ## 项目结构 / Layout
 
@@ -153,7 +171,7 @@ evals/              # 离线评估：冻结题库、注入题库、judge / offli
 servers/            # MCP 演示服务器 / MCP demo servers
 vscode/             # VS Code 壳（最小宿主：单跳 iframe + IDE 上下文桥）/ VS Code shell (minimal host)
 tests/              # pytest 测试 / pytest tests
-docs/               # 架构文档与 ADR（115 份）/ architecture docs and ADRs (115)
+docs/               # 架构文档与 ADR / architecture docs and ADRs
 data/               # 语料与运行时数据（notes/learned.example 入库，其余 gitignore）/ corpus & runtime data (notes + learned.example tracked; the rest gitignored)
 ```
 
@@ -167,8 +185,8 @@ Assembly follows a "single source of truth": CLI, Web and the GitHub bot all bui
 
 | 文档 / Doc | 内容 / Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | 系统架构（分层图、115 份 ADR 索引、在册触发信号）/ System architecture (layered diagram, index of 115 ADRs, registered trigger signals) |
-| [docs/decisions/](docs/decisions/) | 架构决策记录（ADR 001–115，含否决档案）/ Architecture decision records (ADR 001–115, incl. rejected alternatives) |
+| [docs/architecture.md](docs/architecture.md) | 系统架构（分层图、ADR 索引、在册触发信号）/ System architecture (layered diagram, ADR index, registered trigger signals) |
+| [docs/decisions/](docs/decisions/) | 架构决策记录（含否决档案）/ Architecture decision records (incl. rejected alternatives) |
 | [docs/posts/](docs/posts/) | 对外设计文章（先仓库后外发）/ Outward design articles (repo-first) |
 | [docs/manual-test-cases.md](docs/manual-test-cases.md) | 人工测试用例集 / Manual test cases |
 | [docs/github-bot.md](docs/github-bot.md) | facta-bot 接入指南（issue 打 label 自动修、PR 自动审查的 GitHub 接入层配置手册）/ facta-bot integration guide (GitHub entry layer: label an issue to auto-fix, auto-review PRs) |
