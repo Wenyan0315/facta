@@ -97,7 +97,7 @@ Providers not listed need no code changes: override defaults directly with `{PRE
 
 ```bash
 python -m pip install -e ".[dev,rag,web]"
-python -m pytest
+python -m pytest   # 1000+ 用例（实测 1009）/ 1000+ tests (1009 as measured)
 ruff check src/ evals/ tests/
 mypy
 ```
@@ -112,8 +112,8 @@ The browser smoke tests also need Chromium. Install it with `python -m playwrigh
 Facta 无需 Agent 框架。编排、记忆、检索、工具和模型接入分层实现，可以独立替换。<br>
 Facta implements orchestration, memory, retrieval, tools, and model access without an agent framework. Each layer can be replaced independently.
 
-完整设计见[架构文档](docs/architecture.md)与[决策记录](docs/decisions/)。<br>
-See the [architecture guide](docs/architecture.md) and [architecture decision records](docs/decisions/) for the full design.
+完整设计见[架构文档](docs/architecture.md)与 118 份[决策记录](docs/decisions/)。<br>
+See the [architecture guide](docs/architecture.md) and 118 [decision records](docs/decisions/) for the full design.
 
 ## 特性 / Features
 
@@ -135,10 +135,25 @@ See the [architecture guide](docs/architecture.md) and [architecture decision re
   A ledger is persisted at tool boundaries; after a kill -9 the process self-heals on restart — recorded results are restored as-is, and side effects with unknown outcomes prompt the model to verify before continuing.
 - **安全收口 / Safety gates**：L0/L1 命令白名单 + L2 确认缝、外部命令三档执行隔离（`FACTA_SANDBOX`：none / workspace-write / container；后端按平台探测 seatbelt 或 bwrap，无可用后端时诚实降级不假装有围栏）× 三档确认策略（`FACTA_APPROVAL_POLICY`：untrusted / on-request / never）、记忆写入围栏、审计 append-only；当前档位与实际后端在 Web 侧栏徽章直接可见。<br>
   L0/L1 command whitelists + an L2 confirmation gate, three-tier sandboxing for external commands (`FACTA_SANDBOX`: none / workspace-write / container; seatbelt or bwrap backend detected per platform, with honest degradation when no backend is available) × three-tier approval policy (`FACTA_APPROVAL_POLICY`: untrusted / on-request / never), a memory-write fence, and append-only audit logs; the configured level and actual backend are visible on the web sidebar badge.
-- **CLI + Web 双壳 / CLI + Web shells**：FastAPI + SSE 流式（仅绑 127.0.0.1），零构建对话壳 + Preact 五入口（任务 / 记忆 / 知识图谱 / 语料 / MCP 配置）。<br>
-  FastAPI + SSE streaming (bound to 127.0.0.1 only): a zero-build chat shell plus five Preact entries — tasks / memory / knowledge graph / corpus / MCP config.
+- **CLI + Web 双壳 + VS Code 宿主 / CLI + Web shells + VS Code host**：FastAPI + SSE 流式（仅绑 127.0.0.1），零构建对话壳 + Preact 七入口（任务 / 记忆 / 知识图谱 / 语料 / MCP 配置 / 方案评审 / 开工 Brief）；VS Code 壳单跳 iframe 复用同一界面，附任务面板命令（`facta.openTasks`）与状态栏只读计数。<br>
+  FastAPI + SSE streaming (bound to 127.0.0.1 only): a zero-build chat shell plus seven Preact entries — tasks / memory / knowledge graph / corpus / MCP config / review / brief. The VS Code host reuses the same UI via a single-hop iframe, adding a task-panel command and read-only status-bar counts.
 - **离线评估 / Offline evaluation**：冻结题库 + git archive 副本剥离 + 注入金丝雀 + LLM-as-judge，CI 中与单元测试同跑。<br>
   A frozen scenario bank + git-archive copy isolation + injection canaries + LLM-as-judge, running in CI alongside unit tests.
+
+### Facta 2.0：五跨越 / Five leaps in 2.0
+
+- **任务委派 / Task delegation**：委派长期任务（goal + 技能 + 项目 + 授权档位），队列调度、steering 纠偏、取消 / 续跑、账单跟踪全在任务面板操作；[ADR 115](docs/decisions/115-m1-controllable-long-tasks.md)。<br>
+  Delegate long-running tasks (goal + skill + project + authorization tier); queueing, steering, cancel/resume and billing all live in the tasks panel.
+- **多任务队列与并发上限 / Multi-task queue**：创建即入队（202 即返），触发式调度 + 定时巡检兜底，默认最多 3 个任务并行，重启后排队任务自动回落续跑；[ADR 117](docs/decisions/117-m3-multitask-and-authorization.md)。<br>
+  Tasks queue on creation with trigger-based scheduling and a periodic safety net; up to 3 run in parallel, and queued work survives restarts.
+- **技能数据化 / Skills as data**：技能 = Markdown 文件（人设 / 工具池 / 预算 / 授权档位声明），加技能零代码改动，验证失败给出中文理由；[ADR 116](docs/decisions/116-m2-bounding-and-skills.md)。<br>
+  A skill is a Markdown file (persona / tool pool / budget / authorization declaration) — adding one needs zero code changes.
+- **授权档位 / Authorization tiers**：readonly / write 两档，技能文件是唯一真值源、请求只能收严；write 档任务级一次性写授权——首写停确认，批准后本任务后续写免停，确认卡明示该语义；[ADR 117](docs/decisions/117-m3-multitask-and-authorization.md)。<br>
+  Two tiers (readonly / write); the skill file is the single source of truth and requests may only tighten. Write-tier tasks get one-shot write authorization: first write pauses for approval, then writes proceed; the confirm card says so explicitly.
+- **项目记忆归属双模式 / Project memory ownership**：项目级记忆可选集中式或就地式（写进工作仓），切换入口在任务页项目设置区块，切到就地须显式同意；[ADR 116](docs/decisions/116-m2-bounding-and-skills.md)。<br>
+  Project memory can be centralized or in-repo; switching lives in the project-settings block and requires explicit consent for in-repo writes.
+
+---
 
 ## 其他界面 / More Screens
 
@@ -156,6 +171,20 @@ See the [architecture guide](docs/architecture.md) and [architecture decision re
 [2026 年 9 月的 25 维对标图](docs/assets/competitive-comparison.png)记录了当时的能力、负面结果与失效边界。<br>
 The [September 2026 comparison across 25 dimensions](docs/assets/competitive-comparison.png) records the capabilities, negative results, and failure modes observed at the time.
 
+## 已知边界 / Known limits
+
+诚实标注当前边界（M1–M4 挂账口径，未兑现项不在特性里宣称）：
+Honest about current boundaries (M1–M4 ledger; nothing undelivered is claimed as a feature):
+
+| 边界 / Boundary | 说明 / Notes |
+|---|---|
+| Run 明细不持久 / Run details are ephemeral | 任务清单持久在 `data/tasks/`，Run 明细只活在服务进程内，重启后下钻不可用 / tasks persist; per-Run detail lives only in the serving process |
+| 任务面板 20s 轮询 / Tasks panel polls every 20s | 无任务级 SSE；确认弹窗靠断线重放语义兜底 / no task-level SSE; confirm dialogs rely on replay-on-reconnect |
+| 扩展不上 marketplace / Extension not on marketplace | VS Code 壳本地 `vsce package` 手工安装 / install the VS Code host locally via `vsce package` |
+| 无 CHANGELOG.md / No CHANGELOG.md | 变更历史真值源 = ADR + GitHub Release notes / change history lives in ADRs + GitHub Release notes |
+
+---
+
 ## 项目结构 / Layout
 
 ```
@@ -169,9 +198,9 @@ src/facta/
 └── github_bot/     # GitHub bot 壳：非交互 worker、任务提示词 / GitHub bot shell: non-interactive worker, task prompts
 evals/              # 离线评估：冻结题库、注入题库、judge / offline evals: frozen scenarios, injection bank, judge
 servers/            # MCP 演示服务器 / MCP demo servers
-vscode/             # VS Code 壳（最小宿主：单跳 iframe + IDE 上下文桥）/ VS Code shell (minimal host)
+vscode/             # VS Code 壳（单跳 iframe + 任务面板命令 + 状态栏计数 + IDE 上下文桥）/ VS Code shell (single-hop iframe, task-panel command, status-bar counts, IDE context bridge)
 tests/              # pytest 测试 / pytest tests
-docs/               # 架构文档与 ADR / architecture docs and ADRs
+docs/               # 架构文档与 ADR（118 份）/ architecture docs and ADRs (118)
 data/               # 语料与运行时数据（notes/learned.example 入库，其余 gitignore）/ corpus & runtime data (notes + learned.example tracked; the rest gitignored)
 ```
 
@@ -185,8 +214,8 @@ Assembly follows a "single source of truth": CLI, Web and the GitHub bot all bui
 
 | 文档 / Doc | 内容 / Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | 系统架构（分层图、ADR 索引、在册触发信号）/ System architecture (layered diagram, ADR index, registered trigger signals) |
-| [docs/decisions/](docs/decisions/) | 架构决策记录（含否决档案）/ Architecture decision records (incl. rejected alternatives) |
+| [docs/architecture.md](docs/architecture.md) | 系统架构（分层图、118 份 ADR 索引、在册触发信号）/ System architecture (layered diagram, index of 118 ADRs, registered trigger signals) |
+| [docs/decisions/](docs/decisions/) | 架构决策记录（ADR 001–118，含否决档案）/ Architecture decision records (ADR 001–118, incl. rejected alternatives) |
 | [docs/posts/](docs/posts/) | 对外设计文章（先仓库后外发）/ Outward design articles (repo-first) |
 | [docs/manual-test-cases.md](docs/manual-test-cases.md) | 人工测试用例集 / Manual test cases |
 | [docs/github-bot.md](docs/github-bot.md) | facta-bot 接入指南（issue 打 label 自动修、PR 自动审查的 GitHub 接入层配置手册）/ facta-bot integration guide (GitHub entry layer: label an issue to auto-fix, auto-review PRs) |

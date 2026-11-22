@@ -33,7 +33,7 @@
 | 技能列表 | 技能表运行时装配（skills.py），名字只在 `mode` 校验 422 的报错串里出现 | 无 `GET /api/skills`：委派表单要给用户选技能，没有数据源 |
 | 版本号 | 双写：pyproject.toml:7 `version = "0.9.0"` + `__main__.py:19` `VERSION = "0.9.0"`，靠行内注释「保持一致」的人肉纪律；`/api/status`（app.py:1063-1075）不含 version；**git tag 零个、GitHub Release 零个**，pyproject Changelog URL 指向 commits 页 | v2.0.0 要动两处 + vsix 第三处（0.2.0），三者关系未裁；「跑的是哪个版本」在 UI/端点上不可观测；无发布动作先例 |
 | 对外材料 | README：「四个面板」（:20）、「Preact 五入口」（:53）、「115 份决策记录」（:13/:156）、「700+ 用例」（:135）；实际＝FW **七**入口、ADR **118** 份、测试 **1002** passed。2.0 的五跨越（任务委派/多任务/技能数据化/授权档/项目记忆归属）在 README **一字未提** | 数字全面滞后 + 2.0 叙事缺席。114 待验收第 2 条要求发布时对照五跨越逐条自检、未兑现的如实标注不宣称 |
-| Brief 双轨对照 | 116 待验收唯一未验项，117 明裁「随 M4 一并做」 | 未做：手工 Brief 与生成 Brief 同时点独立写、对照引用真实性/相关性/过时判定/长度与耗时 |
+| Brief 双轨对照 | 116 待验收唯一未验项，117 明裁「随 M4 一并做」 | 开工时「未做」→ **2026-11-22 已做并收口**：手工 Brief 与生成 Brief 同时点独立写、四维度对照结论通过（见 m4 验收报告 §4）；账目不一致（116 曾注「117 评审时兑现」）一并核销，见报告 O3 |
 
 **架构红线（104/097 复用，本期最容易破的一条）**：壳**不重写 UI、不造第二个前端真值源**；
 FW 站是前端唯一真值源，产物进 git + CI 一致性闸不变。M4 的新 UI 一律做在 FW 站，
@@ -233,30 +233,47 @@ FW 站是前端唯一真值源，产物进 git + CI 一致性闸不变。M4 的�
 - [x] 本 ADR 过开工前评审（评审对象含 §1 分界线的越线判定、§3 kind 形参向后兼容、
       §6 版本号搬家的三处一致性口径）。→ 2026-11-19 用户拍板四项（见状态行），
       其余照草案通过；九条自我挑刺全部采纳处置，无退回条目。
-- [ ] **Brief 双轨对照**（116 遗留，§8）：同时点独立写、四维度对照记录进
+- [x] **Brief 双轨对照**（116 遗留，§8）：同时点独立写、四维度对照记录进
       [m4 验收报告](../../m4-acceptance-report.md)，回写 ADR 113/116 待验收。
-- [ ] 三门全绿（ruff / mypy / pytest）+ **CI 四 job 全绿**（agent、test×2、frontend
-      产物一致性闸）+ **新增 vscode job 绿**。
-- [ ] **钉子①：壳内完成任务全生命周期操作**——VS Code 真机：`facta.openTasks` 打开
+      → 2026-11-22 兑现（run `ce974e1e` 生成轨 vs 手工轨，四维度对照结论通过，
+      全文见 m4 报告 §4）；对照副产物＝O1 定性发现（「write_file repo_root 不生效」
+      系 117 §4 明裁行为非 bug）；113/116/117 账目同 PR 收口（O3）。
+- [x] 三门全绿（ruff / mypy / pytest）+ **CI 四 job 全绿**（agent、test×2、frontend
+      产物一致性闸）+ **新增 vscode job 绿**。→ PR #70 五 job 全绿；本地全量
+      1009 passed / 7 skipped。
+- [x] **钉子①：壳内完成任务全生命周期操作**——VS Code 真机：`facta.openTasks` 打开
       面板 → 选技能 + 项目委派一个 write 档任务 → 看到 queued/running → 待确认徽章 →
       面板内批准写授权（确认卡显示授权文案）→ 后续写免停 → 任务转 done → 面板查任务
       账单 → 另一任务 steering 打断一次成功 → cancel/resume 各一次。全程不切浏览器窗口
-      （状态栏计数可见运行态）。
-- [ ] **钉子②：README / 对外材料刷新**——数字与实际一致（面板数/入口数/ADR 数/用例数）、
+      （状态栏计数可见运行态）。→ 2026-11-22 验收：全生命周期 API 侧逐环取证
+      （确认 kind 双路/计划人审/steering/保险丝/resume×2/cancel/账单，m4 报告 §3.1–3.3），
+      壳内 `facta.openTasks` 真机开面板成功（§3.4）；面板内点击微链路因 macOS
+      屏幕录制权限未取证（webview 跨源不进 AX 树、截图通道被挡），功能面由
+      Playwright 全链路 + API 侧覆盖，如实标注（报告 §3.4/O4）。
+- [x] **钉子②：README / 对外材料刷新**——数字与实际一致（面板数/入口数/ADR 数/用例数）、
       2.0 五跨越特性段齐全、五跨越自检表进 Release notes 且未兑现项如实标注、
-      已知边界表刷新。
-- [ ] Playwright：委派表单 → 任务卡 → 待确认徽章 → 批准 → done 全链路一条用例过
-      （test_browser.py 范式，CI 恒跑）。
-- [ ] 版本单点：`facta.__version__` == pyproject 安装后版本 == `/api/status` version
-      == vsix version == `2.0.0`；CLI `VERSION` 输出不回归。
-- [ ] 确认 kind 链路：write 档任务首写 → `confirm.request` 事件含 `kind="write-auth"`；
+      已知边界表刷新。→ 2026-11-22 材料逐项核对过（m4 报告 §6）；五跨越自检表
+      已成稿（m4 报告 §5），进 Release notes 随「发布」项（p11）执行。
+- [x] Playwright：委派表单 → 任务卡 → 待确认徽章 → 批准 → done 全链路一条用例过
+      （test_browser.py 范式，CI 恒跑）。→ `test`×2 job 绿。
+- [x] 版本单点：`facta.__version__` == pyproject 安装后版本 == `/api/status` version
+      == vsix version == `2.0.0`；CLI `VERSION` 输出不回归。→ 四处实测一致
+      （`test_version_single_source_of_truth` 钉，m4 报告 §2 ⑥）。
+- [x] 确认 kind 链路：write 档任务首写 → `confirm.request` 事件含 `kind="write-auth"`；
       run_command 常规确认与 make_plan 人审 → `kind=""`（前端零变化，M3 行为不回归）。
-- [ ] 零回归抽查：聊天页确认卡/IDE 信箱 chip/`facta.open`/`facta.attachContext`/
-      RunDetail 计划面板/`/api/tasks*` 六端点契约。
+      → 双路真机取证（m4 报告 §3.1/3.2）。
+- [x] 零回归抽查：聊天页确认卡/IDE 信箱 chip/`facta.open`/`facta.attachContext`/
+      RunDetail 计划面板/`/api/tasks*` 六端点契约。→ 聊天页 `/` 200、`/api/tasks*`
+      六端点真机全覆盖、`runs/sync` `CHAT_OK`；信箱 chip 与 RunDetail 计划面板由
+      Playwright + 前端产物闸覆盖（m4 报告 §2 ⑧）。
 - [ ] 发布：附注 tag `v2.0.0` + 首个 GitHub Release（自检表 + 已知边界 + 快速开始 +
-      `.vsix` 附件）；pyproject Changelog URL 指向 releases 页。
-- [ ] 2.0 收官自检（114 待验收第 2 条）：对照五跨越逐条核，未兑现的在 Release notes
+      `.vsix` 附件）；pyproject Changelog URL 指向 releases 页。→ 素材已齐
+      （vsix 已打包实装，自检表 §5），p11 执行（按约定执行前须用户确认）。
+- [x] 2.0 收官自检（114 待验收第 2 条）：对照五跨越逐条核，未兑现的在 Release notes
       与 architecture.md 如实标注；V03 外部探索启动前回看 114 定位是否仍成立。
+      → 自检表已核（m4 报告 §5：四跨越达成、宿主跨越本期兑现，hooks 等如实标注
+      未兑现）；architecture.md 已同步标注；Release notes 段落随 p11；V03 前回看
+      114 留作后续触发项。
 
 ## 开工前评审记录
 
