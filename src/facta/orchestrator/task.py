@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import threading
 import time
 import uuid
@@ -33,6 +34,7 @@ from typing import Any
 
 from facta.memory.plan import StepStatus
 from facta.paths import TASKS_DIR
+from facta.tools.context import WorkspaceBinding
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +116,15 @@ class Task:
     authorization: str = "readonly"   # 生效档位（技能声明 ∩ 请求收严；主 agent 任务不消费）
     authorized_write: bool = False    # write 档首写 approve 后置位（TaskStore 落盘，重启不丢）
     next_text: str = ""        # 起跑注入消息（创建=goal+kickoff；resume=用户指令/代打；空=续跑代打）
+    # ---- P0 任务工作区绑定（Spec 2.1/2.2：创建即校验，三元组钉死；空=无绑定存量任务）----
+    target_branch: str = ""        # 合入目标分支
+    baseline: str = ""             # 基线提交全 SHA（创建时钉死）
+    worktree_branch: str = ""      # 沙箱分支名（真值源；创建沙箱时由后续代理写入）
+    candidate: str = ""            # 候选版本标识（HEAD+工作区指纹，后续代理计算）
+    verifications: list[dict] = field(default_factory=list)  # [{name, result, time, candidate}]，result ∈ passed/failed/not_run
+    merge_status: str = "none"     # none/merged/conflicted/discarded
+    merge_commit: str = ""
+    disposition: dict | None = None  # {id, action, candidate, status, detail, at}，幂等依据
 
 
 def usage_delta(before: Any, after: Any) -> dict[str, float]:
@@ -172,7 +183,69 @@ def to_dict(task: Task) -> dict:
         "skill": task.skill,
         "authorization": task.authorization,
         "authorized_write": task.authorized_write,
+        # P0 工作区绑定三元组 + 产物收口（前端按此呈现合入/收口；空=无绑定存量任务）
+        "target_branch": task.target_branch,
+        "baseline": task.baseline,
+        "worktree_branch": task.worktree_branch,
+        "candidate": task.candidate,
+        "verifications": task.verifications,
+        "merge_status": task.merge_status,
+        "merge_commit": task.merge_commit,
+        "disposition": task.disposition,
     }
+
+
+# ---- 绑定三元组解析（P0 Spec 2.1：创建即校验）----
+
+
+def _git(args: list[str], repo: Path) -> tuple[int, str]:
+    """git 封装（-C 锚定仓库根，自足不依赖 worktree.py）：成功回 stdout，失败回 stderr 原文。"""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False
+        )
+    except OSError as exc:
+        return 1, str(exc)
+    if proc.returncode == 0:
+        return 0, proc.stdout.strip()
+    return proc.returncode, (proc.stderr or proc.stdout).strip()
+
+
+def resolve_binding(repo_root: str, target_branch: str) -> tuple[WorkspaceBinding | None, str]:
+    """创建任务时解析并校验绑定三元组：返回 (绑定, 错误串)。
+
+    错误串非空 = 创建失败原因（中文，含 git 原文）；失败不得静默回落 Facta
+    工作区——「创建失败是明确失败态」（Spec 2.1 末条）。规则：
+    1. repo_root 非空 → 路径存在且 rev-parse --show-toplevel 成功，归一化为
+       toplevel；路径不存在/非 Git → 错误串明确。
+    2. target_branch 显式指定 → 校验 refs/heads/<b> 存在；缺省 → symbolic-ref
+       取当前检出分支，detached HEAD 无从取 → 创建失败。
+    3. baseline = refs/heads/<target_branch> 全 SHA（创建时钉死，不跟分支头）。
+    4. repo_root 空（用户未选项目）→ (None, "")：三元组留空串 = 默认工作区。
+    """
+    if not repo_root.strip():
+        return None, ""   # 未选项目：现状语义不变
+    root = Path(repo_root).expanduser()
+    if not root.exists():
+        return None, f"仓库路径不存在：{repo_root}"
+    code, out = _git(["rev-parse", "--show-toplevel"], root)
+    if code != 0:
+        return None, f"不是 Git 仓库（{repo_root}）：{out}"
+    toplevel = out
+    branch = target_branch.strip()
+    if branch:
+        code, out = _git(["rev-parse", "--verify", f"refs/heads/{branch}"], root)
+        if code != 0:
+            return None, f"目标分支不存在：{branch}（{out}）"
+    else:
+        code, out = _git(["symbolic-ref", "--short", "HEAD"], root)
+        if code != 0:
+            return None, f"未指定 target_branch 且仓库处于 detached HEAD，无当前检出分支（{out}）"
+        branch = out
+    code, out = _git(["rev-parse", f"refs/heads/{branch}"], root)
+    if code != 0:
+        return None, f"无法解析基线提交 refs/heads/{branch}（{out}）"
+    return WorkspaceBinding(repo_root=Path(toplevel), target_branch=branch, baseline=out), ""
 
 
 class TaskStore:
@@ -206,6 +279,8 @@ class TaskStore:
         goal: str,
         session_id: str = "",
         repo_root: str = "",
+        target_branch: str = "",
+        baseline: str = "",
         *,
         skill: str = "",
         authorization: str = "readonly",
@@ -217,6 +292,8 @@ class TaskStore:
             goal=goal,
             session_id=session_id,
             repo_root=repo_root,
+            target_branch=target_branch,
+            baseline=baseline,
             started_at=now,
             created_at=now,
             updated_at=now,

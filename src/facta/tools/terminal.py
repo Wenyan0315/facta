@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from facta.paths import WORKSPACE_ROOT
@@ -84,6 +85,11 @@ _SAFE_SYSTEM_DIRS = frozenset({
     "/usr/bin", "/bin", "/usr/sbin", "/sbin",
     "/usr/local/bin", "/opt/homebrew/bin",      # Homebrew
     str(WORKSPACE_ROOT / ".venv" / "bin"),       # 开发虚拟环境
+    # 运行中解释器自己的 bin（ADR 071 语义延伸）：agent 跑在哪个 venv 里，
+    # 那个 venv 就是「系统程序的指针」的公认落点——CI 的 setup-python 环境
+    # （/opt/hostedtoolcache/…）同此语义，它的 pytest 不该弹窗（E1 本地全绿
+    # CI 红的根因：这里原先只认仓库 .venv，CI 上 pytest 解析到 toolcache 被挡）
+    str(Path(sys.executable).resolve().parent),
 })
 
 # 参数级危险参数（S4 评审 #17）：只读命令名 + 危险参数仍可执行任意代码

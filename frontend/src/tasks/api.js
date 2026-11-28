@@ -15,7 +15,9 @@ async function unwrap(resp) {
     } catch {
       /* 非 JSON 响应体：保留状态码文案 */
     }
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.status = resp.status;   // 调用方按状态码分流（如 settle 409 = 预览失效）
+    throw err;
   }
   return resp.json();
 }
@@ -50,7 +52,9 @@ export const cancelTask = (taskId) => post(`/api/tasks/${taskId}/cancel`);
 export const resumeTask = (taskId, text = "") => post(`/api/tasks/${taskId}/resume`, { text });
 export const steerRun = (runId, text) => post(`/api/runs/${runId}/steer`, { text });
 export const confirmRun = (runId, approve) => post(`/api/runs/${runId}/confirm`, { approve });
-export const settleTaskWorktree = (taskId, action) => post(`/api/tasks/${taskId}/worktree`, { action });
+// settle 带 candidate 钉预览版本（S2-3 候选比对，不一致后端回 409）；缺省不发该键
+export const settleTaskWorktree = (taskId, action, candidate) =>
+  post(`/api/tasks/${taskId}/worktree`, { action, ...(candidate ? { candidate } : {}) });
 export const putProject = (name, body) => put(`/api/projects/${name}`, body);
 // 107「发送时刻取走」语义只作用于 run 通道；任务创建不经它，故信箱靠显式 DELETE 清
 export const clearIdeContext = () => fetch("/api/ide/context", { method: "DELETE" }).then(unwrap);

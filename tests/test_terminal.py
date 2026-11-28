@@ -52,20 +52,26 @@ def test_whitelisted_commands_skip_confirm(command):
 
 
 # ADR 071：白名单 basename + 真实路径必须在 _SAFE_SYSTEM_DIRS 内才免确认。
-# 裸 `pytest` 不在 PATH 里 = which None = 保守确认；开发用 `python -m pytest`
-# 走另一条免确认分支（test_whitelisted_commands_skip_confirm 已覆盖）。
-# `rg` 在本机 PATH 找到的是 IDE 自带 ripgrep（@vscode/ripgrep）——不在
-# 系统目录里，按规要确认；如需 rg 在 PATH 注入场景下做端到端跑进
-# /usr/local/bin/rg（Homebrew）才会免确认。
-@pytest.mark.parametrize("command", [
-    "pytest -q",               # PATH 缺 pytest 时 which=None → 保守确认
-    "rg 'def run_turn' src/",  # 真实路径在 IDE 自带 ripgrep（@vscode）目录 → 不在系统目录
-])
-def test_whitelisted_basename_outside_system_dirs_requires_confirm(command):
+# 自造 PATH 注入环境（tmp 目录放同名假程序），不依赖跑测机器的 PATH 构成
+# ——原先「pytest 不在 PATH」的隐含前提在 CI（setup-python 的 pytest 上 PATH）
+# 与本地（.venv 不在 PATH）各红一边，环境相关前提就是脆的。
+# 裸 `pytest` 不在 PATH 里 = which None = 保守确认（第二段）。
+def test_whitelisted_basename_outside_system_dirs_requires_confirm(tmp_path, monkeypatch):
     # ADR 071：白名单只是第一步——真实路径解析后必须在 _SAFE_SYSTEM_DIRS 内
-    # 才算「PATH 里那个公认只读的程序」。PATH 注入（~/.local/bin/echo）或
-    # IDE 携带的非系统目录命令（Trae 自带 ripgrep）都走这条确认。
-    assert needs_confirm(command) is True
+    # 才算「PATH 里那个公认只读的程序」。PATH 注入（~/.local/bin/echo 同款：
+    # tmp 目录里的同名假程序）或非系统目录携带的命令（IDE ripgrep 同款）都走
+    # 这条确认。
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    for name in ("pytest", "rg"):
+        shim = fake / name
+        shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        shim.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake))       # 假程序被 which 找到 → 落非系统目录 → 挡
+    assert needs_confirm("pytest -q") is True
+    assert needs_confirm("rg 'def run_turn' src/") is True
+    monkeypatch.setenv("PATH", "/nonexistent")  # PATH 缺席 → which None → 保守确认
+    assert needs_confirm("pytest -q") is True
 
 
 # P1-3 评审修复①：程序带路径不再享受 basename 免确认——白名单的语义是

@@ -11,6 +11,7 @@
 """
 
 import json
+import subprocess
 import tempfile
 import time
 from dataclasses import replace
@@ -50,6 +51,17 @@ def _isolate_disk_state(tmp_path, monkeypatch):
     monkeypatch.setattr("facta.orchestrator.assemble.LEARNED_DIR", tmp_path / "learned")
     monkeypatch.setattr("facta.orchestrator.task.TASKS_DIR", tmp_path / "tasks")
     monkeypatch.setenv("FACTA_USER_MEMORY", str(tmp_path / "user.md"))
+    # P0 绑定校验波及（B1）：repo_root 现在必须是 Git 仓（rev-parse 级校验）。
+    # fixture 地基补 git init + 首提交——语义不弱化：委派目标仓仍是同一目录，
+    # 只是从「登记不围栏」升级为可校验的绑定三元组（baseline=首提交 HEAD）。
+    (tmp_path / "base.txt").write_text("seed\n", encoding="utf-8")   # 空目录无从首提交
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=tmp_path,
+        check=True,
+    )
 
 
 # ---------- 技能文件 ## authorization 节（装配期校验） ----------

@@ -1,8 +1,10 @@
 // TaskCard（ADR 118 §2）：Task 一等视图的一张卡。
 //
-// 数据全部来自 `Task.to_dict` 现有字段 + `_task_view` 的 waiting-approval 派生
-// （后端零改动）；操作全部复用既有端点（cancel / resume / steer / billing /
-// confirm）。展开才挂 Run 下钻与确认卡 ⇒ SSE 订阅数随展开数走，不常驻。
+// 数据全部来自 `Task.to_dict` 现有字段 + `_task_view` 派生；操作全部复用既有
+// 端点（cancel / resume / steer / billing / confirm / worktree）。展开才挂 Run
+// 下钻与确认卡 ⇒ SSE 订阅数随展开数走，不常驻。
+// P0（S1-6/S2-5）：+绑定信息区块（工作区/目标分支/基线/执行方式）、三态分列
+// （运行状态｜检查结果｜合入状态）、四段 diff 查看、收口钉 candidate 与 409 重新核验。
 import { useState } from "preact/hooks";
 import {
   cancelTask,
@@ -67,6 +69,78 @@ function stamp(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+// 基线/合入 commit 读验用短 SHA（8-12 位取 10）；空串如实不显示
+const shortSha = (sha) => (sha ? String(sha).slice(0, 10) : "");
+
+// 验证记录的 time 格式契约未钉（epoch 秒 / ISO 串都可能）：数字走 stamp，其余原样
+const fmtTime = (t) => (typeof t === "number" ? stamp(t) : t || "—");
+
+// 执行方式三态（_task_view.exec_mode）
+const EXEC_ZH = {
+  sandbox: "沙箱隔离",
+  direct: "无隔离 · 直接在仓库工作",
+  default: "默认工作区",
+};
+
+// 合入状态四态（S2-3）；徽标配色沿用 task-badge 既有变体，不新造色
+const MERGE_ZH = { none: "未合入", merged: "已合入", conflicted: "冲突", discarded: "已丢弃" };
+const MERGE_CLS = { none: "pending", merged: "done", conflicted: "blocked", discarded: "cancelled" };
+
+const VERIF_ZH = { passed: "通过", failed: "失败", not_run: "未运行", skipped: "跳过" };
+
+// 产物四段（S2-1）：label 用 spec 用语
+const SEGMENTS = [
+  ["committed", "已提交未合入"],
+  ["staged", "已暂存"],
+  ["unstaged", "未暂存"],
+  ["untracked", "未跟踪"],
+];
+
+// 一段 diff 文本按 unified diff 的 `diff --git` 行切成文件块（文件级可展开）；
+// 不带该标记的（stat 摘要 / 未跟踪清单）整段一块兜底展示
+function fileChunks(text) {
+  const chunks = [];
+  for (const line of text.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      chunks.push({ name: line.split(" b/").pop(), lines: [line] });
+    } else if (chunks.length) {
+      chunks[chunks.length - 1].lines.push(line);
+    } else {
+      chunks.push({ name: null, lines: [line] });
+    }
+  }
+  return chunks;
+}
+
+// diff 呈现：四段分段展示；unified diff 切到文件级展开；segments 缺失回落兼容串
+function DiffView({ wt }) {
+  if (!wt.segments) return <pre class="tp-changes">{wt.changes || "（无改动）"}</pre>;
+  return (
+    <div data-testid="task-diff">
+      {wt.baseline_inferred ? <div class="tp-warn">基线为推断值</div> : null}
+      {SEGMENTS.map(([key, label]) => {
+        const text = wt.segments[key] || "";
+        if (!text) return <div class="detail-muted muted">{label}：（无）</div>;
+        return (
+          <details key={key} open>
+            <summary class="detail-muted">{label}</summary>
+            {fileChunks(text).map((c, i) =>
+              c.name ? (
+                <details key={i}>
+                  <summary class="tp-chip">{c.name}</summary>
+                  <pre class="tp-changes">{c.lines.join("\n")}</pre>
+                </details>
+              ) : (
+                <pre class="tp-changes" key={i}>{c.lines.join("\n")}</pre>
+              )
+            )}
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function TaskCard({ task, runs, onChanged }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -74,8 +148,10 @@ export default function TaskCard({ task, runs, onChanged }) {
   const [steerText, setSteerText] = useState("");
   const [billing, setBilling] = useState(null);   // null = 未展开明细（列表用 to_dict 里的合计）
   const [openRun, setOpenRun] = useState(null);
-  const [wtChanges, setWtChanges] = useState(null);   // null = 未拉沙箱改动
-  const [wtMsg, setWtMsg] = useState("");             // 收口结果（合并/丢弃的反馈串）
+  const [wt, setWt] = useState(null);             // null = 未拉 GET worktree（全量：segments/candidate/…）
+  const [settleR, setSettleR] = useState(null);   // settle 响应（旧键 result/cleared 与新键 status/detail 都收）
+  const [stale, setStale] = useState(false);      // 预览失效（候选已变）：合入冻结在按钮态待重新核验
+  const [checksOpen, setChecksOpen] = useState(false);   // 检查明细展开
 
   const lastRunId = task.run_ids?.[task.run_ids.length - 1] || null;
   const steerable = ["running", "waiting-steer"].includes(task.status) && lastRunId;
@@ -100,24 +176,63 @@ export default function TaskCard({ task, runs, onChanged }) {
       setBilling(billing ? null : await fetchTaskBilling(task.task_id));
     });
 
-  // 线五①：沙箱收口——改动摘要按需拉取；合并/丢弃后把结果串留给人看
-  const loadWtChanges = () =>
+  // 线五①：沙箱收口——改动摘要按需拉取（四段 + candidate）；合并/丢弃后把结果留给人看
+  const loadWt = () =>
     act(async () => {
-      if (wtChanges !== null) {
-        setWtChanges(null);
+      if (wt !== null) {
+        setWt(null);
         return;
       }
-      const r = await fetchTaskWorktree(task.task_id);
-      setWtChanges(r.changes || "（无改动）");
+      setWt(await fetchTaskWorktree(task.task_id));
     });
 
+  // 预览失效后的「重新核验」：重拉预览并解冻合入按钮（核验结论归用户）
+  const recheck = () =>
+    act(async () => {
+      setStale(false);
+      setSettleR(null);
+      setWt(await fetchTaskWorktree(task.task_id));
+    });
+
+  // 收口：merge 带 GET 预览的 candidate 钉版本；409「重新核验」语义转按钮态提示
   const settleWt = (action) =>
     act(async () => {
-      const r = await settleTaskWorktree(task.task_id, action);
-      setWtMsg(r.result);
-      setWtChanges(null);
-      onChanged?.();
+      try {
+        const r = await settleTaskWorktree(task.task_id, action, wt?.candidate || task.candidate);
+        setSettleR(r);
+        setStale(false);
+        setWt(null);
+      } catch (e) {
+        if (/重新核验/.test(e.message) || (e.status === 409 && /失效/.test(e.message))) {
+          setStale(true);
+          setSettleR(null);
+          setWt(await fetchTaskWorktree(task.task_id));   // 预览顺手刷新
+          return;
+        }
+        throw e;   // 其余错误走 act 的就地报错
+      }
     });
+
+  // 三态分列（S2-5）：运行/检查/合入各自独立，运行完成 ≠ 已合入
+  const verifs = Array.isArray(task.verifications) ? task.verifications : [];
+  const passed = verifs.filter((v) => v.result === "passed").length;
+  const failed = verifs.filter((v) => v.result === "failed").length;
+  const notRun = verifs.length - passed - failed;
+  const mergeStatus = task.merge_status || "none";
+  const mergeLabel =
+    mergeStatus === "merged"
+      ? `已合入${task.merge_commit ? ` ${shortSha(task.merge_commit)}` : ""}`
+      : MERGE_ZH[mergeStatus] || mergeStatus;
+  // 清理失败（Spec 2.7）：settle 明报（merged 但没清干净），或处置记录留痕（重启后仍可见）
+  const cleanupFailed =
+    (settleR?.status === "merged" && settleR?.cleared === false) ||
+    /清理失败/.test(`${task.disposition?.status ?? ""}${task.disposition?.detail ?? ""}`);
+
+  // 绑定信息（S1-6）：旧任务字段全空 → 「未绑定（旧任务）」；exec_mode 缺失按旧字段派生兜底
+  const bound =
+    task.repo_root || task.target_branch || task.baseline || task.worktree_branch || task.worktree;
+  const execMode =
+    task.exec_mode || (task.worktree ? "sandbox" : task.repo_root || task.skill ? "direct" : "default");
 
   const myRuns = (runs || []).filter((r) => task.run_ids?.includes(r.run_id));
 
@@ -160,8 +275,76 @@ export default function TaskCard({ task, runs, onChanged }) {
             {TERMINAL.includes(task.status) ? "沙箱待收口" : "沙箱隔离中"}
           </span>
         ) : null}
-        {task.repo_root ? <span class="tp-chip">仓：{task.repo_root}</span> : null}
       </div>
+
+      {/* S1-6 绑定信息：实际工作区（仓 + 沙箱路径）/目标分支/基线短 SHA/worktree 分支/
+          执行方式徽标；旧任务字段全空如实标「未绑定（旧任务）」，不崩 */}
+      <div class="tp-meta" data-testid="task-binding">
+        {bound ? (
+          <>
+            {task.repo_root ? (
+              <span class="tp-chip" style="word-break:break-all">仓：{task.repo_root}</span>
+            ) : null}
+            {task.worktree ? (
+              <span class="tp-chip" style="word-break:break-all">沙箱：{task.worktree}</span>
+            ) : null}
+            {task.target_branch ? <span class="tp-chip">目标分支：{task.target_branch}</span> : null}
+            {task.baseline ? <span class="tp-chip">基线：{shortSha(task.baseline)}</span> : null}
+            {task.worktree_branch ? <span class="tp-chip">工作分支：{task.worktree_branch}</span> : null}
+            <span class={`tp-chip ${execMode === "sandbox" ? "tp-ok" : ""}`}>
+              执行方式：{EXEC_ZH[execMode] || execMode}
+            </span>
+          </>
+        ) : (
+          <span class="tp-chip">未绑定（旧任务）</span>
+        )}
+      </div>
+
+      {/* S2-5 三态分列：运行状态｜检查结果｜合入状态——互不冒充，运行完成 ≠ 已合入 */}
+      <div class="tp-meta" data-testid="task-tri">
+        <span class="tp-chip">
+          运行状态 <span class={`task-badge ${task.status}`}>{STATUS_ZH[task.status] || task.status}</span>
+        </span>
+        <span class="tp-chip" data-testid="tri-checks">
+          检查结果{" "}
+          {verifs.length ? (
+            <>
+              {passed} 通过 / <span style="color:#b91c1c">{failed} 失败</span> /{" "}
+              <span style="color:#b45309">{notRun} 未运行</span>
+            </>
+          ) : (
+            "无检查记录"
+          )}
+        </span>
+        <span class="tp-chip" data-testid="tri-merge">
+          合入状态 <span class={`task-badge ${MERGE_CLS[mergeStatus] || "pending"}`}>{mergeLabel}</span>
+          {cleanupFailed ? <span class="task-badge failed">清理失败</span> : null}
+        </span>
+        {verifs.length ? (
+          <button class="tp-btn tp-btn-mini" disabled={busy} onClick={() => setChecksOpen(!checksOpen)}>
+            {checksOpen ? "收起检查明细" : "检查明细"}
+          </button>
+        ) : null}
+      </div>
+      {/* 检查明细：failed/not_run 如实着色不装绿，每条可定位检查名/结果/候选 SHA */}
+      {checksOpen ? (
+        <div class="tp-billing" data-testid="tri-checks-detail">
+          {verifs.map((v, i) => (
+            <div class="tp-billing-row" key={i}>
+              <span
+                class={`task-badge ${
+                  v.result === "passed" ? "done" : v.result === "failed" ? "failed" : "pending"
+                }`}
+              >
+                {VERIF_ZH[v.result] || v.result || "未运行"}
+              </span>
+              <span>{v.name || "（未命名检查）"}</span>
+              {v.candidate ? <span class="muted">候选 {shortSha(v.candidate)}</span> : null}
+              <span class="muted">{fmtTime(v.time)}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {task.blocked_reason ? <div class="tp-blocked">熔断原因：{task.blocked_reason}</div> : null}
 
       <div class="tp-actions">
@@ -238,12 +421,24 @@ export default function TaskCard({ task, runs, onChanged }) {
                 沙箱（git worktree）：文件改动未进主工作区，收口才生效
               </div>
               <div class="tp-actions">
-                <button class="tp-btn" disabled={busy} onClick={loadWtChanges}>
-                  {wtChanges === null ? "查看改动" : "收起改动"}
+                <button class="tp-btn" disabled={busy} onClick={loadWt}>
+                  {wt === null ? "查看改动" : "收起改动"}
                 </button>
-                <button class="tp-btn" disabled={busy} onClick={() => settleWt("merge")}>
-                  合并入库
-                </button>
+                {stale ? (
+                  // 预览失效（S2-4）：合入冻结在按钮态，重新核验才解冻
+                  <>
+                    <button class="tp-btn" disabled title="候选已变化，需重新核验后再合入">
+                      产物已变化，请重新核验
+                    </button>
+                    <button class="tp-btn" disabled={busy} onClick={recheck}>
+                      重新核验
+                    </button>
+                  </>
+                ) : (
+                  <button class="tp-btn" disabled={busy} onClick={() => settleWt("merge")}>
+                    {settleR?.status === "conflict" ? "重试合入" : "合并入库"}
+                  </button>
+                )}
                 <button
                   class="tp-btn tp-btn-danger"
                   disabled={busy}
@@ -253,10 +448,26 @@ export default function TaskCard({ task, runs, onChanged }) {
                   丢弃改动
                 </button>
               </div>
-              {wtChanges !== null ? <pre class="tp-changes">{wtChanges}</pre> : null}
+              {wt !== null ? <DiffView wt={wt} /> : null}
             </div>
           ) : null}
-          {wtMsg ? <div class="detail-muted">沙箱收口：{wtMsg}</div> : null}
+          {settleR || cleanupFailed ? (
+            <div class="detail-muted">
+              沙箱收口：{settleR?.result || "清理失败"}
+              {settleR?.detail ? `（${settleR.detail}）` : ""}
+              {settleR?.status === "conflict" ? " · 冲突可重试，候选已保留" : ""}
+              {cleanupFailed ? (
+                <button
+                  class="tp-btn tp-btn-mini"
+                  disabled={busy}
+                  title="产物已安全合入，只重试清理 worktree 与分支"
+                  onClick={() => settleWt("merge")}
+                >
+                  重试清理
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {task.status === "waiting-approval" && lastRunId ? (
             <ConfirmCard runId={lastRunId} onDecided={onChanged} />
           ) : null}

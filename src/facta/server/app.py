@@ -12,13 +12,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import queue
 import re
+import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -72,6 +75,7 @@ from facta.orchestrator.task import (
     continue_message,
     fuse_expired,
     requeue_on_boot,
+    resolve_binding,
     should_continue,
     usage_delta,
 )
@@ -92,6 +96,8 @@ from facta.server.run_store import (
 )
 from facta.server.sse import encode_heartbeat, encode_sse
 from facta.skills import WRITE_AUTH_GUARD
+from facta.tools import worktree as wt_module
+from facta.tools.context import WorkspaceBinding
 from facta.tools.mcp_config import ServerSpec, load_server_specs
 from facta.tools.notes import record_provenance, resolve_note_path
 from facta.tools.registry import approval_policy
@@ -307,11 +313,14 @@ class CreateTaskRequest(BaseModel):
     ADR 117：skill = 绑定技能（未知 422，缺省主 agent）；authorization =
     档位覆盖，**只能收严**（write→readonly），放宽须改技能文件（真值源
     唯一）；无 skill 任务带 authorization = 400（档位只作用于技能任务）。
+    P0：target_branch = 合入目标分支（缺省取绑定仓库当前检出分支）；
+    repo_root/target_branch 经 resolve_binding 校验，失败 400 拒建。
     """
 
     goal: str
     session_id: str | None = None
     repo_root: str | None = None
+    target_branch: str | None = None
     skill: str | None = None
     authorization: str | None = None
 
@@ -329,9 +338,14 @@ class ResumeRequest(BaseModel):
 
 
 class WorktreeActionRequest(BaseModel):
-    """任务沙箱收口的请求体（线五①）：merge=合回工作分支，discard=整棵丢弃。"""
+    """任务沙箱收口的请求体（S2-3）：merge=合入 / discard=丢弃 / 恢复选项裁决。
+
+    action ∈ merge | discard | reattach | merge_direct。candidate 可选——
+    前端把 GET worktree 的候选标识原样带回，不一致即预览失效 409（重新核验）。
+    """
 
     action: str
+    candidate: str | None = None
 
 
 class RenameSessionRequest(BaseModel):
@@ -458,15 +472,17 @@ def _billing_closeout(
         run.fuse_fired = task.fuse_fired
 
 
-def _sandbox_agent(agent: Agent, workspace: Path | None) -> Agent:
+def _sandbox_agent(agent: Agent, workspace: Path | None, binding: WorkspaceBinding | None = None) -> Agent:
     """线五①：沙箱重锚——file/terminal 五件换锚进任务 worktree，其余共享
     （registry_in_worktree，spawn 沙箱同一份）。workspace=None 原样返回。
     Agent 是 frozen 配置，replace 换 registry（人设/轮数预算原样保留）。
+    P0：binding 透传——沙箱里的工具继承任务工作区绑定（仓库/目标分支/基线），
+    子 agent 的 git 落点与任务同一绑定，父子不串仓（Spec 1 §2.4）。
     抽独立函数：_run_worker 的 branch 预算（PLR0912）。
     """
     if workspace is None:
         return agent
-    return replace(agent, registry=registry_in_worktree(agent.registry, workspace))
+    return replace(agent, registry=registry_in_worktree(agent.registry, workspace, binding=binding))
 
 
 def _run_worker(
@@ -566,6 +582,37 @@ def _run_worker(
     status = STATUS_FAILED
     session: Session | None = None
     writer: CheckpointWriter | None = None
+    # S2-4 验证证据绑定候选（Run 工具事件派生）：任务沙箱内 run_command 逐次
+    # 登记进 Task.verifications（name=命令；result：exit 0→passed / 非 0→failed /
+    # 拒绝·超时·中断→not_run，不装绿；candidate=执行收口时快照，M9 预览失效判据）。
+    pending_verifications: dict[str, str] = {}
+
+    def _verify_track(type_: str, data: dict) -> None:
+        if workspace is None or task is None or task_store is None:
+            return
+        if data.get("name") != "run_command":
+            return
+        if type_ == "tool_started":
+            pending_verifications[str(data.get("id", ""))] = _command_of(data)
+            return
+        if type_ != "tool_result":
+            return
+        name = pending_verifications.pop(str(data.get("id", "")), None)
+        if name is None:
+            return
+        task.verifications.append(
+            _verification(name, str(data.get("result") or ""), _candidate_of(workspace))
+        )
+        task_store.save(task)
+
+    def _verify_flush() -> None:
+        """执行中断/未完成的 run_command 收尾登记 not_run——如实不粉饰。"""
+        if not pending_verifications or task is None or task_store is None or workspace is None:
+            return
+        for name in pending_verifications.values():
+            task.verifications.append(_verification(name, "", _candidate_of(workspace)))
+        pending_verifications.clear()
+        task_store.save(task)
     try:
         session = ctx.store.load(run.session_id)
         # ADR 116：技能模式用技能 Agent（证据菜单、文件锚点=目标仓）；
@@ -574,7 +621,10 @@ def _run_worker(
             ctx, session, mode, repo_root,
             authorization=(task.authorization if task is not None and task.skill else None),
         )
-        agent = _sandbox_agent(agent, workspace)
+        agent = _sandbox_agent(
+            agent, workspace,
+            binding=_task_binding(task) if task is not None else None,
+        )
         ledger = ledger_path(run.session_id)
         # 绑定 save：writer 因此不懂 SessionStore，测试可注入
         writer = CheckpointWriter(ledger, lambda: ctx.store.save(run.session_id, session))
@@ -585,6 +635,7 @@ def _run_worker(
         writer.begin(run.run_id)
 
         def _forward(type_: str, data: dict) -> None:
+            _verify_track(type_, data)          # S2-4：验证登记先于外发（同一执行点同一快照）
             writer.on_event(type_, data)        # 先落盘再外发：客户端看见的事实必然已在盘上
             run.emit(_EVENT_MAP.get(type_, type_), data)
 
@@ -613,6 +664,7 @@ def _run_worker(
     except Exception as exc:   # 防御性兜底：run_turn 已捕获 LLMUnavailableError，这里是意外
         run.emit("error", {"message": str(exc)})
     finally:
+        _verify_flush()   # S2-4：中断/未完成的验证登记 not_run（先于终态与收尾判定）
         try:
             if writer is not None:
                 writer.end(run.run_id, status)   # 人工排查时能看出这轮是正常结束还是中断
@@ -727,24 +779,177 @@ def _task_verdict(task: Task, run: Run, session: Session | None) -> str | None:
     return None
 
 
-def _ensure_task_worktree(tasks: TaskStore, task: Task) -> tuple[Path | None, bool]:
-    """线五①：任务沙箱开箱。返回 (沙箱路径, 是否继续开工)。
+# ---- P0 工作区绑定的执行面辅助（S1-3 沙箱接线 / S1-5 恢复 / S2-3 候选与幂等）----
 
-    chat 任务（主 agent 全工具池）默认沙箱隔离：文件工作不碰主工作区，
-    收口后显式合并回工作分支（编排三步走第①步「并行隔离默认 worktree」）。
-    skill 任务不套沙箱（文件锚 repo_root，readonly 为主）→ (None, True)。
-    建不起来落 blocked → (None, False)。续跑复用同一沙箱（task.worktree
-    落盘）——同一任务的连续轮次攒同一堆改动，收口一次合并，不是每轮一收。
+
+def _git(args: list[str], cwd: Path) -> tuple[int, str]:
+    """app 侧 git 封装（恢复挂回/分支核对/候选指纹用），cwd 显式锚定仓库。
+
+    与 task.py 的同名封装分工：那边 `git -C` 拼参数、服务创建校验；这边
+    subprocess cwd、服务沙箱现场判定。命令面窄、逐条调用，不引 GitPython。
     """
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
+        )
+    except OSError as exc:
+        return 1, str(exc)
+    return proc.returncode, ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+
+def _task_binding(task: Task) -> WorkspaceBinding | None:
+    """Task 三字段 → 绑定三元组；任一为空 = 无绑定（存量任务/未选项目，不补造）。"""
+    if task.repo_root and task.target_branch and task.baseline:
+        return WorkspaceBinding(Path(task.repo_root), task.target_branch, task.baseline)
+    return None
+
+
+def _command_of(data: dict) -> str:
+    """tool_started 事件 → run_command 的命令串（verification 的 name=命令）。"""
+    raw = str(data.get("arguments") or "")
+    try:
+        args = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        return raw
+    return str(args.get("command") or raw)
+
+
+def _verification(name: str, result: str, candidate: str) -> dict:
+    """验证记录（Spec 2.4）：exit 0→passed / 非 0→failed / 无退出码（拒绝、超时、
+    中断、未完成）→ not_run——运行失败或未执行的验证如实展示，不装绿。"""
+    m = re.match(r"exit code: (-?\d+)", result)
+    verdict = "not_run"
+    if m is not None:
+        verdict = "passed" if m.group(1) == "0" else "failed"
+    return {"name": name, "result": verdict, "time": time.time(), "candidate": candidate}
+
+
+def _branch_exists(repo: Path, branch: str) -> bool:
+    code, _ = _git(["rev-parse", "--verify", "-q", f"refs/heads/{branch}"], repo)
+    return code == 0
+
+
+def _checked_out_branch(wt: Path) -> str:
+    code, out = _git(["rev-parse", "--abbrev-ref", "HEAD"], wt)
+    return out.strip() if code == 0 and out.strip() != "HEAD" else ""
+
+
+def _binding_invalid_reason(task: Task, binding: WorkspaceBinding | None) -> str:
+    """绑定失效判定（Spec 1 §2.6）：仓库非 Git / target_branch 消失 → 原因串。"""
+    if binding is None:
+        return ""
+    if not binding.repo_root.is_dir():
+        return f"绑定仓库不存在：{binding.repo_root}"
+    code, out = _git(["rev-parse", "--is-inside-work-tree"], binding.repo_root)
+    if code != 0:
+        return f"绑定仓库不再是 Git 仓（{binding.repo_root}）：{out}"
+    if not _branch_exists(binding.repo_root, binding.target_branch):
+        return f"绑定 target_branch 已消失：{binding.target_branch}"
+    return ""
+
+
+def _metadata_conflict(task: Task, wt: Path) -> str:
+    """记录与 Git 元数据冲突（Spec 1 §2.6）：worktree_branch 与目录实际检出分支不一致。"""
+    if not task.worktree_branch:
+        return ""
+    actual = _checked_out_branch(wt)
+    if actual and actual != task.worktree_branch:
+        return f"记录分支 {task.worktree_branch} 与目录实际检出分支 {actual} 不一致"
+    return ""
+
+
+def _candidate_of(wt: Path) -> str:
+    """候选标识 = {HEAD 12 位}.{指纹}（Spec 2「候选版本 SHA」，幂等可比较即可）。
+
+    ①段（已提交未合入）由 HEAD 承载，②③④段由指纹承载：指纹 =
+    sha256(status --porcelain + diff) 前 8 位，空工作区 = clean。
+    """
+    code, head = _git(["rev-parse", "HEAD"], wt)
+    if code != 0:
+        return ""
+    code_s, status = _git(["status", "--porcelain"], wt)
+    code_d, diff = _git(["diff"], wt)
+    if code_s != 0 or code_d != 0:
+        return f"{head[:12]}.error"
+    raw = status + diff
+    fp = "clean" if not raw.strip() else hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    return f"{head[:12]}.{fp}"
+
+
+def _branch_candidate(repo: Path, branch: str) -> str:
+    """worktree 目录缺失时的候选：分支头即产物全集（全已提交 → clean 指纹）。"""
+    code, head = _git(["rev-parse", f"refs/heads/{branch}"], repo)
+    return f"{head[:12]}.clean" if code == 0 else ""
+
+
+def _target_moved(task: Task) -> bool:
+    """目标已前进（Spec 1 §2.6）：target_branch 头 ≠ 钉死 baseline。"""
+    binding = _task_binding(task)
+    if binding is None:
+        return False
+    code, head = _git(["rev-parse", f"refs/heads/{binding.target_branch}"], binding.repo_root)
+    return code == 0 and head != binding.baseline
+
+
+def _ensure_task_worktree(tasks: TaskStore, task: Task) -> tuple[Path | None, bool]:
+    """线五①：任务沙箱开箱（P0 绑定接线）。返回 (沙箱路径, 是否继续开工)。
+
+    chat 任务（主 agent 全工具池）默认沙箱隔离；skill 任务不套沙箱（文件锚
+    repo_root）→ (None, True)。绑定任务的沙箱是**绑定仓库的工作树**：分支
+    agent/<uuid8> 显式生成存 task.worktree_branch（分支名真值源是字段），从
+    钉死 baseline 切出；无绑定 chat 任务走老行为（Facta 仓，exec_mode=default）。
+    续跑复用同一沙箱（task.worktree 落盘）。
+    S1-5 恢复路径：绑定失效 → blocked 不硬跑；目录缺失分支还在 → 不硬跑不
+    清理，等用户在收口端点裁决（reattach/merge_direct/discard）；分支也不在
+    → 如实「产物已丢失」，此后才得起新沙箱。元数据冲突 → 保留现场不自动清理。
+    """
+    binding = _task_binding(task)
+    invalid = _binding_invalid_reason(task, binding)
+    if invalid:
+        task.status = TASK_BLOCKED
+        task.blocked_reason = f"绑定失效：{invalid}"
+        tasks.save(task)
+        return None, False
     if task.skill:
         return None, True
     if task.worktree:
         wt = Path(task.worktree)
         if wt.is_dir():
+            conflict = _metadata_conflict(task, wt)
+            if conflict:
+                task.status = TASK_BLOCKED
+                task.blocked_reason = f"记录与 Git 元数据冲突（{conflict}），保留现场待人工裁决"
+                tasks.save(task)
+                return None, False
             return wt, True
-        # 目录没了（手工清理）：如实起新沙箱，旧改动无从找回——字段覆盖
+        # 目录没了（手工清理）：分支还在 = 产物可找回 → 等用户裁决，不硬跑不清理
+        if binding is not None and task.worktree_branch and _branch_exists(
+            binding.repo_root, task.worktree_branch
+        ):
+            task.status = TASK_BLOCKED
+            task.blocked_reason = (
+                f"沙箱目录缺失，产物保留在分支 {task.worktree_branch}；"
+                "请在收口端点裁决：reattach 重建挂回 / merge_direct 直接合入 / discard 丢弃"
+            )
+            tasks.save(task)
+            return None, False
+        # 分支也不在：如实「产物已丢失」（不虚构），此后才得起新沙箱续跑
+        if task.worktree_branch:
+            logger.warning(
+                "任务 %s 产物已丢失：worktree %s 缺失且分支 %s 不在，起新沙箱续跑",
+                task.task_id, task.worktree, task.worktree_branch,
+            )
         task.worktree = ""
-    wt_dir, err = create_worktree()
+        task.worktree_branch = ""
+    if binding is None:
+        wt_dir, err = create_worktree()   # 老行为：Facta 仓，分支目录名同源反推
+    else:
+        branch = f"agent/{uuid.uuid4().hex[:8]}"
+        wt_dir, err = create_worktree(
+            repo_root=binding.repo_root, branch=branch, baseline=binding.baseline,
+        )
+        if not err:
+            task.worktree_branch = branch
     if err:
         task.status = TASK_BLOCKED
         task.blocked_reason = f"任务沙箱创建失败：{err}"
@@ -756,19 +961,243 @@ def _ensure_task_worktree(tasks: TaskStore, task: Task) -> tuple[Path | None, bo
 
 
 def _task_sandbox_closeout(tasks: TaskStore, task: Task, wt: Path | None) -> None:
-    """线五①：worker 退出时的沙箱收口。
+    """线五①：worker 退出时的沙箱收口（P0 四段判定，S2-1 收口侧）。
 
-    有改动→保留（终态=待显式合并/丢弃，收口端点裁决；挂起/熔断=续跑复用）；
-    无改动→空沙箱就地清理（空改动守卫，spawn 收尾同款哲学）。
-    worktree_changes 的失败串非空→按「有改动」保守保留（宁可多留不可误删）。
+    元数据冲突保留现场（Spec 1 §2.6，不自动清理）；四段任一非空（含已提交
+    未合入——P0-2 根因）或检查失败 → 保留待显式收口/续跑复用；确认全空才
+    就地清理。基线/目标分支取 Task 字段（无绑定时皆空 = 老语义）。
     """
     if wt is None:
         return
-    if worktree_changes(wt):
+    if _metadata_conflict(task, wt):
         return
-    discard_worktree(wt)
+    changes = worktree_changes(wt, task.baseline, task.target_branch)
+    if changes.any():
+        return
+    binding = _task_binding(task)
+    if binding is not None:
+        discard_worktree(wt, repo_root=binding.repo_root, branch=task.worktree_branch or None)
+    else:
+        discard_worktree(wt)
     task.worktree = ""
+    task.worktree_branch = ""
     tasks.save(task)
+
+
+# ---- S2-3 settle 处置面（幂等/互斥/预览校验/清理重试）+ S1-5 恢复挂回 ----
+
+_APPLIED_STATUSES = ("merged", "empty", "discarded")   # 已应用的处置结果（幂等/互斥判据）
+_SETTLE_ACTIONS = ("merge", "discard", "reattach", "merge_direct")
+_DISPOSAL_ACTIONS = ("merge", "discard", "merge_direct")   # 互斥先到先得的集合
+
+
+def _sandbox_cleared(task: Task) -> bool:
+    """沙箱是否已清干净（目录与分支都不在）——清理失败重试与幂等重放的判据。"""
+    wt = Path(task.worktree) if task.worktree else None
+    if wt is not None and wt.exists():
+        return False
+    binding = _task_binding(task)
+    branch = task.worktree_branch or (f"agent/{wt.name}" if wt is not None else "")
+    repo = binding.repo_root if binding is not None else wt_module.WORKSPACE_ROOT
+    return not (branch and _branch_exists(repo, branch))
+
+
+def _settle_response(status: str, detail: str, cleared: bool) -> dict:
+    """settle 响应形状：result/cleared 兼容旧前端，status/detail 为结构化处置。"""
+    return {"result": detail, "cleared": cleared, "status": status, "detail": detail}
+
+
+def _preview_check(task: Task, action: str, body_candidate: str, candidate: str) -> None:
+    """预览有效性核对（Spec 2.4）：候选已变 → 409 要求重新核验（detail 含「重新核验」）。
+
+    两道：请求带 candidate 且 ≠ 当前候选（任何处置）；验证记录非空且最近一条
+    candidate ≠ 当前候选（验证后改动发生变化——spec 2.4「必须重新核验后才能
+    合入」，落 merge/merge_direct）。无验证记录时允许合入（任务卡如实显示
+    「未运行」，不装绿）。
+    """
+    if not candidate:
+        return
+    if body_candidate and body_candidate != candidate:
+        raise HTTPException(409, "预览已失效：候选已变化，请重新核验后再处置")
+    if (
+        action in ("merge", "merge_direct")
+        and task.verifications
+        and task.verifications[-1].get("candidate") != candidate
+    ):
+        raise HTTPException(409, "预览已失效：验证后改动发生变化，请重新核验（重跑检查）后再合入")
+
+
+def _settle_replay(task: Task, action: str) -> dict | None:
+    """处置幂等（M8/M12）：同 action 重放返回原处置结果，不重复执行。
+
+    已应用（merged/empty/discarded）→ 原样返回；conflict/failed → None 落执行
+    段（重试=再次执行，候选保留可抢救）。异 action：merge/discard/merge_direct
+    互斥先到先得，已应用即 409。merged/empty 但清理未完成不走这里（调用方
+    先行「仅重试清理」）。
+    """
+    disp = task.disposition
+    if disp is None:
+        return None
+    applied = disp.get("status") in _APPLIED_STATUSES
+    if disp.get("action") == action:
+        if not applied:
+            return None
+        return _settle_response(
+            str(disp.get("status")), str(disp.get("detail")), _sandbox_cleared(task)
+        )
+    if applied and action in _DISPOSAL_ACTIONS and disp.get("action") in _DISPOSAL_ACTIONS:
+        raise HTTPException(
+            409,
+            f"处置互斥先到先得：本任务已按 {disp.get('action')} 处置（{disp.get('status')}），"
+            f"不再接受 {action}",
+        )
+    return None
+
+
+def _merge_sandbox(
+    task: Task, binding: WorkspaceBinding | None, wt: Path, message: str
+) -> tuple[str, str]:
+    """merge / merge_direct 的合入执行（S2-2 四态）：绑定走 target_branch，无绑定旧语义。"""
+    if binding is None:
+        return commit_and_merge_back(wt, message=message)   # 旧任务：merge_into=None 老语义
+    return commit_and_merge_back(
+        wt,
+        message,
+        merge_into=binding.repo_root,
+        branch=task.worktree_branch or None,
+        target_branch=binding.target_branch,
+        baseline=binding.baseline,
+    )
+
+
+def _discard_sandbox(task: Task, binding: WorkspaceBinding | None, wt: Path) -> str:
+    """丢弃零残留：目录 + 记录分支；元数据冲突现场把实际检出分支一并删（显式裁决）。"""
+    actual = _checked_out_branch(wt) if wt.is_dir() else ""
+    if binding is None:
+        return discard_worktree(wt)
+    err = discard_worktree(wt, repo_root=binding.repo_root, branch=task.worktree_branch or None)
+    if actual and actual != task.worktree_branch and _branch_exists(binding.repo_root, actual):
+        _git(["branch", "-D", actual], cwd=binding.repo_root)
+    return err
+
+
+def _reattach_worktree(task: Task, binding: WorkspaceBinding | None) -> tuple[Path | None, str]:
+    """恢复选项① 重建挂回（S1-5）：worktree_branch 重新检出成新沙箱目录。
+
+    分支名真值源 = task.worktree_branch（不反推）；先 prune 掉手工删目录留下
+    的陈旧 worktree 元数据（否则 git 拒「已检出」）。失败返回错误串供呈现。
+    """
+    if binding is None or not task.worktree_branch:
+        return None, "无绑定或分支名缺失，无法重建挂回"
+    wt_dir = wt_module.WORKTREES_DIR / uuid.uuid4().hex[:8]
+    _git(["worktree", "prune"], cwd=binding.repo_root)
+    code, out = _git(["worktree", "add", str(wt_dir), task.worktree_branch], cwd=binding.repo_root)
+    if code != 0:
+        return None, f"重建挂回失败：{out}"
+    task.worktree = str(wt_dir)
+    return wt_dir, ""
+
+
+def _settle_cleanup_retry(task: Task, tasks: TaskStore) -> dict:
+    """M11：合入成功但清理失败 → 同 action 重复仅重试清理，不重复 merge。
+
+    产物已安全合入不受影响（清理是独立动作，不回滚合入结果）；前端已按
+    status=merged + cleared=false + detail「清理失败」消费。
+    """
+    wt = Path(task.worktree) if task.worktree else None
+    binding = _task_binding(task)
+    if wt is not None and wt.is_dir():
+        _discard_sandbox(task, binding, wt)
+    elif binding is not None and task.worktree_branch:
+        _git(["worktree", "prune"], cwd=binding.repo_root)
+        _git(["branch", "-D", task.worktree_branch], cwd=binding.repo_root)
+    cleared = _sandbox_cleared(task)
+    note = "清理重试成功，产物已合入不受影响" if cleared else "清理失败：残留仍在，可再次重试清理"
+    if cleared:
+        task.worktree = ""
+        task.worktree_branch = ""
+    disp = dict(task.disposition or {})
+    disp["detail"] = f"{disp.get('detail', '')}；{note}"
+    task.disposition = disp
+    tasks.save(task)
+    return _settle_response(str(disp.get("status", "merged")), str(disp["detail"]), cleared)
+
+
+def _settle_apply(task: Task, action: str, binding: WorkspaceBinding | None) -> tuple[str, str]:
+    """执行处置并返回 (status, detail)：merge 系四态合入、discard 零残留、reattach 重建挂回。"""
+    wt = Path(task.worktree)
+    if action == "discard":
+        err = _discard_sandbox(task, binding, wt)
+        if _sandbox_cleared(task):
+            return "discarded", "沙箱已丢弃"
+        return "failed", err or "沙箱清理失败，残留仍在（可重试 discard）"
+    if action == "reattach":
+        if wt.is_dir() and not _metadata_conflict(task, wt):
+            return "reattached", f"沙箱已挂回（无需重建）：{wt}"
+        attached, err = _reattach_worktree(task, binding)
+        if attached is None:
+            return "failed", err
+        return "reattached", f"已重建挂回：{attached}（分支 {task.worktree_branch}）"
+    if action == "merge_direct" and not wt.is_dir():
+        attached, err = _reattach_worktree(task, binding)
+        if attached is None:
+            return "failed", f"直接合入失败：{err}（候选保留在分支 {task.worktree_branch}）"
+        wt = attached
+    return _merge_sandbox(task, binding, wt, f"task: {task.goal.strip()[:60]}")
+
+
+def _worktree_view(task: Task) -> dict:
+    """GET worktree 的结构化视图（S2-1 四段 + S2-3 处置 + S1-5 恢复呈现）。
+
+    changes 仍是字符串（旧前端兼容）；目录缺失/元数据冲突如实呈现状态与
+    恢复选项，不虚构结果（失败处理表：字段清空防假指针在处置后做）。
+    """
+    wt = Path(task.worktree)
+    binding = _task_binding(task)
+    d: dict[str, Any] = {
+        "changes": "",
+        "segments": {"committed": "", "staged": "", "unstaged": "", "untracked": ""},
+        "baseline_inferred": False,
+        "candidate": "",
+        "verifications": list(task.verifications),
+        "merge_status": task.merge_status,
+        "disposition": task.disposition,
+        "target_moved": _target_moved(task),
+        "state": "ok",
+    }
+    if not wt.is_dir():
+        if binding is not None and task.worktree_branch and _branch_exists(
+            binding.repo_root, task.worktree_branch
+        ):
+            d["state"] = "missing_worktree"
+            d["recovery"] = ["reattach", "merge_direct", "discard"]   # 恢复三选项，等用户裁决
+            d["changes"] = f"（沙箱目录已缺失，产物保留在分支 {task.worktree_branch}；请选择恢复方式）"
+            d["candidate"] = _branch_candidate(binding.repo_root, task.worktree_branch)
+        else:
+            d["state"] = "lost"
+            d["changes"] = (
+                f"（产物已丢失：沙箱目录 {task.worktree} 缺失，"
+                f"分支 {task.worktree_branch or '（无）'} 也不在）"
+            )
+        return d
+    conflict = _metadata_conflict(task, wt)
+    if conflict:
+        d["state"] = "metadata_conflict"
+        d["metadata_conflict"] = conflict
+        d["changes"] = f"（记录与 Git 元数据冲突：{conflict}；保留现场，请人工裁决）"
+        d["candidate"] = _candidate_of(wt)
+        return d
+    cs = worktree_changes(wt, task.baseline, task.target_branch)
+    d["changes"] = cs.summary()
+    d["segments"] = {
+        "committed": cs.committed,
+        "staged": cs.staged,
+        "unstaged": cs.unstaged,
+        "untracked": cs.untracked,
+    }
+    d["baseline_inferred"] = cs.baseline_inferred
+    d["candidate"] = _candidate_of(wt)
+    return d
 
 
 def _maybe_start_queued(ctx: AppContext, store: RunStore, tasks: TaskStore) -> None:
@@ -932,6 +1361,13 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             and active.status == STATUS_WAITING
         ):
             d["status"] = "waiting-approval"
+        # P0（S1-6 供给）：真实执行方式——绑定+worktree=沙箱隔离 / skill=直接执行 /
+        # 其余（含无绑定旧路径）=默认；目标已前进如实呈现（合入前须重新核对）。
+        d["exec_mode"] = (
+            "direct" if task.skill
+            else ("sandbox" if (task.worktree and _task_binding(task)) else "default")
+        )
+        d["target_moved"] = _target_moved(task)
         return d
 
     def _bus_forward(run: Run, ev: RunEvent) -> None:
@@ -1371,6 +1807,15 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         goal = body.goal.strip()
         if not goal:
             raise HTTPException(400, "goal 不能为空")
+        # P0 Spec 2.1：创建前解析绑定三元组，失败拒建（明确失败态，不落成
+        # 能跑的任务再事后补救）；成功则 repo_root 归一化为 Git 根一并落账。
+        binding, binding_err = resolve_binding(body.repo_root or "", body.target_branch or "")
+        if binding_err:
+            raise HTTPException(400, binding_err)
+        if binding:
+            bound_root, target_branch, baseline = str(binding.repo_root), binding.target_branch, binding.baseline
+        else:
+            bound_root = target_branch = baseline = ""   # 未选项目：默认工作区（现状语义不变）
         if body.skill is not None and body.skill != "" and body.skill not in ctx.skills:
             raise HTTPException(422, f"未知 skill：{body.skill!r}（可用技能：{sorted(ctx.skills)}）")
         # 档位缺省 = 技能声明（授权真值源唯一：文件是声明，请求只收严不放宽）
@@ -1396,7 +1841,9 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         task = task_store.create(
             goal,
             session_id=sid,
-            repo_root=body.repo_root or "",
+            repo_root=bound_root,
+            target_branch=target_branch,
+            baseline=baseline,
             skill=body.skill or "",
             authorization=authorization,
             next_text=f"{goal}\n\n{KICKOFF_HINT}",
@@ -1512,38 +1959,85 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
 
     @app.get("/api/tasks/{task_id}/worktree")
     def get_task_worktree(task_id: str):
-        """沙箱改动摘要（收口裁决的展示料：status --short + diffstat）。"""
+        """沙箱产物视图（S2-1 四段 + S2-3 处置 + S1-5 恢复呈现）。
+
+        changes 保留字符串键兼容旧前端（拼四段摘要）；新增键加法呈现
+        四段结构/候选标识/验证记录/处置/目标前进/恢复选项。
+        """
         task = _require_task(task_id)
         if not task.worktree:
             raise HTTPException(404, "本任务没有沙箱")
-        return {"changes": worktree_changes(Path(task.worktree))}
+        return _worktree_view(task)
 
     @app.post("/api/tasks/{task_id}/worktree")
     def settle_task_worktree(task_id: str, body: WorktreeActionRequest):
-        """沙箱收口（线五①「完成后显式合并回工作分支」）：merge / discard。
+        """沙箱收口（S2-3）：merge / discard / reattach / merge_direct，处置幂等。
 
-        queued/running 拒（409）——worker 正在沙箱里干活，收口会把脚下的
-        目录抽走。merge 撞上主树改动时 git 拒绝，错误串如实回（反馈环惯例：
-        改动仍在 agent/<name> 分支可手工处理）。沙箱目录不在了才清
-        task.worktree（merge 失败但 worktree 已被 git 清走的，结果串里带
-        分支名——字段再指旧路径就是假指针）。
+        queued/running 拒（409，现状保留）。处置（含恢复选项裁决）落
+        task.disposition 随任务持久化：重复点击/API 重发/重启后重放返回原
+        处置结果不重复执行；merge/discard/merge_direct 互斥先到先得。预览
+        校验先行：候选已变或验证后改动变化 → 409 要求重新核验。合入成功后
+        才清理；清理失败单独报「清理失败」（status=merged + cleared=false），
+        同 action 重复仅重试清理。conflict/failed 候选保留，重试=再次执行。
         """
         task = _require_task(task_id)
         if task.status in (TASK_QUEUED, TASK_RUNNING):
             raise HTTPException(409, "任务还在跑，收口会把脚下的沙箱抽走——等它停")
+        if body.action not in _SETTLE_ACTIONS:
+            raise HTTPException(400, "action 只能是 merge / discard / reattach / merge_direct")
+        disp = task.disposition
+        if (
+            disp is not None
+            and disp.get("action") == body.action
+            and disp.get("status") in ("merged", "empty")
+            and not _sandbox_cleared(task)
+        ):
+            return _settle_cleanup_retry(task, task_store)   # M11：仅重试清理，不重复 merge
+        replayed = _settle_replay(task, body.action)
+        if replayed is not None:
+            return replayed
         if not task.worktree:
             raise HTTPException(404, "本任务没有沙箱")
         wt = Path(task.worktree)
-        if body.action == "merge":
-            result = commit_and_merge_back(wt, message=f"task: {task.goal.strip()[:60]}")
-        elif body.action == "discard":
-            result = discard_worktree(wt) or "沙箱已丢弃"
-        else:
-            raise HTTPException(400, "action 只能是 merge / discard")
-        if not wt.exists():
+        binding = _task_binding(task)
+        conflict = _metadata_conflict(task, wt) if wt.is_dir() else ""
+        if conflict and body.action != "discard":
+            raise HTTPException(
+                409, f"记录与 Git 元数据冲突（{conflict}）；保留现场，请人工裁决（可 discard 丢弃）"
+            )
+        candidate = (
+            _candidate_of(wt)
+            if wt.is_dir()
+            else (
+                _branch_candidate(binding.repo_root, task.worktree_branch)
+                if binding is not None and task.worktree_branch
+                else ""
+            )
+        )
+        _preview_check(task, body.action, body.candidate or "", candidate)
+        status, detail = _settle_apply(task, body.action, binding)
+        cleared = _sandbox_cleared(task)
+        task.disposition = {
+            "id": uuid.uuid4().hex,
+            "action": body.action,
+            "candidate": candidate,
+            "status": status,
+            "detail": detail,
+            "at": time.time(),
+        }
+        if status == "merged":
+            task.merge_status = "merged"
+            m = re.search(r"commit (\S+)", detail)
+            task.merge_commit = m.group(1) if m is not None else ""
+        elif status == "conflict":
+            task.merge_status = "conflicted"
+        elif status == "discarded":
+            task.merge_status = "discarded"
+        if cleared:
             task.worktree = ""
-            task_store.save(task)
-        return {"result": result, "cleared": not wt.exists()}
+            task.worktree_branch = ""
+        task_store.save(task)
+        return _settle_response(status, detail, cleared)
 
     @app.post("/api/runs/{run_id}/steer", status_code=202)
     def steer(run_id: str, body: SteerRequest):
