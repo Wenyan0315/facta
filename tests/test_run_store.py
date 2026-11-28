@@ -181,3 +181,50 @@ def test_waiting_counts_as_inflight_for_session_lock():
 
     assert isinstance(store.create_if_idle("s1"), str)  # 会话锁不放行
     assert store.active_run() is first
+
+
+class _SlowMeta:
+    """慢盘替身：write_meta 睡 30ms，把 finish 里「翻终态 ↔ 终态事件进队」的
+    竞态窗口撑到必中（CI 慢盘 flake 的根因就是这个窗口被磁盘 IO 拉宽）。"""
+
+    def write_meta(self, run):
+        time.sleep(0.03)
+
+    def append_event(self, run_id, event):
+        pass
+
+
+def test_finish_terminal_event_beats_sentinel_under_concurrent_subscribe():
+    """回归钉（CI flake：客户端末帧停在 run.settling）：subscribe 落在 finish 的
+    「翻终态 ↔ 终态事件进队」之间时，早期哨兵会排到终态事件前面——SSE 生成器
+    的重放段（快照）没它、实时段先见哨兵断流，run.completed 就丢了。修法是
+    finish 整段持锁：subscribe 只能排在它前后。这里用慢盘把旧窗口撑大做确定性
+    交错，断言流内容以 run.completed 收尾（终态事件必须在哨兵之前送达）。"""
+    for _ in range(5):
+        store = RunStore(log=_SlowMeta())
+        run = store.create(session_id="s1")
+        run.emit("run.started", {})
+
+        finisher = threading.Thread(target=run.finish, args=(STATUS_COMPLETED,))
+        finisher.start()
+        time.sleep(0.01)   # 让 finish 先进 write_meta 的慢盘窗口（旧 bug 的落点）
+
+        # 与 SSE 生成器同款两段式消费：先快照重放、再实时段到哨兵为止
+        q = run.subscribe()
+        last = 0
+        out = []
+        for ev in list(run.events):
+            if ev.seq > last:
+                out.append(ev.type)
+                last = ev.seq
+        while True:
+            ev = q.get(timeout=3)
+            if ev is None:
+                break
+            if ev.seq <= last:
+                continue
+            out.append(ev.type)
+            last = ev.seq
+        finisher.join(timeout=3)
+
+        assert out[-1] == "run.completed"   # 终态事件必须在哨兵之前送达

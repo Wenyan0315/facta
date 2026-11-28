@@ -101,7 +101,9 @@ class Run:
     # 跨线程，059 起子 agent 的 sub.* 过程事件也常态跨线程）。_next_seq 是
     # `self._seq += 1` 非原子，并发下会重号（seq 是排序/去重/重放的位置键，
     # 重号=客户端可能漏读一条）。修共享收口点一次，不在调用侧各自加锁。
-    _emit_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # RLock：finish 在锁内串起「翻终态 → emit → 哨兵」需要重入 emit（059 原子性
+    # 不变，只是终态序列整体纳入临界区）
+    _emit_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     # ADR 115 steering 信箱锁：「取出」与「置空」必须原子（ide_ctx 闭包锁同款
     # 理由），且与「投递」互斥——防止 append 与 take 交错丢件。独立于
     # _emit_lock：信箱不发事件，两把锁各管各的临界区。
@@ -116,7 +118,8 @@ class Run:
     # M5 承诺件 a：Run 明细落盘缝（RunLog；None=不持久化，直造 Run 的单测同旧）
     _log: Any = field(default=None, repr=False)
     # M5 承诺件 b：事件外发缝（app 层注入总线转发）。守卫在 emit 收口点——
-    # 回调失败不拖垮 run_turn；回调不得回发本 Run 事件（_emit_lock 非重入）
+    # 回调失败不拖垮 run_turn；回调不得回发本 Run 事件（嵌套 emit 会撕破
+    # 「seq 分配到广播」的原子序，RLock 能跑但语义不许）
     on_event: Callable[[Run, RunEvent], None] | None = field(default=None, repr=False)
 
     def _next_seq(self) -> int:
@@ -158,29 +161,41 @@ class Run:
         run.completed 终态事件，补发哨兵后流可正常结束。
         """
         q: queue.Queue = queue.Queue()
-        self._subscribers.append(q)
-        if self.status in _TERMINAL:
-            q.put(None)
+        with self._emit_lock:
+            self._subscribers.append(q)
+            if self.status in _TERMINAL:
+                q.put(None)   # 与 finish 的「翻终态→终态事件→哨兵」同锁排队：
+                              # 要么排在整段之前（快照重放拿到终态事件），
+                              # 要么排在整段之后（早期哨兵 + 快照已含终态事件）
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
-        """SSE 连接断开时退订（generator finally 调用）；不退则队列引用滞留。"""
-        if q in self._subscribers:
-            self._subscribers.remove(q)
+        """SSE 连接断开时退订（generator finally 调用）；不退则队列引用滞留。
+        与广播同锁：否则 emit 的迭代可能踩到并发 remove（跳件/炸迭代）。"""
+        with self._emit_lock:
+            if q in self._subscribers:
+                self._subscribers.remove(q)
 
     def finish(self, status: str) -> None:
         """推进到终态并通知所有订阅者结束。只有一个终态——重复调用不覆盖。
 
         终态事件（run.completed/failed/cancelled）也进事件流：客户端靠它渲染
         最终结果，不能只靠「流断了」来推断成功还是失败。
+
+        整段持 _emit_lock（RLock，emit 同锁可重入）：「翻终态 → 终态事件进队
+        → 哨兵进队」必须对 subscribe 原子。否则 subscribe 落在翻状态与事件
+        进队之间时，早期哨兵排到终态事件前面——重放段（快照）没它、实时段
+        先见哨兵断流，run.completed 就丢了（CI 慢盘抓到的 flake：write_meta
+        的磁盘 IO 把这个纳秒窗口拉成了毫秒级）。
         """
         if self.status not in _TERMINAL:
-            self.status = status
-            if self._log is not None:
-                self._log.write_meta(self)   # M5：终版元快照先进盘（status/preview 就位）
-            self.emit(f"run.{status}", {})   # 终态事件先进流（广播给全部订阅者）
-            for q in list(self._subscribers):
-                q.put(None)            # 再 sentinel 结束流（只在首次终态推进时发一次）
+            with self._emit_lock:
+                self.status = status
+                if self._log is not None:
+                    self._log.write_meta(self)   # M5：终版元快照先进盘（status/preview 就位）
+                self.emit(f"run.{status}", {})   # 终态事件先进流（广播给全部订阅者）
+                for q in list(self._subscribers):
+                    q.put(None)            # 再 sentinel 结束流（只在首次终态推进时发一次）
 
     def request_cancel(self) -> bool:
         """请求取消：只在尚未终态时有效，终态后取消是无效操作。"""
