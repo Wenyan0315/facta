@@ -178,8 +178,8 @@ Honest about current boundaries (M1–M4 ledger; nothing undelivered is claimed 
 
 | 边界 / Boundary | 说明 / Notes |
 |---|---|
-| Run 明细不持久 / Run details are ephemeral | 任务清单持久在 `data/tasks/`，Run 明细只活在服务进程内，重启后下钻不可用 / tasks persist; per-Run detail lives only in the serving process |
-| 任务面板 20s 轮询 / Tasks panel polls every 20s | 无任务级 SSE；确认弹窗靠断线重放语义兜底 / no task-level SSE; confirm dialogs rely on replay-on-reconnect |
+| Run 不做断点续跑 / No mid-run resume | Run 明细已落盘可回放（`data/tasks/runs/`）；但服务被杀留下的孤儿轮只以 `interrupted` 收口，不自动接着跑 / per-Run detail persists and replays; orphaned runs end as `interrupted` — nothing resumes them |
+| 任务事件续传有窗口 / Task-event replay window is bounded | 断线重连超出发射端 500 条环形缓冲就退化为全量快照自愈（幂等，大列表会闪一下）；任务面事件本身不落盘 / reconnects beyond the 500-event ring fall back to an idempotent full snapshot; task events themselves are not persisted |
 | 扩展不上 marketplace / Extension not on marketplace | VS Code 壳本地 `vsce package` 手工安装 / install the VS Code host locally via `vsce package` |
 | 无 CHANGELOG.md / No CHANGELOG.md | 变更历史真值源 = ADR + GitHub Release notes / change history lives in ADRs + GitHub Release notes |
 

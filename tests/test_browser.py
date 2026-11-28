@@ -297,9 +297,9 @@ def task_server(tmp_path_factory):
 def _wait_task_status(page, status: str, tries: int = 10) -> None:
     """等到任务卡转到某状态（最多 tries × 4s）。
 
-    面板是 20s 轮询（118 §2 负决策：不做任务级 SSE），干等一轮太慢——
-    每 4s 没等到就 reload 逼一次即时刷新。注意别「reload 完立刻查 DOM」：
-    数据还在飞，查到的永远是「加载中」，会活锁（本测试踩过）。
+    M5 承诺件 b 起面板是 SSE 推送（状态翻转即时可见）；这里每 4s 没等到就
+    reload 兜底一次（防断流/丢事件）。注意别「reload 完立刻查 DOM」：数据
+    还在飞，查到的永远是「加载中」，会活锁（本测试踩过）。
     """
     sel = f'[data-testid="task-card"][data-status="{status}"]'
     for _ in range(tries):

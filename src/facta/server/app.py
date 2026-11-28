@@ -19,6 +19,7 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,7 @@ from facta.orchestrator.task import (
 from facta.orchestrator.task import to_dict as task_to_dict
 from facta.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, WORKSPACE_ROOT, user_memory_path
 from facta.projects import ProjectsManifest, resolve_learned_dir
+from facta.server.run_log import RunLog
 from facta.server.run_store import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -84,7 +86,9 @@ from facta.server.run_store import (
     STATUS_RUNNING,
     STATUS_WAITING,
     Run,
+    RunEvent,
     RunStore,
+    TaskBus,
 )
 from facta.server.sse import encode_heartbeat, encode_sse
 from facta.skills import WRITE_AUTH_GUARD
@@ -102,7 +106,56 @@ _EVENT_MAP = {
     "error": "error",
 }
 
-_HEARTBEAT_SECONDS = 15.0   # 无事件时的保活间隔（模型推理可能几十秒静默）
+# SSE 空闲切片（秒）：每片吐一个保活注释帧。两个作用——(1) 进程关停/客户端
+# 断开的取消是「延迟交付」的（iterate_in_threadpool 要等生成器下次 yield 才
+# 落地），1s 一片把关停阻塞压到 ≤1s（此前整段 q.get(15s) 会卡住 SIGTERM 收口，
+# 浏览器冒烟的 proc.wait(5) 实锤过）；(2) 顺带保活。事件到达是零延迟（q.get
+# 阻塞即返），注释帧只有空闲时才出现。
+_IDLE_SLICE_SECONDS = 1.0
+
+
+def task_event_stream(
+    bus: TaskBus,
+    last_seq: int,
+    snapshot: Callable[[], dict],
+) -> Iterator[str]:
+    """任务级 SSE 的帧生成器（M5 承诺件 b）：快照/续传二选一 + 实时增量。
+
+    last_seq < 0 = 新鲜连接；≥ 0 = Last-Event-ID 断线续传。续传段能被总线
+    环形缓冲覆盖 → 只补缺的增量；覆盖不了（断层）→ 先发 snapshot 全量快照
+    自愈。增量载荷全是全量状态（幂等可重放）：重复应用无害，漏一条等下一条/
+    下一次快照修复。抽成模块级生成器的原因：Starlette TestClient 的传输层
+    缓冲整个响应体（无限流必挂），帧语义必须能离线单测；HTTP 面只剩「解析
+    Last-Event-ID + 挂 StreamingResponse」两行胶水。
+
+    常驻流：不设终态，客户端自行断开（finally 退订防泄漏）；空闲切片见
+    _IDLE_SLICE_SECONDS 注释（关停/断开的取消延迟 ≤1s）。
+    """
+    # 先订阅再取续传段/建快照（per-Run SSE 同款竞态修复）：订阅后到达的
+    # 事件必进 q；快照可能与实时段重复，靠幂等 + seq 去重。
+    q = bus.subscribe()
+    try:
+        replay = bus.since(last_seq) if last_seq >= 0 else None
+        if replay is None:
+            last = bus.seq   # 先读哨兵再建快照：之后的事件必走实时段
+            yield encode_sse("", RunEvent(seq=0, type="snapshot", data=snapshot()))
+        else:
+            last = last_seq
+            for ev in replay:
+                yield encode_sse("", ev)
+                last = ev.seq
+        while True:
+            try:
+                ev = q.get(timeout=_IDLE_SLICE_SECONDS)
+            except queue.Empty:
+                yield encode_heartbeat()   # 空闲切片保活帧（EventSource 忽略注释）
+                continue
+            if ev.seq <= last:   # 快照/续传段已覆盖，去重
+                continue
+            yield encode_sse("", ev)
+            last = ev.seq
+    finally:
+        bus.unsubscribe(q)
 
 _TIME_RE = re.compile(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})")
 
@@ -776,6 +829,59 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     # ——每 app 实例一份，测试天然隔离（ide_ctx 同款理由）。
     # 叫 task_store 不叫 tasks：/tasks 前端页路由函数已占了后者（F811）。
     task_store = TaskStore()
+    # ---- M5 承诺件 a+b：Run 明细落盘 + 任务级事件总线（推送/续传）----
+    # 落盘根随 task_store 走（data/tasks/runs/，挂账口径；测试隔离同一把钥匙）。
+    # store 可能是注入的（测试），两缝晚绑定挂上；都在拉起 worker 之前——
+    # 启动期的 Run 创建/状态迁移就要进盘、进总线。
+    run_log = RunLog(task_store.root / "runs")
+    store.log = run_log
+    bus = TaskBus()
+
+    def _task_view(task: Task) -> dict:
+        """Task 视图：序列化 + waiting-approval 派生映射（§1：不落 Task 字段）。
+
+        在飞 Run 挂在 L2 确认上时把状态显示成 waiting-approval——那是 Run
+        的状态，Task 真值仍是 running；映射只在读侧现推，不双写状态机。
+        M5：定义从端点段上移——外发缝（_bus_forward/_task_updated）在启动
+        期就要用它，放端点段会踩「worker 先于定义跑起来」的 NameError 竞态。
+        """
+        d = task_to_dict(task)
+        active = store.active_run(task.session_id)
+        if (
+            d["status"] == TASK_RUNNING
+            and active is not None
+            and active.task_id == task.task_id
+            and active.status == STATUS_WAITING
+        ):
+            d["status"] = "waiting-approval"
+        return d
+
+    def _bus_forward(run: Run, ev: RunEvent) -> None:
+        """Run 事件 → 任务总线（M5 承诺件 b）：只转发状态可见的少数类型。
+
+        text.delta / tool.* 等过程事件不进任务面——任务卡要的是状态翻转
+        （Run 摘要、确认即时化），不是转录。confirm.* 顺带推 task.updated：
+        确认挂起不落 Task 字段（waiting-approval 是派生映射），不推前端就
+        要等下一次 save 才看见「待确认」——那正是 20s 轮询时代的毛刺。
+        """
+        if ev.type in ("run.started", "run.completed", "run.failed", "run.cancelled"):
+            bus.emit("run.updated", {
+                "run_id": run.run_id,
+                "session_id": run.session_id,
+                "status": run.status,
+                "title": run.title,
+                "preview": run.preview,
+            })
+        elif ev.type in ("confirm.request", "confirm.resolved") and run.task_id:
+            task = task_store.get(run.task_id)
+            if task is not None:
+                bus.emit("task.updated", _task_view(task))
+
+    def _task_updated(task: Task) -> None:
+        bus.emit("task.updated", _task_view(task))
+
+    store.on_run_event = _bus_forward
+    task_store.on_save = _task_updated
     # ADR 117 §1 启动恢复：非终态任务按语义回落（running 干净→queued 且
     # next_text 清空代打；熔断/取消不因重启洗白）+ 触发点③首拍调度——
     # 回落的排队任务立刻有机会被拉起（requeue_on_boot 幂等，重启重跑无副作用）。
@@ -793,6 +899,7 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     ide_ctx: dict[str, str] | None = None
     ide_lock = threading.Lock()
     app = FastAPI(title="Facta")
+    app.state.task_bus = bus   # M5：总线挂 state（可观测缝——测试断言推送序列）
     static_dir = Path(__file__).parent / "static"
 
     def _claim_ide_context(body: CreateRunRequest) -> str:
@@ -938,6 +1045,7 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         nonlocal ide_ctx
         with ide_lock:
             ide_ctx = {"path": body.path, "selection": body.selection}
+        bus.emit("ide.updated", {})   # M5：信箱进推送面（前端不再为此轮询）
         return {"ok": True}
 
     @app.get("/api/ide/context")
@@ -965,6 +1073,7 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         nonlocal ide_ctx
         with ide_lock:
             ide_ctx = None
+        bus.emit("ide.updated", {})   # M5：丢弃也推（信箱清空即刻可见）
         return {"deleted": True}
 
     @app.get("/api/runs/{run_id}/events")
@@ -992,12 +1101,13 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
                         yield encode_sse(run.run_id, ev)
                         last = ev.seq   # 更新哨兵，防实时段重复发
 
-                # 实时读：阻塞 + 心跳保活；None 哨兵 = Run 结束。
+                # 实时读：阻塞 + 空闲切片保活（_IDLE_SLICE_SECONDS：断开/关停
+                # 的取消延迟 ≤1s）；None 哨兵 = Run 结束。
                 # 广播模型（评审修复轮）：每连接独立队列；断开必须退订
                 # （finally 兜底——客户端断连时 generator 被 close，此处清理）
                 while True:
                     try:
-                        ev = q.get(timeout=_HEARTBEAT_SECONDS)
+                        ev = q.get(timeout=_IDLE_SLICE_SECONDS)
                     except queue.Empty:
                         yield encode_heartbeat()
                         continue
@@ -1150,22 +1260,8 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             raise HTTPException(404, "task not found")
         return task
 
-    def _task_view(task: Task) -> dict:
-        """Task 视图：序列化 + waiting-approval 派生映射（§1：不落 Task 字段）。
-
-        在飞 Run 挂在 L2 确认上时把状态显示成 waiting-approval——那是 Run
-        的状态，Task 真值仍是 running；映射只在读侧现推，不双写状态机。
-        """
-        d = task_to_dict(task)
-        active = store.active_run(task.session_id)
-        if (
-            d["status"] == TASK_RUNNING
-            and active is not None
-            and active.task_id == task.task_id
-            and active.status == STATUS_WAITING
-        ):
-            d["status"] = "waiting-approval"
-        return d
+    # _task_view（Task 视图 + waiting-approval 派生映射）定义已上移至 M5
+    # 外发缝接线处——启动期的推送就要用它（见 create_app 开头）。
 
     @app.get("/api/skills")
     def list_skills():
@@ -1233,6 +1329,41 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     @app.get("/api/tasks")
     def list_tasks():
         return [_task_view(t) for t in task_store.list()]
+
+    @app.get("/api/tasks/events")
+    def task_events(request: Request):
+        """任务级 SSE（M5 承诺件 b）：快照 + 增量推送 + 断线续传，取代 20s 轮询。
+
+        HTTP 面只有「解析 Last-Event-ID + 挂流」两件事；帧语义（快照/续传
+        二选一、seq 去重、心跳）全在 task_event_stream——TestClient 传输层
+        缓冲整个响应体，无限流在它面前必挂，帧语义离线单测、HTTP 走真机。
+        """
+        raw_last = request.headers.get("last-event-id", "") or ""
+        try:
+            last = int(raw_last)
+        except ValueError:
+            last = -1
+
+        def _snapshot() -> dict:
+            return {
+                "tasks": [_task_view(t) for t in task_store.list()],
+                "runs": [
+                    {
+                        "run_id": r.run_id,
+                        "session_id": r.session_id,
+                        "status": r.status,
+                        "title": r.title,
+                        "preview": r.preview,
+                    }
+                    for r in store.list_runs()
+                ],
+            }
+
+        return StreamingResponse(
+            task_event_stream(bus, last, _snapshot),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/tasks/{task_id}")
     def get_task(task_id: str):

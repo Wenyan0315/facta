@@ -6,16 +6,17 @@
 // ② 声明式列表：tasks.map(...) 描述「列表长什么样」；
 // ③ JSX 文本节点自动转义（goal/报错串都来自外部）。
 //
-// 118 §2 负决策：**不新建任务级 SSE**——面板要的状态翻转（queued→running→…）
-// 都是低频粗粒度，20s 轮询够用；实时性留给「展开时才订阅」的既有 per-Run SSE
-// （RunDetail 的 plan.*、ConfirmCard 的 confirm.*），订阅数 = 展开数。
+// M5 承诺件 b：任务级 SSE 上线，118 §2「不新建任务级 SSE」的负决策翻案——
+// 任务卡状态/确认/账单改走推送（task.updated/run.updated 增量 + snapshot
+// 全量自愈 + Last-Event-ID 断线续传），20s 轮询降为 60s 兜底心跳（侧料
+// 技能/项目/版本顺带刷新；IDE 信箱走 ide.updated 推送）。
 import { useEffect, useState } from "preact/hooks";
 import { fetchIdeContext, fetchProjects, fetchRuns, fetchSkills, fetchStatus, fetchTasks } from "./api.js";
 import NewTaskForm from "./NewTaskForm.jsx";
 import ProjectsPanel from "./ProjectsPanel.jsx";
 import TaskCard from "./TaskCard.jsx";
 
-const REFRESH_MS = 20000;   // 118 §2：沿用本页既有轮询节奏，不为 Task 新造通道
+const FALLBACK_MS = 60000;   // 兜底心跳（SSE 是主通道；断线自愈靠 onopen 重拉 + 快照）
 
 export default function App() {
   const [tasks, setTasks] = useState(null);
@@ -34,13 +35,13 @@ export default function App() {
       setRuns(r);
       setError(null);
     } catch (e) {
-      // 失败态不覆盖旧数据（瞬时抖动下一次轮询自愈），只如实报一行
+      // 失败态不覆盖旧数据（下一次心跳/SSE 自愈），只如实报一行
       setError(e.message);
     }
   };
 
-  // 侧料：技能表 / 项目表 / IDE 信箱 / 版本。信箱要跟着轮询走——壳里「附上当前
-  // 上下文」可能发生在面板已经打开之后（118 §4.3 预填的动线）。
+  // 侧料：技能表 / 项目表 / IDE 信箱 / 版本。信箱另有 ide.updated 推送
+  // （壳里「附上当前上下文」可能发生在面板已经打开之后，118 §4.3 的动线）。
   const refreshSide = async () => {
     const [sk, pj, ide, st] = await Promise.allSettled([
       fetchSkills(), fetchProjects(), fetchIdeContext(), fetchStatus(),
@@ -53,16 +54,46 @@ export default function App() {
 
   useEffect(() => {
     let alive = true;   // 竞态守卫：卸载后的迟到响应不再 setState
-    const tick = () => {
+
+    // 增量事件载荷是全量状态（task.updated=整个任务视图），按 id 幂等替换
+    const upsert = (list, item, key) => {
+      const i = list.findIndex((x) => x[key] === item[key]);
+      return i >= 0 ? list.map((x) => (x[key] === item[key] ? item : x)) : [item, ...list];
+    };
+    const onEnvelope = (apply) => (e) => {
+      if (!alive) return;
+      try {
+        apply(JSON.parse(e.data).data || {});
+      } catch (err) {
+        console.warn("[tasks] 坏事件忽略：", e.type, err);
+      }
+    };
+
+    refreshList();
+    refreshSide();
+
+    const es = new EventSource("/api/tasks/events");
+    es.addEventListener("snapshot", onEnvelope((d) => {
+      setTasks(d.tasks || []);
+      setRuns(d.runs || []);
+      setError(null);
+    }));
+    es.addEventListener("task.updated", onEnvelope((d) =>
+      setTasks((prev) => upsert(prev ?? [], d, "task_id"))));
+    es.addEventListener("run.updated", onEnvelope((d) =>
+      setRuns((prev) => upsert(prev, d, "run_id"))));
+    es.addEventListener("ide.updated", () => refreshSide());
+    es.onopen = () => { if (alive) refreshList(); };   // 断线重连自愈：重拉全量（快照随后也会到）
+
+    const timer = setInterval(() => {
       if (alive) {
         refreshList();
         refreshSide();
       }
-    };
-    tick();
-    const timer = setInterval(tick, REFRESH_MS);
+    }, FALLBACK_MS);
     return () => {
       alive = false;
+      es.close();
       clearInterval(timer);
     };
   }, []);
