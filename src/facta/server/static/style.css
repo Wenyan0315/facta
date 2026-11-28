@@ -288,6 +288,7 @@ body {
 .task-badge.pending { background: var(--bg); color: var(--muted); }
 .task-badge.failed { background: #fee2e2; color: var(--danger); }
 .task-badge.cancelled { background: #f3e8ff; color: #7e22ce; }
+.task-badge.interrupted { background: #f3f4f6; color: #6b7280; }   /* M5：孤儿轮（服务被杀的未收尾轮次） */
 
 /* S5c 计划面板（RunDetail：任务条目展开态） */
 .task-head { cursor: pointer; user-select: none; }   /* 可展开 */

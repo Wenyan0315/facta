@@ -22,6 +22,7 @@ billing 在连续续跑期间永远不落盘，与「可追溯」自相矛盾，
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -32,6 +33,8 @@ from typing import Any
 
 from facta.memory.plan import StepStatus
 from facta.paths import TASKS_DIR
+
+logger = logging.getLogger(__name__)
 
 # ---- 保险丝常量（§3；env FACTA_* 可覆写，与 _STUCK_LIMIT 同款就位）----
 
@@ -181,6 +184,10 @@ class TaskStore:
         # ADR 117 §1：调度锁——护「扫描 queued + 置 running + 起 worker」的
         # 原子性（防双起）。住实例：测试每 app 一把天然隔离（ide_lock 同款）。
         self.sched_lock = threading.Lock()
+        # M5 承诺件 b：状态迁移外发缝（app 层注入任务总线转发）。save 是
+        # 「状态迁移 + Run 边界」的唯一落盘收口点，挂这里 = 任务视图每次
+        # 变化都有推送。守卫在 save 内（同 Run.emit 外发缝的收口点哲学）。
+        self.on_save: Any = None
 
     def _path(self, task_id: str) -> Path:
         # task_id 是程序生成的 uuid hex，不像会话 id 那样有自由字符串入口；
@@ -251,6 +258,13 @@ class TaskStore:
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(asdict(task), ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, path)
+        # M5 承诺件 b：落盘成功后外发（先真值源后投影——推送丢了顶多少刷
+        # 一次 UI，落盘不能被外发缝的故障牵连）。守卫在收口点。
+        if self.on_save is not None:
+            try:
+                self.on_save(task)
+            except Exception:   # noqa: BLE001  # 外发失败不回吞落盘
+                logger.warning("任务状态外发失败（task_id=%s）", task.task_id, exc_info=True)
 
 
 # ---- 续跑判定（§3）与 done 判据（评审问题 4）----
