@@ -19,8 +19,9 @@ from facta.tools.registry import ToolRegistry
 # S6b 并行 spawn：唯一「设计上可证明安全」的并行工具（独立 Session +
 # worktree 隔离、IO-bound）。084 起扩展到只读工具——「模型常期待先读 A 再
 # 决定读 B」对同一轮并列点菜不成立（决定已做完，无顺序依赖），只读工具
-# 无副作用、无顺序依赖，与 spawn 一样可并行（可并行判定见 _split_tool_batches）
-_SPAWN_TOOL = "spawn_subagent"
+# 无副作用、无顺序依赖，与 spawn 一样可并行（可并行判定见 _split_tool_batches）。
+# 线五②：fan_out_subagents 同款安全（内部自并行、无 worktree 模式），并列点菜可并行
+_PARALLEL_TOOLS = frozenset({"spawn_subagent", "fan_out_subagents"})
 
 
 def _forward_plan_events(board: PlanBoard, on_event: Callable[[str, dict], None] | None) -> None:
@@ -41,14 +42,14 @@ def _split_tool_batches(
     """把一轮 tool_calls 切成批：连续可并行段（spawn 或只读）并一批
     （True），其余逐个 = 串行批（False）。
 
-    可并行 = 名字 == `_SPAWN_TOOL` 或 `registry.get(name).is_readonly`
+    可并行 = 名字在 `_PARALLEL_TOOLS`（spawn 两件）或 `registry.get(name).is_readonly`
     （084）：只读工具无副作用、无顺序依赖，同一轮并列点菜可并行。
     未注册/未声明只读的工具按写类串行（保守方向）。结果按批顺序回填，
     模型看到的顺序与点菜顺序一致。
     """
 
     def _parallel(name: str) -> bool:
-        if name == _SPAWN_TOOL:
+        if name in _PARALLEL_TOOLS:
             return True
         tool = registry.get(name)
         return tool is not None and tool.is_readonly

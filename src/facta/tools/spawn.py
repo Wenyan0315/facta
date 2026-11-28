@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from facta.core.llm import LLM
@@ -63,6 +64,8 @@ from facta.tools.worktree import (
 # 禁止清单（程序侧硬编码，显式指定也不放行）：
 # - spawn_subagent / spawn_step（S6c）：递归防护（子 agent 不再派子 agent，
 #   也不派发计划步骤——它是执行者不是编排者，规划深度=2 层封顶）
+# - fan_out_subagents（线五②）：递归防护同款——fan-out 是编排位，子 agent
+#   拿到它就成了三级编排，2 层封顶不破
 # - 计划三件：分派语义是「主 agent 已规划好，子 agent 执行」；子 agent 再
 #   规划=规划套规划，主 plan 事件流被稀释（挂触发信号：真实使用出现
 #   「子任务本身够复杂需要二级计划」再开，届时 S6 编排也该上了）
@@ -72,18 +75,34 @@ from facta.tools.worktree import (
 #   messages——默认子集含它们=「子上下文看不到本对话」的 prompt 承诺被
 #   工具层击穿（子 agent 能检索父会话全部内容，噪声隔离反向泄漏）
 _FORBIDDEN = frozenset({
-    "spawn_subagent", "spawn_step", "make_plan", "update_plan_step", "finish_plan",
+    "spawn_subagent", "spawn_step", "fan_out_subagents",
+    "make_plan", "update_plan_step", "finish_plan",
     "sync_graph", "search_history", "read_history",
 })
 
 DEFAULT_ROUNDS = 3
 MAX_ROUNDS = 10
+MAX_FANOUT = 8   # 一次 fan-out 的任务数上限：防模型点菜五十件把 LLM 预算打爆
+
+# 线五②「只回传摘要」的结构上限：回灌主上下文的结论/改动摘要超长即截断
+# （纪律变结构——细节全文走 sub.* 事件流给人看、落盘文件给指针，不进主底片）
+_CONCLUSION_CAP = 2000
+_CHANGES_CAP = 800
+
+
+def _brief(text: str, cap: int = _CONCLUSION_CAP) -> str:
+    """超长截断 + 指针化：细节不进主上下文（编排者禁读细节的执行面）。"""
+    if len(text) <= cap:
+        return text
+    return text[:cap] + "…〔已截断：细节见 sub.* 事件流或子任务落盘文件，不进主上下文〕"
 
 TASK_TEMPLATE = (
     "你是被派来执行一项具体任务的专项执行员。任务：{task}\n"
     "只做这一件事，用可用的工具把它做完；"
     "做完后用 2-5 句话汇报结论（做了什么、结果如何、关键发现），"
     "不要寒暄、不要复述任务、不要展开中间过程。"
+    "长产出（全量报告/日志/清单）写进文件，结论里给文件路径作指针，"
+    "不要把细节全文贴进结论。"
 )
 
 # 059 子事件命名映射：run_turn 的五种事件 → 点分 sub.* 命名空间。
@@ -155,7 +174,8 @@ def _worktree_finalization(
     else:
         discard_worktree(wt)
         outcome = "用户未批准合回（或无确认通道），改动已整棵丢弃，主工作区未受影响"
-    return f"{conclusion}\n〔文件改动〕\n{changes}\n〔处理〕{outcome}"
+    # 改动摘要截断（线五②）：完整清单只进确认弹窗给人看，回灌结论的是摘要
+    return f"{conclusion}\n〔文件改动〕\n{_brief(changes, _CHANGES_CAP)}\n〔处理〕{outcome}"
 
 
 def spawn_subagent(
@@ -242,7 +262,7 @@ def spawn_subagent(
         # 在协作式取消检查点上响应取消，不再只等主循环边界
     )
     if result is RunResult.COMPLETED and reply is not None:
-        conclusion = reply.content or "（子任务完成，但未产出文本结论）"
+        conclusion = _brief(reply.content or "（子任务完成，但未产出文本结论）")
     elif result is RunResult.CANCELLED:
         conclusion = "子任务被取消，未产出结论"
     else:
@@ -252,6 +272,55 @@ def spawn_subagent(
     if wt_dir is not None:
         return result, _worktree_finalization(wt_dir, task, conclusion, confirm)
     return result, conclusion
+
+
+def fan_out_subagents(
+    tasks: list[str],
+    *,
+    llm: LLM,
+    registry: ToolRegistry,
+    tools: list[str] | None = None,
+    max_rounds: int = DEFAULT_ROUNDS,
+    confirm: Callable[[str, dict], bool] | None = None,
+    on_event: Callable[[str, dict], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> str:
+    """线五② fan-out 聚合：一次派 N 件互不依赖的子任务并行跑，聚合结论回主线。
+
+    与「同轮并列点菜多个 spawn_subagent」的区别是聚合位在程序侧：一次调用
+    一条结果，按任务序号确定性聚合（不靠模型自己数数对位），每条结论都过
+    「只回传摘要」闸（_brief，spawn_subagent 内已截断）。复用 spawn_subagent
+    全套（上下文隔离/工具子集/确认透传/事件透传/取消透传/失败反馈环）。
+
+    刻意不做 worktree 模式：fan-out 定位是检索/整理/验证类杂活的并行位；
+    改文件的活走 spawn_subagent(worktree=True) 或任务沙箱，改动合并要过
+    确认缝——N 个并行弹窗抢单槽位确认是自找的竞态。
+    """
+    valid = [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
+    if not valid:
+        return "错误：tasks 不能为空——给至少一件子任务"
+    if len(valid) > MAX_FANOUT:
+        return f"错误：一次最多 fan-out {MAX_FANOUT} 件（收到 {len(valid)} 件）——拆批再派"
+
+    def _one(task: str) -> tuple[RunResult, str]:
+        try:
+            return spawn_subagent(
+                task, llm=llm, registry=registry, tools=tools,
+                max_rounds=max_rounds, confirm=confirm, on_event=on_event,
+                should_cancel=should_cancel,
+            )
+        except Exception as exc:   # spawn 自身兜底之外的意外（与 _run_parallel 同款防线）
+            return RunResult.FAILED, f"错误：子任务执行异常（{exc}）"
+
+    with ThreadPoolExecutor(max_workers=len(valid)) as ex:
+        results = [f.result() for f in [ex.submit(_one, t) for t in valid]]
+
+    ok = sum(1 for status, _ in results if status is RunResult.COMPLETED)
+    lines = [f"〔fan-out 聚合：{len(valid)} 件，{ok} 完成、{len(valid) - ok} 未完成〕"]
+    labels = {RunResult.COMPLETED: "完成", RunResult.CANCELLED: "取消", RunResult.FAILED: "失败"}
+    for i, ((status, conclusion), task) in enumerate(zip(results, valid, strict=True), start=1):
+        lines.append(f"[{i}/{len(valid)}] {labels[status]}｜{task[:60]}\n{conclusion}")
+    return "\n".join(lines)
 
 
 def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
@@ -278,8 +347,8 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "max_rounds 是其工具循环预算（默认 3）。注意：子上下文没有本对话的历史。"
             "worktree=True 时子上下文在独立的 git worktree 沙箱里改文件——改动不碰"
             "当前工作区，跑完经用户确认后合回（拒绝则整棵丢弃）。"
-            "有多件互不依赖的杂活要同时做时，可一次调用多个 spawn_subagent"
-            "（同一轮回复里并列点菜），它们会并行执行。"
+            "有多件互不依赖的杂活要同时做时，用 fan_out_subagents 一次派发并聚合结论"
+            "（或一次调用多个本工具并列点菜，它们会并行执行）。"
         ),
         parameters={
             "type": "object",
@@ -299,6 +368,49 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         receives_confirm=True,   # S5c：确认缝透传给子执行流（registry 注入 confirm 参数）
         receives_event=True,     # 059：事件缝透传（registry 注入 event 参数 → sub.* 进父流）
         receives_cancel=True,    # 082 ①：取消缝透传（registry 注入 should_cancel → 子 run_turn）
+    ))
+
+    def _fanout(tasks: list[str], tools: list[str] | None = None,
+                max_rounds: int = DEFAULT_ROUNDS,
+                confirm=None, event=None, should_cancel=None) -> str:
+        return fan_out_subagents(
+            tasks, llm=sub_llm, registry=registry, tools=tools,
+            max_rounds=max_rounds, confirm=confirm, on_event=event,
+            should_cancel=should_cancel,
+        )
+
+    registry.register(Tool(
+        name="fan_out_subagents",
+        description=(
+            "一次派发多件互不依赖的子任务并行执行，只回传聚合结论"
+            "（每件一段：成败 + 结论摘要，中间过程不打扰本对话）。"
+            "适合「同一件事的多个独立切面」：并行检索、逐项验证、批量整理。"
+            "tasks 是子任务书清单（每条自包含，子上下文看不到本对话）；"
+            "tools/max_rounds 与 spawn_subagent 同义。"
+            "注意：只适合杂活——要改文件的活用 spawn_subagent(worktree=True) 或任务沙箱；"
+            "子上下文没有本对话的历史。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "子任务书清单（每条自包含：做什么、产出什么结论；互不依赖）",
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "各子上下文共用的工具名清单（缺省=全部可用工具）",
+                },
+                "max_rounds": {"type": "integer", "description": "各子任务的工具循环预算（默认 3，上限 10）"},
+            },
+            "required": ["tasks"],
+        },
+        func=_fanout,
+        receives_confirm=True,   # 子任务高危工具的确认缝透传（与 spawn 同款）
+        receives_event=True,     # 各子任务过程以 sub.* 进父流（带 task 摘要区分）
+        receives_cancel=True,    # 取消透传：fan-out 整批响应协作式取消
     ))
 
     # ---- S6c spawn_step：计划步骤派发（真编排的焊缝）----
