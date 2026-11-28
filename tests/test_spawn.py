@@ -10,6 +10,7 @@
 """
 
 import json
+import time
 
 from facta.core.llm import LLM, LLMUnavailableError, ScriptedLLM
 from facta.core.types import Message
@@ -18,7 +19,7 @@ from facta.orchestrator.agent import Agent
 from facta.orchestrator.loop import RunResult, run_turn
 from facta.tools.context import ToolContext
 from facta.tools.registry import Tool, ToolRegistry
-from facta.tools.spawn import register_spawn_tools, spawn_subagent
+from facta.tools.spawn import fan_out_subagents, register_spawn_tools, spawn_subagent
 
 
 def _call(name: str, args: dict) -> dict:
@@ -365,3 +366,102 @@ def test_rounds_clamped():
 
     # 99 → 10：菜单照常递（只验证不炸 + 子链收到菜单；钳制值由内部 min 保证）
     assert sub_llm.tool_menus[0] is not None
+
+
+# ---------- 线五② fan-out 聚合 + 只回传摘要收严 ----------
+
+
+class _EchoLLM(LLM):
+    """逐调用确定性的假模型：回显任务书（最后一条 user 消息）。
+
+    并发安全（fan-out 并行共用一个实例）：只有只读 self.delay + 局部变量。
+    """
+
+    name = "echo"
+
+    def __init__(self, delay: float = 0.0) -> None:
+        self.delay = delay
+
+    def generate(self, messages, tools=None) -> Message:
+        if self.delay:
+            time.sleep(self.delay)
+        task = next((m.content for m in reversed(messages) if m.role == "user"), "?")
+        return Message(role="assistant", content=f"完成[{task}]")
+
+
+def test_fanout_aggregates_in_order_with_header():
+    # 一次派两件：聚合块按任务序号排列（确定性，不靠模型对位），
+    # 头行给成败计数；直调函数验证聚合格式
+    registry, _ = _setup(_EchoLLM(), "search_notes")
+    out = fan_out_subagents(["甲", "乙"], llm=_EchoLLM(), registry=registry)
+
+    assert "〔fan-out 聚合：2 件，2 完成、0 未完成〕" in out
+    assert out.index("完成[甲]") < out.index("完成[乙]")
+    assert "[1/2]" in out and "[2/2]" in out
+
+
+def test_fanout_via_registry_single_tool_message():
+    # 菜单路径：一次调用一条结果回灌主底片（噪声隔离同款），聚合块完整
+    registry, _ = _setup(_EchoLLM(), "search_notes")
+    main_llm = ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("fan_out_subagents", {"tasks": ["甲", "乙"]})]),
+        Message(role="assistant", content="两件都做完了"),
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="主 sys"))
+    result, _ = run_turn(session, "并行查两件", agent=_main_agent(registry), llm=main_llm)
+
+    assert result is RunResult.COMPLETED
+    tool_msgs = [m for m in session.messages if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert "〔fan-out 聚合：2 件" in tool_msgs[0].content
+
+
+def test_fanout_runs_tasks_in_parallel():
+    # 两件 0.3s 的子任务并行跑，总耗时 < 串行（0.6s）——fan-out 卖点就是并行
+    registry, _ = _setup(_EchoLLM(), "search_notes")
+    start = time.perf_counter()
+    out = fan_out_subagents(["甲", "乙"], llm=_EchoLLM(delay=0.3), registry=registry)
+    elapsed = time.perf_counter() - start
+
+    assert "2 完成" in out
+    assert elapsed < 0.5, f"耗时 {elapsed:.2f}s，疑似未并行（串行应 ≈0.6s）"
+
+
+def test_fanout_rejects_blank_and_oversized_batches():
+    registry, _ = _setup(_EchoLLM(), "search_notes")
+    assert "tasks 不能为空" in fan_out_subagents(["  ", ""], llm=_EchoLLM(), registry=registry)
+    # 超上限拒单（不静默截批）：9 件 > MAX_FANOUT=8，错误串回灌让模型拆批
+    out = fan_out_subagents([f"任务{i}" for i in range(9)], llm=_EchoLLM(), registry=registry)
+    assert "最多 fan-out 8 件" in out
+
+
+def test_fanout_forbidden_for_sub_agents():
+    # 递归防护：fan_out_subagents 进 _FORBIDDEN，子 agent 菜单里拿不到（2 层封顶）
+    sub_llm = ScriptedLLM([Message(role="assistant", content="做完了")])
+    registry, _ = _setup(sub_llm, "search_notes")
+    main_llm = ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("spawn_subagent", {"task": "干活"})]),
+        Message(role="assistant", content="ok"),
+    ])
+    session = Session()
+    session.messages.append(Message(role="system", content="主 sys"))
+    run_turn(session, "去", agent=_main_agent(registry), llm=main_llm)
+
+    names = {s["function"]["name"] for s in sub_llm.tool_menus[0]}
+    assert "fan_out_subagents" not in names
+
+
+def test_conclusion_capped_with_pointer():
+    # 只回传摘要收严：超长结论截断 + 指针（细节走事件流/落盘，不进主底片）
+    long_text = "长" * 5000
+    sub_llm = ScriptedLLM([Message(role="assistant", content=long_text)])
+    registry, _ = _setup(sub_llm, "search_notes")
+    status, out = spawn_subagent("干活", llm=sub_llm, registry=registry)
+
+    assert status is RunResult.COMPLETED
+    assert len(out) < 3000
+    assert out.startswith("长")
+    assert "已截断" in out
