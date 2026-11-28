@@ -20,9 +20,14 @@ from __future__ import annotations
 import subprocess
 import threading
 import uuid
+from collections.abc import Collection
 from pathlib import Path
 
-from facta.paths import WORKSPACE_ROOT, WORKTREES_DIR
+from facta.paths import NOTES_DIR, WORKSPACE_ROOT, WORKTREES_DIR
+from facta.tools.context import ToolContext
+from facta.tools.files import register_file_tools
+from facta.tools.registry import ToolRegistry
+from facta.tools.terminal import register_terminal_tools
 
 _TIMEOUT = 30   # git 命令超时（本地操作，给足但不无限等）
 
@@ -72,6 +77,32 @@ def create_worktree() -> tuple[Path, str]:
     if code != 0:
         return wt_dir, f"worktree 创建失败：{out}"
     return wt_dir, ""
+
+
+def registry_in_worktree(registry: ToolRegistry, wt: Path) -> ToolRegistry:
+    """worktree 内干活的子 registry：file/terminal 五件重锚 wt，其余原样共享。
+
+    重锚=重新注册（闭包锚 wt 目录）；共享=搬运同一 Tool 对象（闭包锚主资源
+    ——知识库/待办/时钟共享是正确语义）。审计同源（registry.audit 透传），
+    S3「单一必经点」与 S5a「确认缝收口不分叉」都保持。file/terminal 五件
+    只读 ctx.workspace_root（files/terminal 的注册体），重锚不需要其余资源。
+    子 agent 沙箱（spawn）与任务沙箱（线五①调度接线）共用这一份。
+    """
+    # scope_check 一并继承（057）：范围声明锚的是主会话的 plan 棋盘，沙箱里的
+    # agent 受主计划约束是正确语义——不继承就成洞（主 agent 声明窄范围，
+    # 再把渗出步骤派进沙箱，沙箱里想用什么用什么）
+    sub = ToolRegistry(audit=registry.audit, scope_check=registry.scope_check)
+    # notes_dir 是 ToolContext 的必填位，但五个重锚工具只读 workspace_root
+    # （files/terminal 的注册体）——给缺省值即可，无第二个真值源
+    wt_ctx = ToolContext(notes_dir=NOTES_DIR, workspace_root=wt)
+    register_file_tools(sub, wt_ctx)
+    register_terminal_tools(sub, wt_ctx)
+    for name in registry.names():
+        if name not in {"read_file", "search_code", "list_dir", "write_file", "run_command"}:
+            tool = registry.get(name)
+            if tool is not None:
+                sub.register(tool)
+    return sub
 
 
 def worktree_changes(wt: Path) -> str:
@@ -133,8 +164,12 @@ def discard_worktree(wt: Path) -> str:
     return "" if code == 0 else f"worktree 清理失败：{out}"
 
 
-def cleanup_stale_worktrees() -> int:
+def cleanup_stale_worktrees(keep: Collection[str] = ()) -> int:
     """启动回收：data/worktrees/ 下残留目录全部移除（进程被杀防线）。
+
+    keep：要保留的目录名（线五①任务沙箱——长住生命周期归任务收口管理，
+    启动回收不许碰：非终态任务续跑要复用，终态任务待显式合并/丢弃）。
+    spawn 的短命沙箱没人认领，照旧全清。
 
     返回清理数。半截目录（git 元数据已坏，worktree remove 失败）直接
     rmtree 兜底 + branch -D——启动路径的清理不因单个坏目录中断。
@@ -144,7 +179,7 @@ def cleanup_stale_worktrees() -> int:
     count = 0
     import shutil
     for wt in WORKTREES_DIR.iterdir():
-        if not wt.is_dir():
+        if not wt.is_dir() or wt.name in keep:
             continue
         code, _ = _git("worktree", "remove", "--force", str(wt))
         if code != 0:

@@ -106,6 +106,9 @@ class Task:
     cancel_requested: bool = False
     fuse_fired: bool = False
     blocked_reason: str = ""   # 落 blocked 的原因（否则「在跑」与「被拒」分不清）
+    # ---- 线五①（编排三步走第①步）：任务沙箱 ----
+    worktree: str = ""         # git worktree 沙箱路径（chat 任务默认隔离）；
+                               # 空=无沙箱/已收口。非空且终态=待显式合并/丢弃
     # ---- ADR 117（M3）----
     skill: str = ""            # 绑定的技能名；空 = 主 agent（现状全池，档位不作用）
     authorization: str = "readonly"   # 生效档位（技能声明 ∩ 请求收严；主 agent 任务不消费）
@@ -162,6 +165,8 @@ def to_dict(task: Task) -> dict:
         "cancel_requested": task.cancel_requested,
         "fuse_fired": task.fuse_fired,
         "blocked_reason": task.blocked_reason,
+        # 线五①：沙箱路径（非空=隔离中/待收口，前端据此给收口动作）
+        "worktree": task.worktree,
         # ADR 117：队列/授权三件（skill/authorization 恒报；authorized_write
         # 供验收与排查「首写授权是否已落」）
         "skill": task.skill,
