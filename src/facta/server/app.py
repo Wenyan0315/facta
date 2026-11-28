@@ -96,6 +96,13 @@ from facta.tools.mcp_config import ServerSpec, load_server_specs
 from facta.tools.notes import record_provenance, resolve_note_path
 from facta.tools.registry import approval_policy
 from facta.tools.sandbox import detect_backend, sandbox_level
+from facta.tools.worktree import (
+    commit_and_merge_back,
+    create_worktree,
+    discard_worktree,
+    registry_in_worktree,
+    worktree_changes,
+)
 
 # run_turn 的 on_event 类型 → Run 事件类型（统一用点分层命名，前端按 type 路由）
 _EVENT_MAP = {
@@ -321,6 +328,12 @@ class ResumeRequest(BaseModel):
     text: str = ""
 
 
+class WorktreeActionRequest(BaseModel):
+    """任务沙箱收口的请求体（线五①）：merge=合回工作分支，discard=整棵丢弃。"""
+
+    action: str
+
+
 class RenameSessionRequest(BaseModel):
     """会话重命名的请求体（2026-09-17 体验轮）：只改 title 标签。"""
 
@@ -445,6 +458,17 @@ def _billing_closeout(
         run.fuse_fired = task.fuse_fired
 
 
+def _sandbox_agent(agent: Agent, workspace: Path | None) -> Agent:
+    """线五①：沙箱重锚——file/terminal 五件换锚进任务 worktree，其余共享
+    （registry_in_worktree，spawn 沙箱同一份）。workspace=None 原样返回。
+    Agent 是 frozen 配置，replace 换 registry（人设/轮数预算原样保留）。
+    抽独立函数：_run_worker 的 branch 预算（PLR0912）。
+    """
+    if workspace is None:
+        return agent
+    return replace(agent, registry=registry_in_worktree(agent.registry, workspace))
+
+
 def _run_worker(
     ctx: AppContext,
     run: Run,
@@ -452,6 +476,7 @@ def _run_worker(
     *,
     mode: str = "chat",
     repo_root: Path | None = None,
+    workspace: Path | None = None,
     store: RunStore | None = None,
     task: Task | None = None,
     task_store: TaskStore | None = None,
@@ -549,6 +574,7 @@ def _run_worker(
             ctx, session, mode, repo_root,
             authorization=(task.authorization if task is not None and task.skill else None),
         )
+        agent = _sandbox_agent(agent, workspace)
         ledger = ledger_path(run.session_id)
         # 绑定 save：writer 因此不懂 SessionStore，测试可注入
         writer = CheckpointWriter(ledger, lambda: ctx.store.save(run.session_id, session))
@@ -701,6 +727,50 @@ def _task_verdict(task: Task, run: Run, session: Session | None) -> str | None:
     return None
 
 
+def _ensure_task_worktree(tasks: TaskStore, task: Task) -> tuple[Path | None, bool]:
+    """线五①：任务沙箱开箱。返回 (沙箱路径, 是否继续开工)。
+
+    chat 任务（主 agent 全工具池）默认沙箱隔离：文件工作不碰主工作区，
+    收口后显式合并回工作分支（编排三步走第①步「并行隔离默认 worktree」）。
+    skill 任务不套沙箱（文件锚 repo_root，readonly 为主）→ (None, True)。
+    建不起来落 blocked → (None, False)。续跑复用同一沙箱（task.worktree
+    落盘）——同一任务的连续轮次攒同一堆改动，收口一次合并，不是每轮一收。
+    """
+    if task.skill:
+        return None, True
+    if task.worktree:
+        wt = Path(task.worktree)
+        if wt.is_dir():
+            return wt, True
+        # 目录没了（手工清理）：如实起新沙箱，旧改动无从找回——字段覆盖
+        task.worktree = ""
+    wt_dir, err = create_worktree()
+    if err:
+        task.status = TASK_BLOCKED
+        task.blocked_reason = f"任务沙箱创建失败：{err}"
+        tasks.save(task)
+        return None, False
+    task.worktree = str(wt_dir)
+    tasks.save(task)
+    return wt_dir, True
+
+
+def _task_sandbox_closeout(tasks: TaskStore, task: Task, wt: Path | None) -> None:
+    """线五①：worker 退出时的沙箱收口。
+
+    有改动→保留（终态=待显式合并/丢弃，收口端点裁决；挂起/熔断=续跑复用）；
+    无改动→空沙箱就地清理（空改动守卫，spawn 收尾同款哲学）。
+    worktree_changes 的失败串非空→按「有改动」保守保留（宁可多留不可误删）。
+    """
+    if wt is None:
+        return
+    if worktree_changes(wt):
+        return
+    discard_worktree(wt)
+    task.worktree = ""
+    tasks.save(task)
+
+
 def _maybe_start_queued(ctx: AppContext, store: RunStore, tasks: TaskStore) -> None:
     """ADR 117 §1 触发式调度：按 FIFO 起 queued 任务，直到任务级并发满。
 
@@ -758,6 +828,11 @@ def _task_worker(ctx: AppContext, store: RunStore, tasks: TaskStore, task: Task)
             tasks.save(task)
             _maybe_start_queued(ctx, store, tasks)
             return
+    # 线五①：chat 任务默认沙箱隔离（skill 任务不套——边界注记在开箱助手）
+    wt, ok = _ensure_task_worktree(tasks, task)
+    if not ok:
+        _maybe_start_queued(ctx, store, tasks)   # 已落 blocked，调度下一位
+        return
     try:
         while True:
             # 轮间保险丝/取消快查（看守 30s 一跳，这里补即时性；退避窗口也算在内）
@@ -797,6 +872,7 @@ def _task_worker(ctx: AppContext, store: RunStore, tasks: TaskStore, task: Task)
                 task=task,
                 task_store=tasks,
                 repo_root=Path(task.repo_root).expanduser().resolve() if task.repo_root else None,
+                workspace=wt,
             )
             session = run._final_session
             if run.usage:
@@ -810,6 +886,8 @@ def _task_worker(ctx: AppContext, store: RunStore, tasks: TaskStore, task: Task)
                 continue
             return
     finally:
+        # 线五①：沙箱收口先行（有改动保留待显式收口/续跑复用，空沙箱就地清）
+        _task_sandbox_closeout(tasks, task, wt)
         # 任务离开 running（终态/熔断/取消/异常）→ 拉起下一个排队任务
         # （ADR 117 §1 触发点②）。锁重入安全：_maybe_start_queued 拿
         # sched_lock，此处不在锁内。
@@ -1431,6 +1509,41 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         task_store.save(task)
         _maybe_start_queued(ctx, store, task_store)
         return _task_view(task)
+
+    @app.get("/api/tasks/{task_id}/worktree")
+    def get_task_worktree(task_id: str):
+        """沙箱改动摘要（收口裁决的展示料：status --short + diffstat）。"""
+        task = _require_task(task_id)
+        if not task.worktree:
+            raise HTTPException(404, "本任务没有沙箱")
+        return {"changes": worktree_changes(Path(task.worktree))}
+
+    @app.post("/api/tasks/{task_id}/worktree")
+    def settle_task_worktree(task_id: str, body: WorktreeActionRequest):
+        """沙箱收口（线五①「完成后显式合并回工作分支」）：merge / discard。
+
+        queued/running 拒（409）——worker 正在沙箱里干活，收口会把脚下的
+        目录抽走。merge 撞上主树改动时 git 拒绝，错误串如实回（反馈环惯例：
+        改动仍在 agent/<name> 分支可手工处理）。沙箱目录不在了才清
+        task.worktree（merge 失败但 worktree 已被 git 清走的，结果串里带
+        分支名——字段再指旧路径就是假指针）。
+        """
+        task = _require_task(task_id)
+        if task.status in (TASK_QUEUED, TASK_RUNNING):
+            raise HTTPException(409, "任务还在跑，收口会把脚下的沙箱抽走——等它停")
+        if not task.worktree:
+            raise HTTPException(404, "本任务没有沙箱")
+        wt = Path(task.worktree)
+        if body.action == "merge":
+            result = commit_and_merge_back(wt, message=f"task: {task.goal.strip()[:60]}")
+        elif body.action == "discard":
+            result = discard_worktree(wt) or "沙箱已丢弃"
+        else:
+            raise HTTPException(400, "action 只能是 merge / discard")
+        if not wt.exists():
+            task.worktree = ""
+            task_store.save(task)
+        return {"result": result, "cleared": not wt.exists()}
 
     @app.post("/api/runs/{run_id}/steer", status_code=202)
     def steer(run_id: str, body: SteerRequest):

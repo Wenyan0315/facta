@@ -46,6 +46,7 @@ from facta.orchestrator.agent import (
     build_default_agent,
     ensure_persona,
 )
+from facta.orchestrator.task import TaskStore
 from facta.paths import (
     DATA_ROOT,
     GRAPH_PATH,
@@ -297,8 +298,11 @@ def assemble(provider: str) -> AppContext:
     load_dotenv()
 
     # -1) worktree 残留回收（S6a）：上次进程被杀可能留下半截沙箱——启动即清
-    #     （「先杀进程再删文件」血案同款防线：不动运行中的，只清启动前的）
-    stale = cleanup_stale_worktrees()
+    #     （「先杀进程再删文件」血案同款防线：不动运行中的，只清启动前的）。
+    #     线五①：任务沙箱有主（Task.worktree 登记的），keep 住不清——
+    #     非终态任务续跑要复用，终态任务待显式合并/丢弃（收口端点负责）
+    keep = {Path(t.worktree).name for t in TaskStore().list() if t.worktree}
+    stale = cleanup_stale_worktrees(keep=keep)
     if stale:
         logger.info("已回收 %s 个残留 worktree（上次进程未正常退出）", stale)
 

@@ -16,7 +16,7 @@ from facta.memory.store import Session
 from facta.tools.context import ToolContext
 from facta.tools.plan import format_view, plan_scope_check, register_plan_tools
 from facta.tools.registry import Tool, ToolRegistry
-from facta.tools.spawn import _worktree_registry
+from facta.tools.worktree import registry_in_worktree
 
 _P = {
     "type": "object",
@@ -162,8 +162,7 @@ def test_worktree_sub_registry_inherits_scope(tmp_path):
     parent = _registry(session, ran=[])
     _declare(parent, ["read_file"])
 
-    ctx = ToolContext(notes_dir=tmp_path, workspace_root=tmp_path, session=session)
-    sub = _worktree_registry(parent, ctx, tmp_path)
+    sub = registry_in_worktree(parent, tmp_path)
     assert sub.scope_check is parent.scope_check
     assert "不在本计划声明的工具范围内" in sub.execute("run_command", '{"command": "echo leak"}')
 

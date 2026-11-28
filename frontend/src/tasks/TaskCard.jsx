@@ -4,7 +4,14 @@
 // （后端零改动）；操作全部复用既有端点（cancel / resume / steer / billing /
 // confirm）。展开才挂 Run 下钻与确认卡 ⇒ SSE 订阅数随展开数走，不常驻。
 import { useState } from "preact/hooks";
-import { cancelTask, fetchTaskBilling, resumeTask, steerRun } from "./api.js";
+import {
+  cancelTask,
+  fetchTaskBilling,
+  fetchTaskWorktree,
+  resumeTask,
+  settleTaskWorktree,
+  steerRun,
+} from "./api.js";
 import ConfirmCard from "./ConfirmCard.jsx";
 import RunDetail from "./RunDetail.jsx";
 
@@ -67,6 +74,8 @@ export default function TaskCard({ task, runs, onChanged }) {
   const [steerText, setSteerText] = useState("");
   const [billing, setBilling] = useState(null);   // null = 未展开明细（列表用 to_dict 里的合计）
   const [openRun, setOpenRun] = useState(null);
+  const [wtChanges, setWtChanges] = useState(null);   // null = 未拉沙箱改动
+  const [wtMsg, setWtMsg] = useState("");             // 收口结果（合并/丢弃的反馈串）
 
   const lastRunId = task.run_ids?.[task.run_ids.length - 1] || null;
   const steerable = ["running", "waiting-steer"].includes(task.status) && lastRunId;
@@ -89,6 +98,25 @@ export default function TaskCard({ task, runs, onChanged }) {
   const showBilling = () =>
     act(async () => {
       setBilling(billing ? null : await fetchTaskBilling(task.task_id));
+    });
+
+  // 线五①：沙箱收口——改动摘要按需拉取；合并/丢弃后把结果串留给人看
+  const loadWtChanges = () =>
+    act(async () => {
+      if (wtChanges !== null) {
+        setWtChanges(null);
+        return;
+      }
+      const r = await fetchTaskWorktree(task.task_id);
+      setWtChanges(r.changes || "（无改动）");
+    });
+
+  const settleWt = (action) =>
+    act(async () => {
+      const r = await settleTaskWorktree(task.task_id, action);
+      setWtMsg(r.result);
+      setWtChanges(null);
+      onChanged?.();
     });
 
   const myRuns = (runs || []).filter((r) => task.run_ids?.includes(r.run_id));
@@ -126,6 +154,12 @@ export default function TaskCard({ task, runs, onChanged }) {
         <span class="tp-chip">历时 {duration(task)}</span>
         <span class="tp-chip">Token {tokens(task.billing?.totals)}</span>
         <span class="tp-chip">账单：{money(task.billing?.totals)}</span>
+        {task.worktree ? (
+          // 线五①：沙箱可见性——终态=待收口（给动作），在飞=隔离中（只告知）
+          <span class="tp-chip tp-ok" data-testid="sandbox-chip">
+            {TERMINAL.includes(task.status) ? "沙箱待收口" : "沙箱隔离中"}
+          </span>
+        ) : null}
         {task.repo_root ? <span class="tp-chip">仓：{task.repo_root}</span> : null}
       </div>
       {task.blocked_reason ? <div class="tp-blocked">熔断原因：{task.blocked_reason}</div> : null}
@@ -198,6 +232,31 @@ export default function TaskCard({ task, runs, onChanged }) {
 
       {open ? (
         <div class="tp-detail">
+          {task.worktree ? (
+            <div class="tp-billing" data-testid="task-sandbox">
+              <div class="detail-muted">
+                沙箱（git worktree）：文件改动未进主工作区，收口才生效
+              </div>
+              <div class="tp-actions">
+                <button class="tp-btn" disabled={busy} onClick={loadWtChanges}>
+                  {wtChanges === null ? "查看改动" : "收起改动"}
+                </button>
+                <button class="tp-btn" disabled={busy} onClick={() => settleWt("merge")}>
+                  合并入库
+                </button>
+                <button
+                  class="tp-btn tp-btn-danger"
+                  disabled={busy}
+                  title="整棵丢弃沙箱改动，不可恢复"
+                  onClick={() => settleWt("discard")}
+                >
+                  丢弃改动
+                </button>
+              </div>
+              {wtChanges !== null ? <pre class="tp-changes">{wtChanges}</pre> : null}
+            </div>
+          ) : null}
+          {wtMsg ? <div class="detail-muted">沙箱收口：{wtMsg}</div> : null}
           {task.status === "waiting-approval" && lastRunId ? (
             <ConfirmCard runId={lastRunId} onDecided={onChanged} />
           ) : null}

@@ -50,14 +50,13 @@ from facta.memory.store import Session
 from facta.orchestrator.agent import Agent
 from facta.orchestrator.loop import RunResult, run_turn
 from facta.tools.context import ToolContext
-from facta.tools.files import register_file_tools
 from facta.tools.plan import format_view
 from facta.tools.registry import Tool, ToolRegistry
-from facta.tools.terminal import register_terminal_tools
 from facta.tools.worktree import (
     commit_and_merge_back,
     create_worktree,
     discard_worktree,
+    registry_in_worktree,
     worktree_changes,
 )
 
@@ -134,28 +133,6 @@ def _sub_emitter(
     return emit
 
 
-def _worktree_registry(registry: ToolRegistry, ctx: ToolContext, wt: Path) -> ToolRegistry:
-    """S6a worktree 模式的子 registry：file/terminal 五件重锚 worktree，其余原样共享。
-
-    重锚=重新注册（闭包锚 wt 目录）；共享=搬运同一 Tool 对象（闭包锚主资源
-    ——知识库/待办/时钟共享是正确语义）。审计同源（registry.audit 透传），
-    S3「单一必经点」与 S5a「确认缝收口不分叉」都保持。
-    """
-    # scope_check 一并继承（057）：范围声明锚的是主会话的 plan 棋盘，子 agent 受
-    # 主计划约束是正确语义——不继承就成洞（主 agent 声明窄范围，再把渗出步骤
-    # spawn_subagent(worktree=True) 派出去，子 agent 在裸 registry 里想用什么用什么）
-    sub = ToolRegistry(audit=registry.audit, scope_check=registry.scope_check)
-    wt_ctx = ToolContext(notes_dir=ctx.notes_dir, workspace_root=wt)
-    register_file_tools(sub, wt_ctx)
-    register_terminal_tools(sub, wt_ctx)
-    for name in registry.names():
-        if name not in {"read_file", "search_code", "list_dir", "write_file", "run_command"}:
-            tool = registry.get(name)
-            if tool is not None:
-                sub.register(tool)
-    return sub
-
-
 def _worktree_finalization(
     wt: Path,
     task: str,
@@ -223,7 +200,7 @@ def spawn_subagent(
         wt_dir, err = create_worktree()
         if err:
             return RunResult.FAILED, f"错误：{err}"
-        effective_registry = _worktree_registry(registry, ctx, wt_dir)
+        effective_registry = registry_in_worktree(registry, wt_dir)
 
     # 工具子集：默认全量；显式指定 ∩ 全量；一律过禁止单
     available = set(effective_registry.names()) - _FORBIDDEN

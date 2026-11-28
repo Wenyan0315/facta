@@ -1,8 +1,8 @@
 // API 封装：fetch + 状态检查，错误如实上抛（怎么呈现归调用方）。
 //
 // ADR 118 §2：本页数据源从 Run 换轨到 Task——`GET /api/tasks` 是一等视图，
-// Run 降为任务卡展开后的下钻。写路径全部复用 M1/M3 既有端点（cancel/resume/
-// steer/confirm/tasks），本页不新增任何后端语义。
+// Run 降为任务卡展开后的下钻。写路径大部分复用 M1/M3 既有端点（cancel/resume/
+// steer/confirm/tasks）；线五①起新增任务沙箱收口两端点（worktree）。
 async function unwrap(resp) {
   if (!resp.ok) {
     // 后端错误体两种形状：HTTPException = {detail:"中文理由"}；
@@ -38,6 +38,7 @@ const put = (url, body) =>
 export const fetchTasks = () => get("/api/tasks");
 export const fetchRuns = () => get("/api/runs");   // Run 下钻摘要（既有契约不动）
 export const fetchTaskBilling = (taskId) => get(`/api/tasks/${taskId}/billing`);
+export const fetchTaskWorktree = (taskId) => get(`/api/tasks/${taskId}/worktree`);
 export const fetchSkills = () => get("/api/skills");
 export const fetchProjects = async () => (await get("/api/projects")).projects;
 export const fetchStatus = () => get("/api/status");
@@ -49,6 +50,7 @@ export const cancelTask = (taskId) => post(`/api/tasks/${taskId}/cancel`);
 export const resumeTask = (taskId, text = "") => post(`/api/tasks/${taskId}/resume`, { text });
 export const steerRun = (runId, text) => post(`/api/runs/${runId}/steer`, { text });
 export const confirmRun = (runId, approve) => post(`/api/runs/${runId}/confirm`, { approve });
+export const settleTaskWorktree = (taskId, action) => post(`/api/tasks/${taskId}/worktree`, { action });
 export const putProject = (name, body) => put(`/api/projects/${name}`, body);
 // 107「发送时刻取走」语义只作用于 run 通道；任务创建不经它，故信箱靠显式 DELETE 清
 export const clearIdeContext = () => fetch("/api/ide/context", { method: "DELETE" }).then(unwrap);

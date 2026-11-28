@@ -12,14 +12,23 @@
 
 import json
 import subprocess
+import tempfile
+import time
+from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from facta.core.llm import ScriptedLLM
+from facta.core.telemetry import UsageLedger
 from facta.core.types import Message
-from facta.memory.store import Session
+from facta.memory.store import Session, SessionStore
+from facta.memory.todos import TodoStore
 from facta.orchestrator.agent import Agent
+from facta.orchestrator.assemble import AppContext, ensure_persona
 from facta.orchestrator.loop import run_turn
+from facta.orchestrator.task import TASK_DONE, TASK_FAILED
+from facta.server.app import create_app
 from facta.tools.context import ToolContext
 from facta.tools.files import register_file_tools
 from facta.tools.registry import ToolRegistry
@@ -248,3 +257,107 @@ def test_spawn_without_worktree_unchanged(git_repo):
 
     # 直改落主工作区（无沙箱）
     assert (git_repo / "direct.py").exists()
+
+
+# ---------- 任务沙箱（线五①）：chat 任务默认隔离 + 显式收口 ----------
+
+
+def _task_ctx(llm):
+    """最小 AppContext（test_task_feed._make_ctx 同款形状，本文件自带一份）。
+
+    registry 恒裸：沙箱重锚（registry_in_worktree）自带 file/terminal 五件
+    ——这正是要验的接线（写进沙箱而不是主树）。
+    """
+    tools = ToolRegistry()
+
+    def build_agent(session: Session, repo_root=None) -> Agent:
+        agent = Agent(name="test", system_prompt="测试人设", registry=tools)
+        ensure_persona(session, agent)
+        return agent
+
+    return AppContext(
+        provider="mock",
+        ledger=UsageLedger(),
+        embedder=None,
+        llm=llm,
+        internal_llm=ScriptedLLM([]),
+        kb=None,
+        store=SessionStore(Path(tempfile.mkdtemp()) / "sessions"),
+        build_agent=build_agent,
+        todos=TodoStore(Path(tempfile.mkdtemp()) / "todos.json"),
+    )
+
+
+def _run_task(llm):
+    app = create_app(_task_ctx(llm))
+    client = TestClient(app)
+    tid = client.post("/api/tasks", json={"goal": "干活"}).json()["task_id"]
+    status = ""
+    for _ in range(200):   # worker 是后台线程，轮询等终态
+        status = client.get(f"/api/tasks/{tid}").json()["status"]
+        if status in (TASK_DONE, TASK_FAILED):
+            break
+        time.sleep(0.05)
+    return client, tid, status
+
+
+def _write_llm():
+    return ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("write_file", {"path": "feat.py", "content": "print('feat')\n"}),
+        ]),
+        Message(role="assistant", content="完成：已建 feat.py"),
+    ])
+
+
+def test_task_sandbox_isolation_and_explicit_merge(git_repo):
+    # 全链（线五①）：chat 任务默认进沙箱 → 主树全程零污染 →
+    # 显式 merge 收口，改动才进工作分支
+    client, tid, status = _run_task(_write_llm())
+    assert status == TASK_DONE
+    view = client.get(f"/api/tasks/{tid}").json()
+    assert view["worktree"]                        # 沙箱保留待收口
+    assert not (git_repo / "feat.py").exists()     # 主树零污染
+    changes = client.get(f"/api/tasks/{tid}/worktree").json()["changes"]
+    assert "feat.py" in changes
+
+    resp = client.post(f"/api/tasks/{tid}/worktree", json={"action": "merge"})
+    assert resp.status_code == 200 and resp.json()["cleared"]
+    assert (git_repo / "feat.py").exists()          # 显式合并后才进主树
+    assert client.get(f"/api/tasks/{tid}").json()["worktree"] == ""
+    assert client.get(f"/api/tasks/{tid}/worktree").status_code == 404
+
+
+def test_task_sandbox_discard_keeps_main_clean(git_repo):
+    # 收口的另一半：丢弃整棵沙箱，主树/主分支零影响
+    client, tid, status = _run_task(_write_llm())
+    assert status == TASK_DONE
+    resp = client.post(f"/api/tasks/{tid}/worktree", json={"action": "discard"})
+    assert resp.status_code == 200 and resp.json()["cleared"]
+    assert not (git_repo / "feat.py").exists()
+    # 主树零泄漏（tasks/ 是 conftest 的 TASKS_DIR 落进同一 tmp 的基建噪音）
+    noise = {ln.strip()[3:] for ln in _git_status(git_repo).splitlines() if ln.strip()}
+    assert noise <= {"tasks/"}
+    assert client.get(f"/api/tasks/{tid}").json()["worktree"] == ""
+
+
+def test_task_sandbox_empty_autoclean(git_repo):
+    # 空改动守卫（spawn 同款）：任务没动文件 → 沙箱不留、字段清空
+    client, tid, status = _run_task(ScriptedLLM([Message(role="assistant", content="没事发生")]))
+    assert status == TASK_DONE
+    for _ in range(100):   # 收口在 worker 的 finally 里，落定晚于 DONE 翻转
+        if not client.get(f"/api/tasks/{tid}").json()["worktree"]:
+            break
+        time.sleep(0.05)
+    assert client.get(f"/api/tasks/{tid}").json()["worktree"] == ""
+    from facta.tools.worktree import WORKTREES_DIR
+    assert not WORKTREES_DIR.exists() or not any(WORKTREES_DIR.iterdir())
+
+
+def test_cleanup_keeps_claimed_worktrees(git_repo):
+    # 线五①：启动回收认领任务沙箱（keep 名单）——有主的不许被当残留清掉
+    wt, err = create_worktree()
+    assert err == ""
+    assert cleanup_stale_worktrees(keep={wt.name}) == 0
+    assert wt.exists()
+    discard_worktree(wt)
