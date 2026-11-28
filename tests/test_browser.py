@@ -260,9 +260,20 @@ uvicorn.run(create_app(ctx), host="127.0.0.1", port=int(sys.argv[2]), log_level=
 
 @pytest.fixture(scope="module")
 def task_server(tmp_path_factory):
-    """带 write 档技能的服务 + 一个目标仓目录（委派的写落这里，不碰真仓）。"""
+    """带 write 档技能的服务 + 一个目标仓目录（委派的写落这里，不碰真仓）。
+
+    P0 绑定校验波及（B1）：repo_root 现在必须是 Git 仓——fixture 地基补
+    git init + 首提交（语义不弱化：委派目标仓仍是同一个自定义目录）。
+    """
     root = tmp_path_factory.mktemp("browser-tasks")
     (root / "repo").mkdir()
+    (root / "repo" / "base.txt").write_text("seed\n", encoding="utf-8")   # 空目录无从首提交
+    subprocess.run(["git", "init", "-q"], cwd=root / "repo", check=True)
+    subprocess.run(["git", "add", "-A"], cwd=root / "repo", check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=root / "repo", check=True,
+    )
     port = _free_port()
     proc = subprocess.Popen(
         [sys.executable, "-c", _BOOT_TASKS, str(root), str(port)],

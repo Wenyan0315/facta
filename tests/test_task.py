@@ -272,6 +272,9 @@ def test_to_dict_shape(tmp_path):
         "updated_at", "cancel_requested", "fuse_fired", "blocked_reason",
         "skill", "authorization", "authorized_write",   # ADR 117 §3/§4（next_text 刻意不外露）
         "worktree",   # 线五①：沙箱路径（前端据此给收口动作），有意的契约新增
+        # P0 工作区绑定 + 产物收口（S1-1/S1-3 契约新增，空=无绑定存量任务）
+        "target_branch", "baseline", "worktree_branch", "candidate",
+        "verifications", "merge_status", "merge_commit", "disposition",
     }
     # 产物=引用，不新建存储
     assert d["artifacts"] == {"session_id": "s9", "run_ids": ["r1"]}

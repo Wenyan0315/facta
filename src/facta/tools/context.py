@@ -37,6 +37,19 @@ if TYPE_CHECKING:
     from facta.tools.web import WebSearchClient  # 仅类型标注用，运行时不导入（防循环）
 
 
+@dataclass(frozen=True)
+class WorkspaceBinding:
+    """任务工作区绑定三元组（P0 Spec 1）：创建任务时钉死，执行/恢复/子任务/合入共用。
+
+    repo_root    绑定仓库根（已过 rev-parse --show-toplevel 校验）
+    target_branch 合入目标分支（Spec 2 合入目标）
+    baseline     基线提交全 SHA（创建时钉死，不跟随分支头）
+    """
+    repo_root: Path
+    target_branch: str
+    baseline: str
+
+
 @dataclass
 class ToolContext:
     """工具的依赖包：组装层（__main__）构造，register_builtin 消费。
@@ -69,6 +82,9 @@ class ToolContext:
     # paths.py——这里是引用传播，不是第二真值源；notes_dir 禁默认是因为
     # 它因环境而异必须组装层拍板。子 agent 覆盖时必显式。
     workspace_root: Path = WORKSPACE_ROOT
+    # 任务工作区绑定（P0 Spec 1）：None = 无绑定（普通聊天/旧任务，走兼容语义）。
+    # spawn 子沙箱、worktree 原语经此继承父任务的仓库/分支/基线。
+    binding: WorkspaceBinding | None = None
     # 知识图谱（S7a）：None=graph 工具不上菜单（条件注册惯例）。
     # 传 GraphStore 对象本身（非副本）——查询原语读活对象，与 history
     # 的列表身份契约同理（同步层原地变异时工具看得见最新图）。

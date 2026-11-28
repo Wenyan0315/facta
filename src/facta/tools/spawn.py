@@ -36,11 +36,17 @@
 工具层只暴露结论串给主 agent 自纠（换方案或如实汇报），不炸主轮（M5
 「错误也返回字符串」惯例）；spawn_step 按 RunResult 回写 done/failed，
 不再靠字符串前缀（枚举 → 字符串 → 前缀匹配的中间态已删，详见 083）。
+
+P0 绑定继承 + fan-out 只读（Spec 1 §2.4/§2.5）：worktree 模式下子沙箱
+继承父任务的工作区绑定（建在绑定仓库、分支显式生成并持有、合回父工作区
+=任务候选）；fan-out 条目只读默认（_WRITE_TOOLS），显式请求写工具的条目
+整条拦截回执、不静默裁剪。
 """
 
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -50,7 +56,7 @@ from facta.core.types import Message
 from facta.memory.store import Session
 from facta.orchestrator.agent import Agent
 from facta.orchestrator.loop import RunResult, run_turn
-from facta.tools.context import ToolContext
+from facta.tools.context import ToolContext, WorkspaceBinding
 from facta.tools.plan import format_view
 from facta.tools.registry import Tool, ToolRegistry
 from facta.tools.worktree import (
@@ -79,6 +85,17 @@ _FORBIDDEN = frozenset({
     "make_plan", "update_plan_step", "finish_plan",
     "sync_graph", "search_history", "read_history",
 })
+
+# fan-out 只读默认（P0 Spec 1 §2.5，B7/B8）：写类工具硬编码禁入 fan-out 条目
+# ——程序侧纪律与 _FORBIDDEN 同款，不依赖模型自觉。显式点名也不静默裁剪：
+# 该条目整条拦截不执行、聚合行回执（_FANOUT_WRITE_BLOCK）——静默降级 =
+# 模型以为写成功。条目执行中调用写工具则由 allowed_tools 自然拦住、错误串回灌。
+_WRITE_TOOLS = frozenset({"write_file", "run_command"})
+
+# B8 固定回执（Spec 1 §2.5 原文）：拦截条目聚合行的结论串，错误串回灌主 agent 自纠
+_FANOUT_WRITE_BLOCK = (
+    "已拦截：fan-out 不允许写工具，请改用 spawn_subagent(worktree=True) 或任务沙箱"
+)
 
 DEFAULT_ROUNDS = 3
 MAX_ROUNDS = 10
@@ -157,25 +174,81 @@ def _worktree_finalization(
     task: str,
     conclusion: str,
     confirm: Callable[[str, dict], bool] | None,
+    *,
+    branch: str | None = None,
+    binding: WorkspaceBinding | None = None,
+    merge_into: Path | None = None,
 ) -> str:
     """S6a worktree 收尾：改动经确认缝裁决——批准合回，拒绝/无通道丢弃。
 
     保守默认与 L2 同哲学：没有眼睛就不动手（confirm 缺失 = 丢弃）。
+
+    P0 绑定化（Spec 1 §2.4/B6）：binding 给定时 git 一律锚绑定仓库——分支是
+    spawn 显式生成并持有的子分支（真值源在 spawn_subagent，不走目录名反推），
+    基线取 binding.baseline；合回目标 = 父工作区 merge_into（任务沙箱：改动
+    并入任务候选，随任务收口一次合入 target_branch），不是 target_branch
+    本身。binding 缺席走老行为（merge_into=None→WORKSPACE_ROOT，分支按
+    wt 目录名反推，基线空=只看工作区改动）。
     """
-    changes = worktree_changes(wt)
-    if not changes:
-        discard_worktree(wt)
+    baseline = binding.baseline if binding is not None else ""
+    repo_root = binding.repo_root if binding is not None else None
+    changes = worktree_changes(wt, baseline)
+    if not changes.any():
+        discard_worktree(wt, repo_root=repo_root, branch=branch)
         return f"{conclusion}\n〔worktree 无文件改动，沙箱已清理〕"
     approved = confirm is not None and confirm(
-        "merge_worktree", {"task": task[:100], "changes": changes[:2000]}
+        "merge_worktree", {"task": task[:100], "changes": changes.summary()[:2000]}
     )
     if approved:
-        outcome = commit_and_merge_back(wt, message=f"spawn: {task.strip()[:60]}")
+        _, outcome = commit_and_merge_back(
+            wt,
+            message=f"spawn: {task.strip()[:60]}",
+            merge_into=merge_into,
+            branch=branch,
+            target_branch="",
+            baseline=baseline,
+        )
     else:
-        discard_worktree(wt)
+        discard_worktree(wt, repo_root=repo_root, branch=branch)
         outcome = "用户未批准合回（或无确认通道），改动已整棵丢弃，主工作区未受影响"
     # 改动摘要截断（线五②）：完整清单只进确认弹窗给人看，回灌结论的是摘要
-    return f"{conclusion}\n〔文件改动〕\n{_brief(changes, _CHANGES_CAP)}\n〔处理〕{outcome}"
+    return f"{conclusion}\n〔文件改动〕\n{_brief(changes.summary(), _CHANGES_CAP)}\n〔处理〕{outcome}"
+
+
+def _conclusion_of(result: RunResult, reply: Message | None) -> str:
+    """终态 → 结论串（083 结构化返回的展示面，_brief 截断在此收口）。"""
+    if result is RunResult.COMPLETED and reply is not None:
+        return _brief(reply.content or "（子任务完成，但未产出文本结论）")
+    if result is RunResult.CANCELLED:
+        return "子任务被取消，未产出结论"
+    return "子任务失败：模型不可用（可稍后重试，或由你直接执行）"
+
+
+def _bound_sandbox(
+    ctx: ToolContext, registry: ToolRegistry,
+) -> tuple[ToolRegistry, Path, str | None, Path | None, str]:
+    """worktree 模式的沙箱开箱 + 子 registry 重锚（P0 Spec 1 §2.4/B6）。
+
+    binding 给定 → 子沙箱建在绑定仓库、分支显式生成（agent/<uuid8>）并
+    持有、从 binding.baseline 切；合回目标 = ctx.workspace_root（父工作区
+    =任务沙箱）。binding 缺席走老行为（create_worktree 无参、合回主仓）。
+    返回 (子 registry, 沙箱目录, 子分支名, 合回目标, 错误串)——错误串非空
+    = 创建失败（调用方走反馈环）。
+    """
+    binding = ctx.binding
+    branch: str | None = None
+    merge_into: Path | None = None
+    if binding is not None:
+        branch = f"agent/{uuid.uuid4().hex[:8]}"   # 显式生成并持有：分支名真值源在调用方
+        wt_dir, err = create_worktree(
+            repo_root=binding.repo_root, branch=branch, baseline=binding.baseline,
+        )
+        merge_into = ctx.workspace_root
+    else:
+        wt_dir, err = create_worktree()
+    if err:
+        return registry, wt_dir, branch, merge_into, err
+    return registry_in_worktree(registry, wt_dir, binding=binding), wt_dir, branch, merge_into, ""
 
 
 def spawn_subagent(
@@ -190,6 +263,7 @@ def spawn_subagent(
     should_cancel: Callable[[], bool] | None = None,
     worktree: bool = False,
     ctx: ToolContext | None = None,
+    read_only: bool = False,
 ) -> tuple[RunResult, str]:
     """构造子 agent + 临时会话跑一轮，回传结构化 (status, conclusion)。
 
@@ -205,6 +279,14 @@ def spawn_subagent(
     改动不碰主工作区；跑完后 diff 经确认缝裁决（人审掌舵，与 make_plan
     同一原则）：批准→commit+merge 回主分支；拒绝/无通道→整棵丢弃
     （保守默认：没有眼睛就不动手）。需要 ctx（重锚信息：notes_dir 等）。
+
+    绑定继承（P0 Spec 1 §2.4/B6）：ctx.binding 给定时子沙箱建在绑定仓库、
+    分支显式生成（agent/<uuid8>）并持有、从 binding.baseline 切；收尾合回
+    目标 = 父工作区（任务沙箱，改动并入任务候选），registry_in_worktree
+    一并透传 binding——父子不串仓。binding 缺席走老行为。
+
+    read_only（B7/B8，内部参数不进模型可见 schema）：True = 可用集再减
+    _WRITE_TOOLS——fan-out 条目全走 True（只读默认，程序侧纪律）。
     """
     if not task.strip():
         return RunResult.FAILED, "错误：task 不能为空——说清楚要子任务做什么"
@@ -215,15 +297,19 @@ def spawn_subagent(
 
     # S6a worktree 分支：先建沙箱，子 registry 重锚，跑完裁决合回/丢弃
     wt_dir: Path | None = None
+    wt_branch: str | None = None
+    wt_merge_into: Path | None = None
+    binding = ctx.binding if ctx is not None else None
     effective_registry = registry
     if worktree and ctx is not None:
-        wt_dir, err = create_worktree()
+        effective_registry, wt_dir, wt_branch, wt_merge_into, err = _bound_sandbox(ctx, registry)
         if err:
             return RunResult.FAILED, f"错误：{err}"
-        effective_registry = registry_in_worktree(registry, wt_dir)
 
-    # 工具子集：默认全量；显式指定 ∩ 全量；一律过禁止单
+    # 工具子集：默认全量；显式指定 ∩ 全量；一律过禁止单；只读模式再减写类
     available = set(effective_registry.names()) - _FORBIDDEN
+    if read_only:
+        available -= _WRITE_TOOLS   # B7：fan-out 只读默认（程序侧硬编码）
     if tools:
         wanted = set(tools) & available
         if not wanted:
@@ -261,21 +347,48 @@ def spawn_subagent(
         should_cancel=should_cancel,   # 082 ①：取消缝透传——子任务同主循环一样
         # 在协作式取消检查点上响应取消，不再只等主循环边界
     )
-    if result is RunResult.COMPLETED and reply is not None:
-        conclusion = _brief(reply.content or "（子任务完成，但未产出文本结论）")
-    elif result is RunResult.CANCELLED:
-        conclusion = "子任务被取消，未产出结论"
-    else:
-        conclusion = "子任务失败：模型不可用（可稍后重试，或由你直接执行）"
+    conclusion = _conclusion_of(result, reply)
 
     # S6a worktree 收尾（裁决细节在 _worktree_finalization）
     if wt_dir is not None:
-        return result, _worktree_finalization(wt_dir, task, conclusion, confirm)
+        return result, _worktree_finalization(
+            wt_dir, task, conclusion, confirm,
+            branch=wt_branch, binding=binding, merge_into=wt_merge_into,
+        )
     return result, conclusion
 
 
+def _fanout_entries(
+    tasks: list, tools: list[str] | None,
+) -> list[tuple[str, list[str] | None]]:
+    """归一化 fan-out 条目 → [(子任务书, 生效工具集)]。
+
+    条目两种形态：纯字符串（工具=共用 tools）；对象 {"task": 子任务书,
+    "tools": 本条专用清单}——per-entry 点菜是「条目显式请求写工具」（B8）
+    的表达通道。空白/畸形条目丢弃（与旧版对非 str 条目的容错一致），
+    tools 非字符串列表时回落共用 tools。
+    """
+    entries: list[tuple[str, list[str] | None]] = []
+    for t in tasks:
+        entry_tools: list[str] | None = None
+        if isinstance(t, dict):
+            text = t.get("task")
+            raw = t.get("tools")
+            if isinstance(raw, list):
+                entry_tools = [x for x in raw if isinstance(x, str)]
+            if not isinstance(text, str):
+                continue
+        elif isinstance(t, str):
+            text = t
+        else:
+            continue
+        if text.strip():
+            entries.append((text.strip(), entry_tools if entry_tools is not None else tools))
+    return entries
+
+
 def fan_out_subagents(
-    tasks: list[str],
+    tasks: list,
     *,
     llm: LLM,
     registry: ToolRegistry,
@@ -292,34 +405,50 @@ def fan_out_subagents(
     「只回传摘要」闸（_brief，spawn_subagent 内已截断）。复用 spawn_subagent
     全套（上下文隔离/工具子集/确认透传/事件透传/取消透传/失败反馈环）。
 
+    fan-out 只读默认（P0 Spec 1 §2.5，B7/B8）：全部条目 read_only=True——
+    默认工具集=全量减禁止单再减 _WRITE_TOOLS；条目显式点名写工具（共用
+    tools 或本条专用 tools）时整条不执行、聚合行固定回执 _FANOUT_WRITE_BLOCK，
+    不静默裁剪（静默降级=模型以为写成功）。拦截粒度=单条子任务：同批其余
+    条目照常并行聚合，整个调用不因一条写请求拒绝。条目执行中调用写工具
+    由 allowed_tools 自然拦住、错误串回灌。
+
     刻意不做 worktree 模式：fan-out 定位是检索/整理/验证类杂活的并行位；
     改文件的活走 spawn_subagent(worktree=True) 或任务沙箱，改动合并要过
     确认缝——N 个并行弹窗抢单槽位确认是自找的竞态。
     """
-    valid = [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
-    if not valid:
+    entries = _fanout_entries(tasks, tools)
+    if not entries:
         return "错误：tasks 不能为空——给至少一件子任务"
-    if len(valid) > MAX_FANOUT:
-        return f"错误：一次最多 fan-out {MAX_FANOUT} 件（收到 {len(valid)} 件）——拆批再派"
+    if len(entries) > MAX_FANOUT:
+        return f"错误：一次最多 fan-out {MAX_FANOUT} 件（收到 {len(entries)} 件）——拆批再派"
 
-    def _one(task: str) -> tuple[RunResult, str]:
+    def _one(task: str, entry_tools: list[str] | None) -> tuple[RunResult, str]:
         try:
             return spawn_subagent(
-                task, llm=llm, registry=registry, tools=tools,
+                task, llm=llm, registry=registry, tools=entry_tools,
                 max_rounds=max_rounds, confirm=confirm, on_event=on_event,
-                should_cancel=should_cancel,
+                should_cancel=should_cancel, read_only=True,
             )
         except Exception as exc:   # spawn 自身兜底之外的意外（与 _run_parallel 同款防线）
             return RunResult.FAILED, f"错误：子任务执行异常（{exc}）"
 
-    with ThreadPoolExecutor(max_workers=len(valid)) as ex:
-        results = [f.result() for f in [ex.submit(_one, t) for t in valid]]
+    # B8 派发前拦截：显式点名写工具的条目零执行（不静默裁剪），回执进聚合行
+    blocked = [bool(ts and set(ts) & _WRITE_TOOLS) for _, ts in entries]
+    runnable = [e for e, b in zip(entries, blocked, strict=True) if not b]
+    with ThreadPoolExecutor(max_workers=max(1, len(runnable))) as ex:
+        futs = [ex.submit(_one, task, entry_tools) for task, entry_tools in runnable]
+        done = [f.result() for f in futs]
 
-    ok = sum(1 for status, _ in results if status is RunResult.COMPLETED)
-    lines = [f"〔fan-out 聚合：{len(valid)} 件，{ok} 完成、{len(valid) - ok} 未完成〕"]
+    ok = sum(1 for status, _ in done if status is RunResult.COMPLETED)
+    lines = [f"〔fan-out 聚合：{len(entries)} 件，{ok} 完成、{len(entries) - ok} 未完成〕"]
     labels = {RunResult.COMPLETED: "完成", RunResult.CANCELLED: "取消", RunResult.FAILED: "失败"}
-    for i, ((status, conclusion), task) in enumerate(zip(results, valid, strict=True), start=1):
-        lines.append(f"[{i}/{len(valid)}] {labels[status]}｜{task[:60]}\n{conclusion}")
+    results = iter(done)
+    for i, ((task, _), is_blocked) in enumerate(zip(entries, blocked, strict=True), start=1):
+        if is_blocked:
+            lines.append(f"[{i}/{len(entries)}] 拦截｜{task[:60]}\n{_FANOUT_WRITE_BLOCK}")
+            continue
+        status, conclusion = next(results)
+        lines.append(f"[{i}/{len(entries)}] {labels[status]}｜{task[:60]}\n{conclusion}")
     return "\n".join(lines)
 
 
@@ -370,7 +499,7 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         receives_cancel=True,    # 082 ①：取消缝透传（registry 注入 should_cancel → 子 run_turn）
     ))
 
-    def _fanout(tasks: list[str], tools: list[str] | None = None,
+    def _fanout(tasks: list, tools: list[str] | None = None,
                 max_rounds: int = DEFAULT_ROUNDS,
                 confirm=None, event=None, should_cancel=None) -> str:
         return fan_out_subagents(
@@ -387,16 +516,33 @@ def register_spawn_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
             "适合「同一件事的多个独立切面」：并行检索、逐项验证、批量整理。"
             "tasks 是子任务书清单（每条自包含，子上下文看不到本对话）；"
             "tools/max_rounds 与 spawn_subagent 同义。"
-            "注意：只适合杂活——要改文件的活用 spawn_subagent(worktree=True) 或任务沙箱；"
-            "子上下文没有本对话的历史。"
+            "条目一律只读：write_file/run_command 不可用，显式点名写工具的条目"
+            "整条不执行（聚合行标「已拦截」）——要写文件的活用"
+            "spawn_subagent(worktree=True) 或任务沙箱；子上下文没有本对话的历史。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "tasks": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "子任务书清单（每条自包含：做什么、产出什么结论；互不依赖）",
+                    "items": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "task": {"type": "string", "description": "子任务书（自包含：做什么、产出什么结论）"},
+                                    "tools": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "本条子任务专用的工具名清单（缺省=共用 tools）",
+                                    },
+                                },
+                                "required": ["task"],
+                            },
+                        ]
+                    },
+                    "description": "子任务书清单（每条自包含：做什么、产出什么结论；互不依赖）；可写纯文本，或用 {task, tools} 对象给单条指定工具",
                 },
                 "tools": {
                     "type": "array",

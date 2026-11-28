@@ -20,7 +20,7 @@ from facta.orchestrator.loop import run_turn
 from facta.server.run_store import STATUS_RUNNING, Run
 from facta.tools.context import ToolContext
 from facta.tools.registry import Tool, ToolRegistry
-from facta.tools.spawn import register_spawn_tools
+from facta.tools.spawn import fan_out_subagents, register_spawn_tools
 
 
 class SlowLLM(LLM):
@@ -233,3 +233,26 @@ def test_request_confirm_parallel_no_crosstalk():
     assert set(results.values()) == {True, False}   # 两个独立决策都正确返回
     assert run.confirm_pending is False             # 单槽位复位
     assert run.status == STATUS_RUNNING             # 状态回到 running
+
+
+# ---------- P0 B8：写拦截不拖累兄弟条目并行（Spec 1 §2.5） ----------
+
+
+def test_fanout_blocked_entry_does_not_stall_siblings():
+    # 拦截粒度=单条子任务：写请求条目零执行，兄弟条目照常并行聚合（耗时≈单个）
+    registry = ToolRegistry()
+    ctx = ToolContext(notes_dir=None, llm=SlowLLM())   # type: ignore[arg-type]
+    register_spawn_tools(registry, ctx)
+    llm = SlowLLM(delay=0.3)
+
+    start = time.perf_counter()
+    out = fan_out_subagents(
+        [{"task": "改文件", "tools": ["write_file"]}, "甲", "乙"],
+        llm=llm, registry=registry,
+    )
+    elapsed = time.perf_counter() - start
+
+    assert "已拦截：fan-out 不允许写工具" in out
+    assert "3 件，2 完成、1 未完成" in out
+    assert "完成[甲]" in out and "完成[乙]" in out
+    assert elapsed < 0.5, f"耗时 {elapsed:.2f}s，兄弟条目疑似未并行（串行应 ≈0.6s）"

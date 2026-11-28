@@ -10,14 +10,19 @@
 """
 
 import json
+import re
+import subprocess
+import threading
 import time
+
+import pytest
 
 from facta.core.llm import LLM, LLMUnavailableError, ScriptedLLM
 from facta.core.types import Message
 from facta.memory.store import Session
 from facta.orchestrator.agent import Agent
 from facta.orchestrator.loop import RunResult, run_turn
-from facta.tools.context import ToolContext
+from facta.tools.context import ToolContext, WorkspaceBinding
 from facta.tools.registry import Tool, ToolRegistry
 from facta.tools.spawn import fan_out_subagents, register_spawn_tools, spawn_subagent
 
@@ -465,3 +470,148 @@ def test_conclusion_capped_with_pointer():
     assert len(out) < 3000
     assert out.startswith("长")
     assert "已截断" in out
+
+
+# ---------- P0 B6：子沙箱绑定继承（Spec 1 §2.4） ----------
+
+
+def _git(repo, *args: str) -> str:
+    """真 git 命令（测试地基，test_workspace_binding 同款）：成功回 stdout。"""
+    proc = subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
+@pytest.fixture()
+def bound_repo(tmp_path, monkeypatch):
+    """绑定仓库地基：真 git 仓库（main + 基线提交）+ worktree 模块根指过来。
+
+    仓库与 WORKTREES_DIR 分家（test_worktree.git_repo 同款拓扑）：沙箱目录
+    住 tmp/worktrees，git 元数据归属 tmp/repo——与生产同构（沙箱集中住
+    Facta data/，分支/提交进用户绑定仓库）。
+    """
+    from facta.tools import worktree as wt_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "base.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "init"], cwd=repo, check=True)
+    monkeypatch.setattr(wt_mod, "WORKSPACE_ROOT", repo)
+    monkeypatch.setattr(wt_mod, "WORKTREES_DIR", tmp_path / "worktrees")
+    return repo
+
+
+def test_b6_sub_sandbox_inherits_binding(bound_repo, tmp_path):
+    # 父子继承：子沙箱建在绑定仓库、合回落父工作区（任务沙箱）、target_branch 不被直接写
+    repo = bound_repo
+    baseline = _git(repo, "rev-parse", "HEAD")
+    # 父工作区（任务沙箱）：绑定仓库的另一 worktree——子沙箱改动的合回落点
+    parent_wt = tmp_path / "parent_wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(parent_wt), "-b", "task/sandbox", baseline],
+        cwd=repo, check=True,
+    )
+    binding = WorkspaceBinding(repo_root=repo, target_branch="main", baseline=baseline)
+    sub_llm = ScriptedLLM([
+        Message(role="assistant", content="", tool_calls=[
+            _call("write_file", {"path": "feat.py", "content": "print('feat')\n"}),
+        ]),
+        Message(role="assistant", content="结论：已创建 feat.py"),
+    ])
+    registry = ToolRegistry()
+    ctx = ToolContext(notes_dir=tmp_path / "notes", workspace_root=parent_wt,
+                      binding=binding, llm=sub_llm)
+    register_spawn_tools(registry, ctx)
+
+    refs_seen: list[str] = []
+
+    def _confirm(name, args):
+        # 裁决缝跑在合回之前：此刻子分支应已挂在绑定仓库 refs 上
+        refs_seen.append(_git(repo, "branch", "--list", "agent/*"))
+        return True
+
+    status, conclusion = spawn_subagent(
+        "建 feat.py", llm=sub_llm, registry=registry,
+        worktree=True, ctx=ctx, confirm=_confirm,
+    )
+
+    assert status is RunResult.COMPLETED
+    assert "feat.py" in conclusion
+    # ① 子沙箱分支/提交出现在绑定仓库 refs（不落 Facta 主仓、不落别处）
+    assert refs_seen and "agent/" in refs_seen[0]
+    assert "spawn:" in _git(repo, "log", "--oneline", "task/sandbox")
+    # ② 合回落父工作区（任务沙箱）：改动并入任务候选分支
+    assert (parent_wt / "feat.py").read_text(encoding="utf-8") == "print('feat')\n"
+    # ③ 绑定 target_branch 不被直接写：main 头不动、检出工作区零污染
+    assert _git(repo, "rev-parse", "main") == baseline
+    assert not (repo / "feat.py").exists()
+    assert _git(repo, "status", "--short") == ""
+
+
+# ---------- P0 B7/B8：fan-out 只读默认 + 显式写拦截（Spec 1 §2.5） ----------
+
+
+def test_b7_fanout_default_toolset_excludes_write_tools():
+    # 缺省条目工具集不含 write_file/run_command（程序侧判定：看程序递给子链的菜单）
+    sub_llm = ScriptedLLM([Message(role="assistant", content="做完了")])
+    registry, _ = _setup(sub_llm, "search_notes", "write_file", "run_command")
+    fan_out_subagents(["查甲"], llm=sub_llm, registry=registry)
+
+    names = {s["function"]["name"] for s in sub_llm.tool_menus[0]}
+    assert names == {"search_notes"}
+    assert "write_file" not in names and "run_command" not in names
+
+
+class _CountingEcho(_EchoLLM):
+    """回显 + 调用计数（线程安全）：B8 断言被拦条目零执行。"""
+
+    name = "counting-echo"
+
+    def __init__(self, delay: float = 0.0) -> None:
+        super().__init__(delay)
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def generate(self, messages, tools=None) -> Message:
+        with self._lock:
+            self.calls += 1
+        return super().generate(messages, tools)
+
+
+def test_b8_fanout_write_request_entry_intercepted():
+    # 显式请求写工具的条目：零执行、聚合该行固定回执；同批兄弟条目照常有结论
+    registry, _ = _setup(ScriptedLLM([]), "search_notes", "write_file")
+    llm = _CountingEcho()
+    out = fan_out_subagents(
+        [
+            {"task": "改配置文件", "tools": ["write_file"]},
+            "查甲",
+            {"task": "查乙", "tools": ["search_notes"]},
+        ],
+        llm=llm, registry=registry,
+    )
+
+    # 零执行：被拦条目一次都没进模型（兄弟两条各跑一次）
+    assert llm.calls == 2
+    # 聚合该行含固定回执（不静默裁剪：不是把 write_file 摘掉照跑）
+    blocked = next(b for b in re.split(r"(?m)^(?=\[\d+/\d+\])", out) if "改配置文件" in b)
+    assert "已拦截：fan-out 不允许写工具，请改用 spawn_subagent(worktree=True) 或任务沙箱" in blocked
+    # 同批其余条目照常并行聚合出结论
+    assert "〔fan-out 聚合：3 件，2 完成、1 未完成〕" in out
+    assert "完成[查甲]" in out and "完成[查乙]" in out
+
+
+def test_b8_shared_write_tools_intercepted_without_rejecting_call():
+    # 共用 tools 点名写工具：依赖它的条目同样拦截回执，整个调用不拒单
+    registry, _ = _setup(ScriptedLLM([]), "search_notes", "write_file")
+    llm = _CountingEcho()
+    out = fan_out_subagents(
+        ["查甲", {"task": "查乙", "tools": ["search_notes"]}],
+        llm=llm, registry=registry, tools=["write_file", "search_notes"],
+    )
+
+    assert llm.calls == 1                      # 只有自带干净工具的条目执行
+    assert "已拦截：fan-out 不允许写工具" in out
+    assert "完成[查乙]" in out                  # 兄弟条目照常出结论

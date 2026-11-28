@@ -49,7 +49,7 @@
 ### 2.4 父子继承
 
 - 子 agent 的 registry 必须继承父任务当前工作区：`registry_in_worktree` 机制沿用（file/terminal 五件重锚沙箱，其余共享，audit 与 scope_check 一并继承）。
-- `spawn_subagent(worktree=True)` 的沙箱必须建在绑定仓库、分支进绑定仓库、合回目标 = 绑定 target_branch；`spawn_step` 同款。
+- `spawn_subagent(worktree=True)` 的沙箱必须建在绑定仓库、分支进绑定仓库；**合回目标 = 父任务工作区（任务沙箱分支）**——子改动并入任务候选，随任务收口一次合入 target_branch，不得绕过任务卡审查直合目标分支（实施校正：直合 target_branch 会让子改动脱离任务卡 diff 与验证，破坏「核验后批准合入」的验收路径）；无绑定的普通聊天维持现状（合回当前工作分支）。`spawn_step` 同款。
 - 子任务工具集仍强制过 `_FORBIDDEN` 禁单（[spawn.py](../src/facta/tools/spawn.py#L77)），递归防护不松。
 
 ### 2.5 fan-out 只读默认与写拦截
@@ -124,7 +124,7 @@
 | B3 | target_branch 解析 | 缺省 = 当前检出分支；显式指定不存在的分支 → 创建失败 | 同上 |
 | B4 | worktree/分支落点 | 沙箱分支与提交进绑定仓库（`agent/<uuid8>` 可查），Facta 主仓无新分支/新提交 | 同上 |
 | B5 | 双仓并行互不串 | T1 绑 A、T2 绑 B 并发：沙箱、分支、写入、合入落点各自正确，父子写入不越界（文件证据核验） | 同上 |
-| B6 | 父子继承 | spawn_subagent(worktree=True) 写入落绑定仓库沙箱，合回目标 = 绑定 target_branch | 同上 |
+| B6 | 父子继承 | spawn_subagent(worktree=True) 写入落绑定仓库沙箱，合回目标 = 父任务工作区（并入任务候选，不直合 target_branch） | 同上 |
 | B7 | fan-out 默认只读 | 缺省条目工具集不含 write_file/run_command（程序侧判定） | 同上 |
 | B8 | fan-out 显式写拦截 | 请求写工具的条目不执行、聚合标「已拦截…」固定回执；同批其余条目照跑有结论 | 同上 |
 | B9 | 恢复选项 | 删 worktree 目录留分支：呈现三选项；重建挂回后原产物可找回 | 同上 |

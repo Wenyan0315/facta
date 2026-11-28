@@ -47,20 +47,25 @@ from facta.tools.worktree import (
 def git_repo(tmp_path, monkeypatch):
     """真 git 仓库 + 一份基线提交；把 worktree 模块的根指过来。
 
-    patch 目标是 agent.tools.worktree（from-import 后名字绑定在消费模块，
-    只 patch paths 不生效——S6a 开发实踩：测试的 worktree 建到了真项目里，
-    垃圾 commit 混进 main）。files/terminal 的锚点走 ctx 注入不受影响。
+    仓库与 WORKTREES_DIR 分家（tmp_path/repo vs tmp_path/worktrees）：
+    P0 合入前置要求目标工作区干净，沙箱目录住进仓库会顶着 untracked 噪声
+    把一切合入挡在前置门外——生产拓扑同款（沙箱住 Facta data/，用户仓库
+    另在别处）。patch 目标是 facta.tools.worktree（from-import 后名字绑定
+    在消费模块，只 patch paths 不生效——S6a 开发实踩：测试的 worktree 建到
+    了真项目里，垃圾 commit 混进 main）。files/terminal 的锚点走 ctx 注入不受影响。
     """
     from facta.tools import worktree as wt_mod
 
-    monkeypatch.setattr(wt_mod, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(wt_mod, "WORKTREES_DIR", tmp_path / "data" / "worktrees")
-    (tmp_path / "base.py").write_text("x = 1\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(wt_mod, "WORKSPACE_ROOT", repo)
+    monkeypatch.setattr(wt_mod, "WORKTREES_DIR", tmp_path / "worktrees")
+    (repo / "base.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
-                   "commit", "-qm", "init"], cwd=tmp_path, check=True)
-    return tmp_path
+                   "commit", "-qm", "init"], cwd=repo, check=True)
+    return repo
 
 
 def _git_status(repo) -> str:
@@ -101,10 +106,10 @@ def test_create_changes_merge_back(git_repo):
     (wt / "new.py").write_text("y = 1\n", encoding="utf-8")
 
     changes = worktree_changes(wt)
-    assert "base.py" in changes and "new.py" in changes
+    assert "base.py" in changes.summary() and "new.py" in changes.summary()
 
-    out = commit_and_merge_back(wt, "test: 改动")
-    assert "已合回" in out
+    status, _detail = commit_and_merge_back(wt, "test: 改动")
+    assert status == "merged"
     assert (git_repo / "base.py").read_text(encoding="utf-8") == "x = 2\n"
     assert (git_repo / "new.py").exists()
     assert not wt.exists()                      # worktree 已清理
@@ -124,11 +129,12 @@ def test_create_discard_zero_residue(git_repo):
 
 
 def test_merge_back_with_no_changes(git_repo):
-    # 空改动守卫：无改动时 commit_and_merge_back 不 commit 不 merge，直接清理
+    # 空改动守卫：四段无产物时 commit_and_merge_back 不 commit 不 merge，
+    # 返回 empty 态直接清理
     wt, err = create_worktree()
     assert err == ""
-    out = commit_and_merge_back(wt, "空")
-    assert "无改动" in out
+    status, _detail = commit_and_merge_back(wt, "空")
+    assert status == "empty"
     assert not wt.exists()
 
 
@@ -335,9 +341,7 @@ def test_task_sandbox_discard_keeps_main_clean(git_repo):
     resp = client.post(f"/api/tasks/{tid}/worktree", json={"action": "discard"})
     assert resp.status_code == 200 and resp.json()["cleared"]
     assert not (git_repo / "feat.py").exists()
-    # 主树零泄漏（tasks/ 是 conftest 的 TASKS_DIR 落进同一 tmp 的基建噪音）
-    noise = {ln.strip()[3:] for ln in _git_status(git_repo).splitlines() if ln.strip()}
-    assert noise <= {"tasks/"}
+    assert _git_status(git_repo) == ""          # 主树零泄漏（沙箱/tasks 都住仓库外）
     assert client.get(f"/api/tasks/{tid}").json()["worktree"] == ""
 
 
