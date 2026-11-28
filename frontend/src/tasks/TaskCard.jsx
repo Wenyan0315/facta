@@ -29,6 +29,28 @@ function money(total) {
   return `${calls ?? 0} 次调用 / ¥${(cost ?? 0).toFixed(4)}`;
 }
 
+// 历时：started_at → updated_at（终态）或此刻（在飞）。resume 会重置
+// started_at（保险丝基线），所以这里报的是「本轮」历时，不是任务总寿命
+function duration(task) {
+  if (!task.started_at) return "—";
+  const end = ["done", "failed", "cancelled"].includes(task.status)
+    ? task.updated_at || task.started_at
+    : Date.now() / 1000;
+  let s = Math.max(0, Math.round(end - task.started_at));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  s = s % 60;
+  return h ? `${h}时${m}分` : m ? `${m}分${s}秒` : `${s}秒`;
+}
+
+// Token 合计：tokens_in + tokens_out（prompt cache 命中/未命中都算在 in 里，
+// 不重复计）。k/M 缩写防 chip 撑爆卡片
+function tokens(total) {
+  const n = (total?.tokens_in ?? 0) + (total?.tokens_out ?? 0);
+  if (!n) return "—";
+  return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n);
+}
+
 // updated_at 是 epoch 秒（Task.to_dict），不是 ISO 串——按本地时刻渲染成
 // 「2026-11-19 22:14」够读了（秒级精度对 20s 轮询的面板没意义）
 function stamp(ts) {
@@ -101,6 +123,8 @@ export default function TaskCard({ task, runs, onChanged }) {
         )}
         <span class="tp-chip">续跑 {task.continuations} 次</span>
         <span class="tp-chip">Run {task.run_ids?.length ?? 0} 条</span>
+        <span class="tp-chip">历时 {duration(task)}</span>
+        <span class="tp-chip">Token {tokens(task.billing?.totals)}</span>
         <span class="tp-chip">账单：{money(task.billing?.totals)}</span>
         {task.repo_root ? <span class="tp-chip">仓：{task.repo_root}</span> : null}
       </div>
@@ -130,12 +154,22 @@ export default function TaskCard({ task, runs, onChanged }) {
           </button>
         ) : null}
         {!TERMINAL.includes(task.status) ? (
+          // 语义区分（编排控制台第一刀）：排队/熔断时没有在飞 Run，取消立即
+          // 生效；running/waiting 时是协作式打断——当前步收尾后才停，不能
+          // 让用户以为是立刻 kill（诚实降级做成可见）
           <button
             class="tp-btn tp-btn-danger"
             disabled={busy}
+            title={
+              ["running", "waiting-approval", "waiting-steer"].includes(task.status)
+                ? "协作式打断：当前步收尾后才停；若正在写文件，可能留下半写状态"
+                : undefined
+            }
             onClick={() => act(() => cancelTask(task.task_id))}
           >
-            取消
+            {["running", "waiting-approval", "waiting-steer"].includes(task.status)
+              ? "打断"
+              : "取消（立即生效）"}
           </button>
         ) : null}
         <button class="tp-btn" disabled={busy} onClick={showBilling}>
