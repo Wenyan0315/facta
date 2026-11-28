@@ -70,6 +70,11 @@ def _next_frame(gen) -> dict:
     return json.loads(data_line[len("data: "):])
 
 
+def _next_raw(gen) -> str:
+    """原始帧文本（断言 id 行游标格式用）。"""
+    return next(gen)
+
+
 def _wait_task_status(client, task_id: str, statuses, timeout: float = 5.0) -> str:
     """轮询任务状态直到命中（worker 在后台线程推进，测试线程顺序请求）。"""
     deadline = time.time() + timeout
@@ -185,8 +190,7 @@ def test_task_stream_snapshot_then_live():
 
 def test_task_stream_old_cursor_falls_back_to_snapshot():
     # 旧 int 游标（无 gen 佐证）→ 快照自愈而非「空增量 + 心跳干等」（P1 修
-    # SSE 跨代际断层的 bug）。gen:seq 游标下的续传语义由下方 TaskBus 单测覆盖；
-    # task_event_stream 接 gen:seq 游标（端点接线波）后续传帧断言回到此层。
+    # SSE 跨代际断层的 bug）。gen:seq 游标下的续传语义由下方回归补例覆盖。
     bus = TaskBus()
     for i in range(3):
         bus.emit("task.updated", {"i": i})
@@ -195,6 +199,58 @@ def test_task_stream_old_cursor_falls_back_to_snapshot():
     first = _next_frame(gen)
     gen.close()
     assert first["type"] == "snapshot" and first["data"] == {"tasks": ["t"]}
+
+
+# ---------- D1-D3：task_event_stream 的 gen:seq 游标接线（帧语义离线测）----------
+# HTTP 面不测：Starlette TestClient 传输层缓冲整个响应体（无限流必挂，实测
+# 首帧都不放行），端点只有「Last-Event-ID 原样透传 + 挂流」两行胶水——两种
+# 游标格式的解析真值源在 TaskBus.since（test_taskbus_* 钉），这里钉接线。
+
+
+def test_task_stream_gen_seq_replay_and_resume_no_snapshot():
+    # D3 回归（R 改写掉的旧断言归位）：gen:seq 游标续传只补缺的增量、无快照；
+    # 哨兵之后的 seq 严格递增；断线在 seq=2 之后重连只补 seq=3（旧件不重复）
+    bus = TaskBus()
+    for i in range(3):
+        bus.emit("task.updated", {"i": i})
+
+    gen = task_event_stream(bus, f"{bus.gen}:0", lambda: {})
+    frames = [_next_frame(gen) for _ in range(3)]
+    gen.close()
+    assert all(f["type"] != "snapshot" for f in frames)
+    assert [f["seq"] for f in frames] == [1, 2, 3]
+
+    gen2 = task_event_stream(bus, f"{bus.gen}:2", lambda: {})   # 断线在 seq=2 之后重连
+    again = _next_frame(gen2)
+    gen2.close()
+    assert again["seq"] == 3 and again["data"] == {"i": 2}   # 旧件不重复
+
+
+def test_task_stream_frame_id_is_gen_seq_cursor():
+    # D3：SSE 帧 id = bus.event_id(seq)（gen:seq）——客户端 Last-Event-ID 原样
+    # 回传即续传游标（快照帧 id 同构，重连从快照时点接着走增量）
+    bus = TaskBus()
+    gen = task_event_stream(bus, None, lambda: {"tasks": ["t"]})
+    snap = _next_raw(gen)                    # 快照帧（id = 快照时点游标 gen:0）
+    bus.emit("task.updated", {"i": 1})       # 实时段
+    live = _next_raw(gen)
+    gen.close()
+    assert snap.startswith(f"id: {bus.gen}:0\n")
+    assert live.startswith(f"id: {bus.gen}:1\n") and "task.updated" in live
+
+
+def test_task_stream_unknown_gen_cursor_falls_back_to_snapshot():
+    # D1/D2：跨代际（旧总线游标）与超前游标 → 回全量快照后转增量，断线重连
+    # 即时获得现状——修「旧游标 300 连新总线只收心跳」的断层
+    bus = TaskBus()
+    for i in range(3):
+        bus.emit("task.updated", {"i": i})
+
+    for cursor in (f"deadbeef:{bus.seq}", f"{bus.gen}:99", "300"):
+        gen = task_event_stream(bus, cursor, lambda: {"tasks": ["t"]})
+        first = _next_frame(gen)
+        gen.close()
+        assert first["type"] == "snapshot" and first["data"] == {"tasks": ["t"]}
 
 
 def test_confirm_push_instant_via_bus(tmp_path):

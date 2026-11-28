@@ -72,6 +72,9 @@ export default function App() {
     refreshList();
     refreshSide();
 
+    // P1 游标：SSE 帧 id = gen:seq（总线代号:序号）。EventSource 断线重连原样
+    // 透传 Last-Event-ID ⇒ 前端不自存游标、帧 id 不丢；旧纯数字/跨代际游标由
+    // 服务端回全量快照自愈（onopen 重拉全量是第二重兜底），前端零改动。
     const es = new EventSource("/api/tasks/events");
     es.addEventListener("snapshot", onEnvelope((d) => {
       setTasks(d.tasks || []);

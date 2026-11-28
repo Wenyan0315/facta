@@ -55,7 +55,10 @@ STATUS_CANCELLED = "cancelled"   # 用户取消终态
 STATUS_INTERRUPTED = "interrupted"   # M5：孤儿轮——服务被杀留下的未收尾轮次，从盘上重建时按此收口
 
 _TERMINAL = {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_INTERRUPTED}
-_IN_FLIGHT = {STATUS_PENDING, STATUS_RUNNING, STATUS_WAITING}   # 准入口径：等待确认也算在跑（人在裁决，会话仍被占着）
+# 准入口径：等待确认也算在跑——**同会话互斥条**如此（人在裁决，会话仍被占着）；
+# 全局上限条则把 waiting_approval 排除在外（P1 审批挂起不占执行槽，见
+# create_if_idle）；in_flight_count 的账单近似标注口径不动（归因正确性归 Spec 4）。
+_IN_FLIGHT = {STATUS_PENDING, STATUS_RUNNING, STATUS_WAITING}
 
 
 @dataclass
@@ -308,6 +311,9 @@ class RunStore:
 
     @property
     def max_in_flight(self) -> int:
+        """全局并发上限的语义（P1 补注）：数的是「真在跑」的 Run——审批挂起
+        （waiting_approval）不占槽（create_if_idle 全局上限条），同会话互斥条
+        仍把挂起算「会话在忙」。"""
         return self._max_in_flight
 
     def _adopt(self, run: Run) -> Run:
@@ -347,7 +353,11 @@ class RunStore:
             in_flight = [r for r in self._runs.values() if r.status in _IN_FLIGHT]
             if any(r.session_id == session_id for r in in_flight):
                 return "该会话已有任务在运行，请稍候再发"
-            if len(in_flight) >= self._max_in_flight:
+            # P1（spec 2.4）全局上限条：waiting_approval 不计入——审批挂起是
+            # 「人在裁决」不是「在跑」，压着上限会让一个弹窗卡死全进程的准入。
+            # 同会话互斥条（上一行）不动；in_flight_count（账单近似）口径不动。
+            busy = [r for r in in_flight if r.status != STATUS_WAITING]
+            if len(busy) >= self._max_in_flight:
                 return f"并发任务已达上限（{self._max_in_flight}），请等待其中一个完成"
             run = Run(run_id=uuid.uuid4().hex, session_id=session_id, title=title)
             self._runs[run.run_id] = run

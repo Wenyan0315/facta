@@ -52,6 +52,19 @@ export const cancelTask = (taskId) => post(`/api/tasks/${taskId}/cancel`);
 export const resumeTask = (taskId, text = "") => post(`/api/tasks/${taskId}/resume`, { text });
 export const steerRun = (runId, text) => post(`/api/runs/${runId}/steer`, { text });
 export const confirmRun = (runId, approve) => post(`/api/runs/${runId}/confirm`, { approve });
+// P1 审批项（按项裁决，优先于旧布尔端点）：查询按 task/run 过滤；裁决幂等
+// （重复裁决回原裁决，异参 409）。带与原项不同的 arguments/target = 编辑后
+// 裁决 → 后端生成新待审版本（原项 superseded），返回体 message 注明。
+export const fetchApprovals = (taskId, runId) =>
+  get(`/api/approvals?${new URLSearchParams({ ...(taskId && { task_id: taskId }), ...(runId && { run_id: runId }) })}`);
+// args/target 用 undefined 区分「不改」（缺省不发该键）与「改成空值」（照发）——
+// 编辑清空 target 也是一次改参，要走新版本链，不能被当成「没改」
+export const decideApproval = (id, approved, args, target) =>
+  post(`/api/approvals/${id}/decision`, {
+    approved,
+    ...(args !== undefined ? { arguments: args } : {}),
+    ...(target !== undefined ? { target } : {}),
+  });
 // settle 带 candidate 钉预览版本（S2-3 候选比对，不一致后端回 409）；缺省不发该键
 export const settleTaskWorktree = (taskId, action, candidate) =>
   post(`/api/tasks/${taskId}/worktree`, { action, ...(candidate ? { candidate } : {}) });
