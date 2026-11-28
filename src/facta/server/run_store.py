@@ -13,19 +13,30 @@ v1 只显式建模 Run；Step/Attempt 概念先落在注释里，等 checkpoint 
 不变量：一个 Run 只有一个终态（completed/failed/cancelled 三选一）。
 事件 append-only（只增不改）——「模型可见即已记录」事件流思想的 v0，
 S3 审计流事件化（素材库#8）在此继续长。
+
+P1 追加两件基建（与 Run 状态机并列、互不依赖）：
+    TaskBus 游标代号  续传游标带总线实例代号（gen:seq），跨代际断层不再漏件；
+    ApprovalStore     审批项持久化原语——重启可恢复、按审批项 id 幂等裁决，
+                      替代 Run.request_confirm 的内存单槽位（端点接线波迁移）。
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import queue
 import threading
 import time
 import uuid
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from facta.paths import DATA_ROOT
 
 if TYPE_CHECKING:   # 循环引用护栏：run_log import 本模块的 RunEvent
     from facta.server.run_log import RunLog
@@ -44,7 +55,10 @@ STATUS_CANCELLED = "cancelled"   # 用户取消终态
 STATUS_INTERRUPTED = "interrupted"   # M5：孤儿轮——服务被杀留下的未收尾轮次，从盘上重建时按此收口
 
 _TERMINAL = {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_INTERRUPTED}
-_IN_FLIGHT = {STATUS_PENDING, STATUS_RUNNING, STATUS_WAITING}   # 准入口径：等待确认也算在跑（人在裁决，会话仍被占着）
+# 准入口径：等待确认也算在跑——**同会话互斥条**如此（人在裁决，会话仍被占着）；
+# 全局上限条则把 waiting_approval 排除在外（P1 审批挂起不占执行槽，见
+# create_if_idle）；in_flight_count 的账单近似标注口径不动（归因正确性归 Spec 4）。
+_IN_FLIGHT = {STATUS_PENDING, STATUS_RUNNING, STATUS_WAITING}
 
 
 @dataclass
@@ -297,6 +311,9 @@ class RunStore:
 
     @property
     def max_in_flight(self) -> int:
+        """全局并发上限的语义（P1 补注）：数的是「真在跑」的 Run——审批挂起
+        （waiting_approval）不占槽（create_if_idle 全局上限条），同会话互斥条
+        仍把挂起算「会话在忙」。"""
         return self._max_in_flight
 
     def _adopt(self, run: Run) -> Run:
@@ -336,7 +353,11 @@ class RunStore:
             in_flight = [r for r in self._runs.values() if r.status in _IN_FLIGHT]
             if any(r.session_id == session_id for r in in_flight):
                 return "该会话已有任务在运行，请稍候再发"
-            if len(in_flight) >= self._max_in_flight:
+            # P1（spec 2.4）全局上限条：waiting_approval 不计入——审批挂起是
+            # 「人在裁决」不是「在跑」，压着上限会让一个弹窗卡死全进程的准入。
+            # 同会话互斥条（上一行）不动；in_flight_count（账单近似）口径不动。
+            busy = [r for r in in_flight if r.status != STATUS_WAITING]
+            if len(busy) >= self._max_in_flight:
                 return f"并发任务已达上限（{self._max_in_flight}），请等待其中一个完成"
             run = Run(run_id=uuid.uuid4().hex, session_id=session_id, title=title)
             self._runs[run.run_id] = run
@@ -430,6 +451,11 @@ class TaskBus:
     ponytail: 缓冲定长 500——断层（缓冲挤掉缺件）就发全量快照自愈（快照
     载荷本身是全量状态，幂等重放可容忍重复）；升级路径＝断层也要增量续传
     时再上落盘事件日志，触发信号＝实测出现「快照自愈抖动」投诉。
+
+    P1 游标代号：seq 只在单个总线实例内单调——服务重启后新总线 seq 从 1
+    重来，旧游标只带数字会被误判「已追平」（增量空、无快照 = 心跳干等，
+    即复现的 SSE 跨代际断层 bug）。游标因此带实例代号 gen（gen:seq），
+    跨代际或无法验真一律快照自愈。
     """
 
     def __init__(self, maxlen: int = 500) -> None:
@@ -437,12 +463,25 @@ class TaskBus:
         self._subs: list[queue.Queue] = []
         self._seq = 0
         self._lock = threading.Lock()
+        # 实例代号（P1）：8 位 hex 短码足够——只需区分总线实例（服务每次
+        # 启动建一个新总线），不追求全局唯一到防碰撞级。
+        self.gen = uuid.uuid4().hex[:8]
 
     @property
     def seq(self) -> int:
         """当前全局 seq（SSE 端点的续传哨兵）。"""
         with self._lock:
             return self._seq
+
+    def cursor(self) -> str:
+        """当前续传游标（gen:seq）——客户端 Last-Event-ID 回传的就是它。"""
+        with self._lock:
+            return f"{self.gen}:{self._seq}"
+
+    def event_id(self, seq: int) -> str:
+        """事件帧 id（gen:seq，与 cursor() 同构）：app 层拼 SSE 帧 id 用，
+        客户端断线回传即游标（不改 RunEvent 结构，id 由调用方拼）。"""
+        return f"{self.gen}:{seq}"
 
     def emit(self, type: str, data: dict | None = None) -> None:
         """广播一条任务面事件（append-only；载荷=全量状态，幂等可重放）。"""
@@ -465,15 +504,271 @@ class TaskBus:
             if q in self._subs:
                 self._subs.remove(q)
 
-    def since(self, last_seq: int) -> list[RunEvent] | None:
-        """续传段：缓冲完整覆盖 last_seq 之后 → 只补缺的事件；覆盖不了 → None。
+    def since(self, cursor: str | int | None) -> list[RunEvent] | None:
+        """续传段：本代游标（gen:seq）且缓冲完整覆盖 → 只补缺的事件；否则 None。
 
-        None = 断层（或 last_seq 落在缓冲外）——调用方发全量快照自愈，
-        这比「假装续传了」诚实（宁可重放全量，不可漏件）。
+        None = 续传不可信 → 调用方发全量快照自愈（快照载荷幂等，宁可重放
+        全量，不可漏件）。四种 None：跨代际（gen 不匹配——服务重启后旧 seq
+        已无意义）、seq 超前（> 当前 seq，游标来自别处）、断层（缺件已被
+        环形缓冲挤掉）、旧 int 游标/None/无法解析的串（无 gen 佐证，不能
+        证明同代——「旧游标 300 连上重启后总线只收心跳」的 bug 正是它）。
+        gen 匹配时 seq 语义与旧 int 版一致（补齐/去重口径不变）。
         """
         with self._lock:
+            seq = self._cursor_seq(cursor)
+            if seq is None or seq > self._seq:
+                return None   # 不可解析 / 超前：快照自愈
             if not self._buf:
-                return [] if last_seq >= self._seq else None
-            if last_seq + 1 < self._buf[0].seq:
+                return [] if seq == self._seq else None
+            if seq + 1 < self._buf[0].seq:
                 return None   # 缺件已被环形缓冲挤掉
-            return [ev for ev in self._buf if ev.seq > last_seq]
+            return [ev for ev in self._buf if ev.seq > seq]
+
+    def _cursor_seq(self, cursor: str | int | None) -> int | None:
+        """游标 → 本代 seq；非「本代 gen:seq」形态一律 None（快照判据收口点）。"""
+        if not isinstance(cursor, str):
+            return None   # 旧 int 游标 / None：无 gen 佐证
+        gen, sep, rest = cursor.partition(":")
+        if not sep or gen != self.gen:
+            return None
+        try:
+            seq = int(rest)
+        except ValueError:
+            return None
+        return seq if seq >= 0 else None
+
+
+# ---- P1：审批持久化原语（ApprovalStore）----
+# 存在意义：Run 的确认单槽位（request_confirm/_confirm_event）是内存态，服务
+# 重启全丢、重复裁决可能落到该 Run 的下一项审批。审批项落成可寻址的持久记录
+# 后：重启可恢复（pending 清单照常弹窗）、裁决按审批项 id 幂等、编辑走版本链
+# 重新审。Run.request_confirm 现有行为不动——端点接线波迁到本仓，本波只加不破。
+
+# 审批项状态机：
+#   pending →（裁决）approved/rejected →（执行回填）留结果
+#   pending →（编辑）superseded（让位新版本，此后不再受理裁决）
+#   approved/rejected → unknown_result（执行结果不明，防「以为没跑而重复执行」）
+APPROVAL_PENDING = "pending"
+APPROVAL_APPROVED = "approved"
+APPROVAL_REJECTED = "rejected"
+APPROVAL_SUPERSEDED = "superseded"
+APPROVAL_UNKNOWN = "unknown_result"
+
+
+def _now_iso() -> str:
+    """审批时刻（ISO 串落盘字段）；naive 本地时间与会话时间戳同口径。"""
+    return datetime.now().isoformat(timespec="seconds")
+
+
+@dataclass
+class ApprovalItem:
+    """一项操作审批（持久化记录，独立于 Run 类）。
+
+    版本链（supersedes/superseded_by）：编辑 = 旧项 superseded 留档 + 新项
+    pending 重新走审——历史可追溯，「改了参数偷偷批」在结构上不可能。
+    """
+
+    id: str                      # uuid4
+    task_id: str                 # 可空（聊天 Run 无任务）
+    run_id: str
+    tool: str
+    arguments: dict              # 操作参数（结构化）
+    target: str                  # 操作目标（如文件路径/资源标识），可空
+    status: str                  # pending | approved | rejected | superseded | unknown_result
+    approved: bool | None = None   # 裁决结果（superseded 恒 None——编辑不落裁决）
+    result: str = ""             # 执行结果回填（可恢复查询）
+    executed: bool = False       # 是否已执行（match_decided 的幂等判据）
+    created_at: str = ""         # ISO 时间
+    decided_at: str = ""
+    supersedes: str = ""         # 版本链：本项取代了谁
+    superseded_by: str = ""      # 被谁取代
+
+
+class ApprovalStore:
+    """持久化审批仓：单一 JSON 快照 + 线程锁，读写即存盘，重启存活。
+
+    路径默认值经 facta.paths 数据目录拼装（paths.py 惯例：只被一个模块用的
+    路径留在消费者本地）；__init__ 参数可注入 tmp_path 做测试隔离。每次变更
+    整档原子写回（个人规模够用；ponytail：写放大成瓶颈再换逐项文件，触发
+    信号＝审批项上千且写延迟可感）。读档损坏保守重建空档 + 告警不炸启动，
+    瞬时 IO 故障照常上抛——重建空档只对「内容坏了」，不吞磁盘故障再覆盖真档。
+    """
+
+    def __init__(self, path: Path = DATA_ROOT / "approvals.json") -> None:
+        self.path = path
+        self._lock = threading.Lock()   # 「读-改-写」整段原子；无内存缓存，锁只护文件档
+
+    def _load(self) -> dict[str, ApprovalItem]:
+        """读档 → {id: 项}。缺失=新档（空）；损坏=保守重建空档 + 告警。"""
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            return {it.id: it for it in (ApprovalItem(**r) for r in raw["items"])}
+        except FileNotFoundError:
+            return {}
+        except (ValueError, TypeError, KeyError):
+            logger.warning("审批档损坏，保守重建空档（path=%s）", self.path, exc_info=True)
+            return {}
+
+    def _save(self, items: dict[str, ApprovalItem]) -> None:
+        """整档原子写回（tmp + os.replace，TaskStore.save 同款防半截 JSON）。
+
+        写失败照常上抛：裁决没落盘却返回成功才是丢数据。
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(
+            json.dumps({"items": [asdict(it) for it in items.values()]}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp, self.path)
+
+    def create(self, task_id: str, run_id: str, tool: str, arguments: dict, target: str = "") -> ApprovalItem:
+        """新建待审项并即存盘（读写即存盘 = 重启存活的全部机制）。"""
+        item = ApprovalItem(
+            id=uuid.uuid4().hex,
+            task_id=task_id,
+            run_id=run_id,
+            tool=tool,
+            arguments=arguments,
+            target=target,
+            status=APPROVAL_PENDING,
+            created_at=_now_iso(),
+        )
+        with self._lock:
+            items = self._load()
+            items[item.id] = item
+            self._save(items)
+        return item
+
+    def get(self, approval_id: str) -> ApprovalItem | None:
+        with self._lock:
+            return self._load().get(approval_id)
+
+    def pending_for(self, run_id: str = "", task_id: str = "") -> list[ApprovalItem]:
+        """待审清单（创建序）：给 run_id/task_id 则按归属过滤，空串=不过滤。
+
+        列表而非单槽位：一个 Run 可以同时挂着多项审批（并行 spawn 各自确认）。
+        """
+        with self._lock:
+            return [
+                it for it in self._load().values()
+                if it.status == APPROVAL_PENDING
+                and (not run_id or it.run_id == run_id)
+                and (not task_id or it.task_id == task_id)
+            ]
+
+    def all(self) -> list[ApprovalItem]:
+        with self._lock:
+            return list(self._load().values())
+
+    def decide(
+        self,
+        approval_id: str,
+        approved: bool,
+        arguments: dict | None = None,
+        target: str | None = None,
+    ) -> tuple[ApprovalItem | None, str]:
+        """裁决一项审批（按审批项 id 幂等）。返回 (项, 提示语)。
+
+        (None, 拒绝语) = 请求被拒，调用方不得执行任何操作；(项, "") = 裁决落定。
+        幂等三防线（修「重复裁决落到该 Run 下一项审批」的 bug——裁决永远只认
+        审批项 id，不认「Run 当前挂着的那项」）：
+          - 已决同参 → 原样返回原裁决（状态/执行标记一律不动，不重复执行）；
+          - 已决异参 → 明确拒绝（不许借重放偷换参数「追认」）；
+          - 编辑 pending → 不落裁决：supersede 出新版本重新走审。
+        arguments/target 为 None = 请求未带（沿用原值）；带了且不同 = 编辑。
+        """
+        with self._lock:
+            items = self._load()
+            item = items.get(approval_id)
+            if item is None:
+                return None, "审批项不存在"
+            if item.status == APPROVAL_SUPERSEDED:
+                return None, "已被新版本取代"
+            if item.status != APPROVAL_PENDING:
+                # 已决（approved/rejected；unknown_result 也是「已裁决、仅结果
+                # 不明」）：按参数/目标一致性分流幂等返回 / 明确拒绝
+                same = (arguments is None or arguments == item.arguments) and (
+                    target is None or target == item.target
+                )
+                if same:
+                    verdict = "批准" if item.approved else "拒绝"
+                    return item, f"重复请求，返回原裁决：{verdict}"
+                return None, "参数或目标与已决审批不一致，已明确拒绝"
+            edited = (arguments is not None and arguments != item.arguments) or (
+                target is not None and target != item.target
+            )
+            if not edited:
+                item.approved = approved
+                item.status = APPROVAL_APPROVED if approved else APPROVAL_REJECTED
+                item.decided_at = _now_iso()
+                self._save(items)
+                return item, ""
+            # 编辑不落裁决：旧项留档 superseded，新项 pending 重新走审（版本链可追溯）
+            new = ApprovalItem(
+                id=uuid.uuid4().hex,
+                task_id=item.task_id,
+                run_id=item.run_id,
+                tool=item.tool,
+                arguments=item.arguments if arguments is None else arguments,
+                target=item.target if target is None else target,
+                status=APPROVAL_PENDING,
+                created_at=_now_iso(),
+                supersedes=item.id,
+            )
+            item.status = APPROVAL_SUPERSEDED
+            item.superseded_by = new.id
+            items[new.id] = new
+            self._save(items)
+            return new, "参数/目标已编辑，生成新的待审版本"
+
+    def match_decided(
+        self, task_id: str, tool: str, arguments: dict, target: str = ""
+    ) -> ApprovalItem | None:
+        """找「同任务同工具同参同目标、已裁决且已执行」的项——调用方据此自动
+        套用原裁决与原结果（重放裁决不重复弹窗、不重复执行）。
+
+        未决/未执行/结果未知（unknown_result）一律不命中：宁可重新走审，
+        不可冒重复执行的险。多项命中取最新的（同参重审后再执行过，最近的
+        裁决才是现行的）。
+        """
+        with self._lock:
+            items = list(self._load().values())
+        for it in reversed(items):
+            if (
+                it.task_id == task_id
+                and it.tool == tool
+                and it.arguments == arguments
+                and it.target == target
+                and it.status in (APPROVAL_APPROVED, APPROVAL_REJECTED)
+                and it.executed
+            ):
+                return it
+        return None
+
+    def record_result(self, approval_id: str, result: str) -> bool:
+        """执行结果回填 + 置 executed（match_decided 的幂等判据）；无此项 → False。"""
+        with self._lock:
+            items = self._load()
+            item = items.get(approval_id)
+            if item is None:
+                return False
+            item.result = result
+            item.executed = True
+            self._save(items)
+            return True
+
+    def mark_unknown(self, approval_id: str) -> bool:
+        """执行结果不明（裁决后服务被杀，无法确认是否已执行）→ unknown_result。
+
+        match_decided 从此不命中它——防「以为没跑而重复执行」；裁决记录仍留
+        在 approved 字段，可恢复查询。
+        """
+        with self._lock:
+            items = self._load()
+            item = items.get(approval_id)
+            if item is None:
+                return False
+            item.status = APPROVAL_UNKNOWN
+            self._save(items)
+            return True

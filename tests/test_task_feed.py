@@ -70,6 +70,11 @@ def _next_frame(gen) -> dict:
     return json.loads(data_line[len("data: "):])
 
 
+def _next_raw(gen) -> str:
+    """原始帧文本（断言 id 行游标格式用）。"""
+    return next(gen)
+
+
 def _wait_task_status(client, task_id: str, statuses, timeout: float = 5.0) -> str:
     """轮询任务状态直到命中（worker 在后台线程推进，测试线程顺序请求）。"""
     deadline = time.time() + timeout
@@ -183,22 +188,69 @@ def test_task_stream_snapshot_then_live():
     gen.close()   # 常驻流由客户端关（GeneratorExit → finally 退订）
 
 
-def test_task_stream_replay_and_resume_no_snapshot():
-    # 续传（last_seq≥0）：只补缺的增量，无快照；哨兵之后的 seq 严格递增
+def test_task_stream_old_cursor_falls_back_to_snapshot():
+    # 旧 int 游标（无 gen 佐证）→ 快照自愈而非「空增量 + 心跳干等」（P1 修
+    # SSE 跨代际断层的 bug）。gen:seq 游标下的续传语义由下方回归补例覆盖。
     bus = TaskBus()
     for i in range(3):
         bus.emit("task.updated", {"i": i})
 
-    gen = task_event_stream(bus, 0, lambda: {})
+    gen = task_event_stream(bus, 0, lambda: {"tasks": ["t"]})
+    first = _next_frame(gen)
+    gen.close()
+    assert first["type"] == "snapshot" and first["data"] == {"tasks": ["t"]}
+
+
+# ---------- D1-D3：task_event_stream 的 gen:seq 游标接线（帧语义离线测）----------
+# HTTP 面不测：Starlette TestClient 传输层缓冲整个响应体（无限流必挂，实测
+# 首帧都不放行），端点只有「Last-Event-ID 原样透传 + 挂流」两行胶水——两种
+# 游标格式的解析真值源在 TaskBus.since（test_taskbus_* 钉），这里钉接线。
+
+
+def test_task_stream_gen_seq_replay_and_resume_no_snapshot():
+    # D3 回归（R 改写掉的旧断言归位）：gen:seq 游标续传只补缺的增量、无快照；
+    # 哨兵之后的 seq 严格递增；断线在 seq=2 之后重连只补 seq=3（旧件不重复）
+    bus = TaskBus()
+    for i in range(3):
+        bus.emit("task.updated", {"i": i})
+
+    gen = task_event_stream(bus, f"{bus.gen}:0", lambda: {})
     frames = [_next_frame(gen) for _ in range(3)]
     gen.close()
     assert all(f["type"] != "snapshot" for f in frames)
     assert [f["seq"] for f in frames] == [1, 2, 3]
 
-    gen2 = task_event_stream(bus, 2, lambda: {})   # 断线在 seq=2 之后重连
+    gen2 = task_event_stream(bus, f"{bus.gen}:2", lambda: {})   # 断线在 seq=2 之后重连
     again = _next_frame(gen2)
     gen2.close()
     assert again["seq"] == 3 and again["data"] == {"i": 2}   # 旧件不重复
+
+
+def test_task_stream_frame_id_is_gen_seq_cursor():
+    # D3：SSE 帧 id = bus.event_id(seq)（gen:seq）——客户端 Last-Event-ID 原样
+    # 回传即续传游标（快照帧 id 同构，重连从快照时点接着走增量）
+    bus = TaskBus()
+    gen = task_event_stream(bus, None, lambda: {"tasks": ["t"]})
+    snap = _next_raw(gen)                    # 快照帧（id = 快照时点游标 gen:0）
+    bus.emit("task.updated", {"i": 1})       # 实时段
+    live = _next_raw(gen)
+    gen.close()
+    assert snap.startswith(f"id: {bus.gen}:0\n")
+    assert live.startswith(f"id: {bus.gen}:1\n") and "task.updated" in live
+
+
+def test_task_stream_unknown_gen_cursor_falls_back_to_snapshot():
+    # D1/D2：跨代际（旧总线游标）与超前游标 → 回全量快照后转增量，断线重连
+    # 即时获得现状——修「旧游标 300 连新总线只收心跳」的断层
+    bus = TaskBus()
+    for i in range(3):
+        bus.emit("task.updated", {"i": i})
+
+    for cursor in (f"deadbeef:{bus.seq}", f"{bus.gen}:99", "300"):
+        gen = task_event_stream(bus, cursor, lambda: {"tasks": ["t"]})
+        first = _next_frame(gen)
+        gen.close()
+        assert first["type"] == "snapshot" and first["data"] == {"tasks": ["t"]}
 
 
 def test_confirm_push_instant_via_bus(tmp_path):
@@ -232,7 +284,8 @@ def test_confirm_push_instant_via_bus(tmp_path):
     assert _resolve_confirm_when_pending(client, run_id, approve=True).status_code == 200
     assert _wait_task_status(client, task_id, {TASK_DONE}) == TASK_DONE
 
-    events = app.state.task_bus.since(0)   # 总线环形缓冲 = 全程序列（小样本覆盖）
+    bus = app.state.task_bus
+    events = bus.since(f"{bus.gen}:0")   # 本代游标从 0 起 = 总线环形缓冲全程序列（小样本覆盖）
     assert events is not None
     task_statuses = [e.data["status"] for e in events if e.type == "task.updated"]
     assert "waiting-approval" in task_statuses   # 确认挂起即时进推送面
@@ -242,21 +295,52 @@ def test_confirm_push_instant_via_bus(tmp_path):
     assert "completed" in run_statuses
 
 
-# ---------- TaskBus 单测：续传/断层 ----------
+# ---------- TaskBus 单测：游标代号 / 续传 / 断层 ----------
 
 
-def test_taskbus_since_resume_and_gap():
+def test_taskbus_cursor_format():
+    # 游标 = gen:seq（SSE 帧 id / Last-Event-ID 同构）：gen 是总线实例代号
+    bus = TaskBus()
+    assert len(bus.gen) == 8 and bus.cursor() == f"{bus.gen}:0"
+    bus.emit("task.updated", {})
+    assert bus.cursor() == f"{bus.gen}:1"
+    assert bus.event_id(1) == bus.cursor()   # 帧 id 与游标同格式，客户端回传即游标
+
+
+def test_taskbus_since_gen_seq_resume_and_gap():
     bus = TaskBus(maxlen=3)
-    assert bus.since(0) == []          # 空总线且无缺口 → 无缺件
+    assert bus.since(bus.cursor()) == []          # 空总线且无缺口 → 无缺件（只心跳）
     assert bus.seq == 0
 
     for i in range(5):
         bus.emit("task.updated", {"i": i})
     assert bus.seq == 5
-    assert [e.seq for e in bus.since(2)] == [3, 4, 5]   # 缓冲完整覆盖 → 补缺
-    assert bus.since(5) == []                            # 已追平
-    assert bus.since(1) is None                          # 缺件被挤出缓冲 → 断层（快照自愈）
-    assert bus.since(0) is None                          # 同上
+    assert [e.seq for e in bus.since(f"{bus.gen}:2")] == [3, 4, 5]   # 本代游标 + 缓冲覆盖 → 补缺
+    assert bus.since(bus.cursor()) == []                            # 已追平
+    assert bus.since(f"{bus.gen}:1") is None                        # 缺件被挤出缓冲 → 断层（快照自愈）
+    assert bus.since(f"{bus.gen}:0") is None                        # 同上
+
+
+def test_taskbus_old_int_cursor_snapshots():
+    # 旧 int 游标/None/无法解析 → None（快照）：无 gen 佐证就不能信 seq
+    bus = TaskBus()
+    bus.emit("task.updated", {"i": 0})
+    assert bus.since(0) is None
+    assert bus.since(None) is None
+    assert bus.since("garbage") is None
+    assert bus.since(f"{bus.gen}:") is None
+    assert bus.since(f"{bus.gen}:x") is None
+    assert bus.since(f"{bus.gen}:-1") is None
+
+
+def test_taskbus_wrong_gen_or_ahead_seq_snapshots():
+    # 跨代际（服务重启，新总线 seq 从 1 重来）/ seq 超前 → None（快照自愈）
+    # ——修「客户端带旧游标 300 连上重启后总线只收心跳」的断层
+    bus = TaskBus()
+    bus.emit("task.updated", {"i": 0})
+    assert bus.since(f"deadbeef:{bus.seq}") is None   # 别代总线的游标
+    assert bus.since(f"{bus.gen}:2") is None          # 超前 seq（游标来自别处）
+    assert bus.since(f"{bus.gen}:1") == []            # 对照：本代追平 → 只心跳
 
 
 def test_taskbus_subscribe_unsubscribe_broadcast():

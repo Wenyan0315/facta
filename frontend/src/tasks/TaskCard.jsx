@@ -14,6 +14,7 @@ import {
   settleTaskWorktree,
   steerRun,
 } from "./api.js";
+import ApprovalPanel from "./ApprovalPanel.jsx";
 import ConfirmCard from "./ConfirmCard.jsx";
 import RunDetail from "./RunDetail.jsx";
 
@@ -468,6 +469,8 @@ export default function TaskCard({ task, runs, onChanged }) {
               ) : null}
             </div>
           ) : null}
+          {/* P1 审批面板：审批项列表 + 按项裁决（新端点优先）；旧布尔弹窗保留在其后 */}
+          <ApprovalPanel taskId={task.task_id} updatedAt={task.updated_at} onDecided={onChanged} />
           {task.status === "waiting-approval" && lastRunId ? (
             <ConfirmCard runId={lastRunId} onDecided={onChanged} />
           ) : null}

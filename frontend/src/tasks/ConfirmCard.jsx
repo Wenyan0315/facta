@@ -6,7 +6,7 @@
 // 这里的 fold 只需数事件——刷新页面/晚展开都不会漏掉那条待裁决。
 // 决策端点唯一：POST /api/runs/{id}/confirm（与聊天页同一个，语义不分裂）。
 import { useEffect, useState } from "preact/hooks";
-import { confirmRun } from "./api.js";
+import { confirmRun, decideApproval } from "./api.js";
 
 // kind → 授权文案（后端 skills.WRITE_AUTH_GUARD = "write-auth"，ADR 117 §3 +
 // 118 §3：写档任务首写停，批准后本任务后续写操作免停）。空 kind = 普通确认。
@@ -55,7 +55,10 @@ export default function ConfirmCard({ runId, onDecided }) {
     setBusy(true);
     setErr(null);
     try {
-      await confirmRun(runId, approve);
+      // P1 兼容：confirm.request 载荷新增 approval_id（加法键）。有审批项 id 时
+      // 优先走按项裁决端点（绑操作、幂等），旧布尔端点留给无 id 的旧事件/旧弹窗
+      if (pending.approval_id) await decideApproval(pending.approval_id, approve);
+      else await confirmRun(runId, approve);
       setPending(null);          // 乐观收卡；SSE 的 resolved 事件随后印证
       onDecided?.();
     } catch (e) {

@@ -22,8 +22,9 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Iterator
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -84,11 +85,16 @@ from facta.paths import GRAPH_PATH, LEARNED_DIR, NOTES_DIR, WORKSPACE_ROOT, user
 from facta.projects import ProjectsManifest, resolve_learned_dir
 from facta.server.run_log import RunLog
 from facta.server.run_store import (
+    APPROVAL_APPROVED,
+    APPROVAL_REJECTED,
+    APPROVAL_SUPERSEDED,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_RUNNING,
     STATUS_WAITING,
+    ApprovalItem,
+    ApprovalStore,
     Run,
     RunEvent,
     RunStore,
@@ -100,7 +106,7 @@ from facta.tools import worktree as wt_module
 from facta.tools.context import WorkspaceBinding
 from facta.tools.mcp_config import ServerSpec, load_server_specs
 from facta.tools.notes import record_provenance, resolve_note_path
-from facta.tools.registry import approval_policy
+from facta.tools.registry import ToolRegistry, approval_policy
 from facta.tools.sandbox import detect_backend, sandbox_level
 from facta.tools.worktree import (
     commit_and_merge_back,
@@ -127,19 +133,28 @@ _EVENT_MAP = {
 _IDLE_SLICE_SECONDS = 1.0
 
 
+def _task_frame(bus: TaskBus, ev: RunEvent) -> str:
+    """任务面 SSE 帧：id 行换成 gen:seq 游标（P1 2.6，客户端 Last-Event-ID
+    原样回传即续传游标）。帧体复用 encode_sse（帧格式单一真值源不分叉），只换
+    id 行——encode_sse 的 id 是 per-Run 纯 seq，任务面的重放位置键是「总线
+    实例代号 + seq」。payload 是 JSON 单行（换行已转义），id 行匹配不会误伤。"""
+    return encode_sse("", ev).replace(f"id: {ev.seq}\n", f"id: {bus.event_id(ev.seq)}\n", 1)
+
+
 def task_event_stream(
     bus: TaskBus,
-    last_seq: int,
+    cursor: str | int | None,
     snapshot: Callable[[], dict],
 ) -> Iterator[str]:
     """任务级 SSE 的帧生成器（M5 承诺件 b）：快照/续传二选一 + 实时增量。
 
-    last_seq < 0 = 新鲜连接；≥ 0 = Last-Event-ID 断线续传。续传段能被总线
-    环形缓冲覆盖 → 只补缺的增量；覆盖不了（断层）→ 先发 snapshot 全量快照
-    自愈。增量载荷全是全量状态（幂等可重放）：重复应用无害，漏一条等下一条/
-    下一次快照修复。抽成模块级生成器的原因：Starlette TestClient 的传输层
-    缓冲整个响应体（无限流必挂），帧语义必须能离线单测；HTTP 面只剩「解析
-    Last-Event-ID + 挂 StreamingResponse」两行胶水。
+    cursor = Last-Event-ID 原样（P1 2.6）：`gen:seq` 本代游标且缓冲覆盖 → 只补
+    缺的增量；跨代际/超前/断层/旧 int 格式/None（新鲜连接）→ since() 一律回
+    None，先发 snapshot 全量快照再转增量——断线重连即时获得现状，旧游标
+    不断流不静默丢件。增量载荷全是全量状态（幂等可重放）：重复应用无害，
+    漏一条等下一条/下一次快照修复。抽成模块级生成器的原因：Starlette TestClient
+    的传输层缓冲整个响应体（无限流必挂），帧语义必须能离线单测；HTTP 面只剩
+    「取 Last-Event-ID + 挂 StreamingResponse」两行胶水。
 
     常驻流：不设终态，客户端自行断开（finally 退订防泄漏）；空闲切片见
     _IDLE_SLICE_SECONDS 注释（关停/断开的取消延迟 ≤1s）。
@@ -148,14 +163,17 @@ def task_event_stream(
     # 事件必进 q；快照可能与实时段重复，靠幂等 + seq 去重。
     q = bus.subscribe()
     try:
-        replay = bus.since(last_seq) if last_seq >= 0 else None
+        replay = bus.since(cursor)
         if replay is None:
             last = bus.seq   # 先读哨兵再建快照：之后的事件必走实时段
-            yield encode_sse("", RunEvent(seq=0, type="snapshot", data=snapshot()))
+            yield _task_frame(bus, RunEvent(seq=last, type="snapshot", data=snapshot()))
         else:
-            last = last_seq
+            # since() 已验真「本代 gen:seq」，游标里的 seq 可直接解析；空补丁
+            # =已追平，实时段从游标 seq 之后开始（不能重读 bus.seq——那会把
+            # 两步间隙里到达的事件当重复吞掉）
+            last = int(str(cursor).rsplit(":", 1)[-1])
             for ev in replay:
-                yield encode_sse("", ev)
+                yield _task_frame(bus, ev)
                 last = ev.seq
         while True:
             try:
@@ -165,7 +183,7 @@ def task_event_stream(
                 continue
             if ev.seq <= last:   # 快照/续传段已覆盖，去重
                 continue
-            yield encode_sse("", ev)
+            yield _task_frame(bus, ev)
             last = ev.seq
     finally:
         bus.unsubscribe(q)
@@ -302,6 +320,19 @@ class ConfirmRequest(BaseModel):
     """L2 确认裁决的请求体（S4b）：approve=true 批准 / false 拒绝。"""
 
     approve: bool
+
+
+class ApprovalDecisionRequest(BaseModel):
+    """审批项裁决的请求体（P1 spec 2.2/2.3）：approved 落裁决。
+
+    arguments / target 可选 = 编辑（spec 2.3「编辑生成新待审版本」并入本端点，
+    不设独立 edit 端点）：原项 superseded 留档、新项 pending 链回原项重新走裁决；
+    不带 = 不改，重复请求按幂等返回原裁决。
+    """
+
+    approved: bool
+    arguments: dict | None = None
+    target: str | None = None
 
 
 class CreateTaskRequest(BaseModel):
@@ -485,6 +516,263 @@ def _sandbox_agent(agent: Agent, workspace: Path | None, binding: WorkspaceBindi
     return replace(agent, registry=registry_in_worktree(agent.registry, workspace, binding=binding))
 
 
+# ---- P1 审批恢复：run_store 审批原语的消费面（spec 2.1/2.2/2.3/2.5）----
+# request_confirm 迁移落点：挂起 = 建（或复用）pending 审批项并阻塞等**该项**
+# 裁决——裁决通道与审批项一一对应，消除「重复请求落到该 Run 下一项」的串位面；
+# 同参已决动作再现自动套用原裁决原结果；工具执行结果回填审批项。HTTP 面
+# （查询/裁决端点、旧布尔端点映射）住 create_app。
+
+# 工具语义 → 操作目标的参数键（spec 2.1：target 由工具语义给出，其余空串）
+_TARGET_ARG = {"write_file": "path", "run_command": "command", "write_note": "filename"}
+
+# 审批仓按落盘根缓存单例：worker/调度/端点必须共用**同一实例**——decide 与
+# record_result 的「读改写」原子性靠实例内那把锁，两个实例同档就是丢更新。
+# 键=落盘根（conftest 的 TASKS_DIR 隔离闸一路带进 tmp，测试天然互不串档）。
+_APPROVAL_STORES: dict[str, ApprovalStore] = {}
+_APPROVAL_STORES_GUARD = threading.Lock()
+
+
+def _approval_store_for(tasks: TaskStore) -> ApprovalStore:
+    """task_store 落盘根 → 审批仓（data/approvals.json，spec 2.1 路径）。
+
+    路径推导与 create_app 同源（task_store.root.parent）：生产即 data/，
+    测试随 TASKS_DIR 隔离。住这里而非 create_app 闭包：_task_worker 的签名
+    被 test_queue 的 monkeypatch 钉死（4 参），审批仓只能从既有参数推导。
+    """
+    key = str(tasks.root.parent)
+    with _APPROVAL_STORES_GUARD:
+        store = _APPROVAL_STORES.get(key)
+        if store is None:
+            store = _APPROVAL_STORES[key] = ApprovalStore(tasks.root.parent / "approvals.json")
+        return store
+
+
+def _approval_target(tool: str, arguments: dict) -> str:
+    key = _TARGET_ARG.get(tool)
+    return str(arguments.get(key) or "") if key else ""
+
+
+def _approval_key(tool: str, arguments: dict) -> str:
+    """结果回填的配对键：工具名 + 参数快照（与 tool_started 事件同源的那份参数）。"""
+    return tool + "\x00" + json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+
+
+def _apply_approved_args(tool: str, arguments: dict, decided: ApprovalItem) -> None:
+    """裁决版本的生效参数回写进本次调用的 args（编辑生成新版本 → 按新参数执行）。
+
+    registry.execute 把同一个 args dict 解包给 tool.func，回写即生效、内核零改动；
+    只改目标的编辑按工具语义回填对应参数键（target 是参数的语义投影，spec 2.1）。
+    """
+    if decided.arguments != arguments:
+        arguments.clear()
+        arguments.update(decided.arguments)
+    key = _TARGET_ARG.get(tool)
+    if key and decided.target and arguments.get(key) != decided.target:
+        arguments[key] = decided.target
+
+
+def _edited_params(
+    item: ApprovalItem, arguments: dict | None, target: str | None
+) -> tuple[dict | None, str | None]:
+    """裁决请求的编辑归一（spec 2.3：参数与目标同是版本链基准，必须同源）。
+
+    只改目标 = 改对应参数键；只改参数 = 目标按工具语义重推。归一后 store.decide
+    生成的新版本不会出现参数/目标互斥漂移（否则 match_decided 的幂等比对基准
+    会被陈旧 target 污染）。
+    """
+    if arguments is None and target is not None:
+        key = _TARGET_ARG.get(item.tool)
+        return ({**item.arguments, key: target} if key else item.arguments), target
+    if arguments is not None and target is None:
+        return arguments, _approval_target(item.tool, arguments)
+    return arguments, target
+
+
+def _decision_conflict(
+    item: ApprovalItem, arguments: dict | None, target: str | None, msg: str
+) -> str:
+    """409 拒绝语：store 的固定文案 + 与原项的差异（spec 2.2「指明差异」）。"""
+    if "不一致" not in msg:
+        return msg   # 「已被新版本取代」等：原样
+    diffs = []
+    if arguments is not None and arguments != item.arguments:
+        diffs.append(f"参数：原 {item.arguments} / 请求 {arguments}")
+    if target is not None and target != item.target:
+        diffs.append(f"目标：原 {item.target!r} / 请求 {target!r}")
+    return f"{msg}（{'；'.join(diffs)}）"
+
+
+class _ApprovalFlow:
+    """一个 Run 的审批消费面：确认挂起 / 自动套用 / 结果回填。
+
+    挂起语义（spec 2.1/2.2）：建 pending 项后阻塞等**该项**落子（轮询 store），
+    保留 cancel_requested 轮询——保险丝靠它解挂。confirm.request / confirm.resolved
+    照进事件流，载荷加法键 approval_id/target（旧消费方忽略，兼容规则）。
+    """
+
+    def __init__(self, run: Run, approvals: ApprovalStore, task: Task | None) -> None:
+        self.run = run
+        self.approvals = approvals
+        self.task = task
+        self.task_id = task.task_id if task is not None else ""
+        self._lock = threading.Lock()
+        self._waits = 0
+        self._prev_status = run.status
+        self._key_by_id: dict[str, str] = {}
+        self._items_by_key: dict[str, deque[str]] = {}
+
+    def confirm(self, tool: str, arguments: dict, kind: str = "") -> bool:
+        """S4b L2 裁决挂起（run_turn 的 on_confirm 缝）：阻塞到该项裁决或取消。"""
+        target = _approval_target(tool, arguments)
+        item = self._reuse_pending(tool, arguments, target)
+        if item is None:
+            item = self.approvals.create(
+                self.task_id, self.run.run_id, tool, dict(arguments), target
+            )
+        self._enter_wait()
+        self.run.emit("confirm.request", {
+            "tool": tool, "arguments": dict(arguments), "kind": kind,
+            "approval_id": item.id, "target": target,
+        })
+        approved, decided = self._wait_for(item)
+        if decided is not None:   # 落定的裁决版本登记结果回填（取消不登记，见 _wait_for）
+            with self._lock:
+                self._items_by_key.setdefault(_approval_key(tool, arguments), deque()).append(decided.id)
+        self._exit_wait()
+        if approved and decided is not None:
+            _apply_approved_args(tool, arguments, decided)   # 编辑裁决 → 按新参数执行
+        self.run.emit("confirm.resolved", {
+            "tool": tool, "approved": approved, "approval_id": item.id, "target": target,
+        })
+        return approved
+
+    def auto_apply(self, tool: str, arguments: dict) -> str | None:
+        """P1 2.5 自动套用：同（tool, arguments, target）已决已执行项重现 → 回注
+        原结果（不重新弹窗、不重跑工具）。
+
+        只对任务跑（task_id 非空）：聊天端恢复语义不承诺（spec 4 兼容规则），
+        确认弹窗语义不变；write 档已授权任务的写两件照旧免停执行（write-auth
+        语义一字不动），不走回注。未命中（含 unknown_result）→ 真挂起重走审。
+        """
+        if not self.task_id:
+            return None
+        if self.task is not None and self.task.authorized_write and tool in ("write_file", "write_note"):
+            return None
+        hit = self.approvals.match_decided(
+            self.task_id, tool, dict(arguments), _approval_target(tool, arguments)
+        )
+        return hit.result if hit is not None else None
+
+    def track(self, type_: str, data: dict) -> None:
+        """工具事件配对（spec 2.5 执行结果回填）：tool_started 记 id→参数键，
+        tool_result 按键配回审批项 record_result（可恢复查询 + match_decided 判据）。
+        spawn 子流的 sub.tool.* 同名配对——隔离的是主上下文，不是审计账。
+        同名同参并行确认按序配对（FIFO）；触发信号＝实测配对错位再上 tool_call id 透传。"""
+        kind = type_.removeprefix("sub.").replace(".", "_")   # sub.tool.started → tool_started
+        if kind == "tool_started":
+            raw = str(data.get("arguments") or "")
+            try:
+                args = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError:
+                return
+            self._key_by_id[str(data.get("id", ""))] = _approval_key(str(data.get("name", "")), args)
+        elif kind == "tool_result":
+            key = self._key_by_id.pop(str(data.get("id", "")), None)
+            pending = self._items_by_key.get(key or "")
+            if pending:
+                self.approvals.record_result(pending.popleft(), str(data.get("result") or ""))
+
+    def _reuse_pending(self, tool: str, arguments: dict, target: str) -> ApprovalItem | None:
+        """P1 2.5「未决项重新呈现」：同任务同工具同参同目标的 pending 项复用——
+        重启/取消留下的待审项随同一操作再次出现而重新呈现等待裁决，不造重复
+        弹窗。聊天端（task_id 空）不复用：恢复语义不承诺，每次真挂起新建。"""
+        if not self.task_id:
+            return None
+        for it in self.approvals.pending_for(task_id=self.task_id):
+            if it.tool == tool and it.arguments == arguments and it.target == target:
+                return it
+        return None
+
+    def _enter_wait(self) -> None:
+        """挂起呈现：run 翻 waiting_approval。并行确认（spawn 各自挂起）下首个
+        进入、末个退出才翻状态——单槽位时代的 running→waiting→running 翻转
+        在多挂起时会互相踩。"""
+        with self._lock:
+            if self._waits == 0:
+                self._prev_status = self.run.status
+                self.run.status = STATUS_WAITING
+            self._waits += 1
+            self.run.confirm_pending = True
+
+    def _exit_wait(self) -> None:
+        with self._lock:
+            self._waits -= 1
+            if self._waits == 0:
+                self.run.confirm_pending = False
+                self.run.status = self._prev_status
+
+    def _wait_for(self, item: ApprovalItem) -> tuple[bool, ApprovalItem | None]:
+        """阻塞到该项裁决（轮询 store，0.2s 一跳）。返回 (批准?, 落定的裁决版本)。
+
+        编辑（superseded）跟版本链继续等新版本——「编辑生成新版本，重新走裁决」
+        的挂起侧语义；等待中取消视为拒绝（现状语义）但**不替用户落子**：未决项
+        留 pending，任务 resume 时重新呈现等真裁决（spec 2.5），也不登记结果
+        回填（拒绝提示不是该项的「执行结果」）。"""
+        cur = item
+        while True:
+            fresh = self.approvals.get(cur.id)
+            if fresh is not None:
+                if fresh.status in (APPROVAL_APPROVED, APPROVAL_REJECTED):
+                    return bool(fresh.approved), fresh
+                if fresh.status == APPROVAL_SUPERSEDED and fresh.superseded_by:
+                    nxt = self.approvals.get(fresh.superseded_by)
+                    if nxt is not None:
+                        cur = nxt
+                        continue
+            if self.run.cancel_requested:
+                return False, None
+            time.sleep(0.2)
+
+
+class _AutoApplyRegistry(ToolRegistry):
+    """审批自动套用的执行面拦截（P1 2.5）：命中已决已执行的同参项时回注原结果，
+    不重新弹窗也不重跑工具。
+
+    拦截必须在 registry.execute **之前**：确认缝（confirm）只回 bool，批准后
+    工具照跑、原结果带不回来——「套用原裁决 + 原结果（不重跑）」只能在执行前
+    拦下整次调用。其余调用原样透传 super().execute：确认闸门、审计、参数校验
+    一处不分叉（委托 base 的同一批 Tool 对象，闭包锚定的资源原样共享）。
+    """
+
+    def __init__(self, base: ToolRegistry, auto_apply: Callable[[str, dict], str | None]) -> None:
+        super().__init__(audit=base.audit, scope_check=base.scope_check)
+        for name in base.names():
+            tool = base.get(name)
+            if tool is not None:
+                self.register(tool)
+        self._auto_apply = auto_apply
+
+    def execute(
+        self,
+        name: str,
+        arguments_json: str,
+        confirm: Callable[[str, dict], bool] | None = None,
+        on_event: Callable[[str, dict], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> str:
+        try:
+            args: dict | None = json.loads(arguments_json) if arguments_json.strip() else {}
+        except json.JSONDecodeError:
+            args = None
+        if args is not None:
+            replayed = self._auto_apply(name, args)
+            if replayed is not None:
+                return replayed
+        return super().execute(
+            name, arguments_json, confirm=confirm, on_event=on_event, should_cancel=should_cancel
+        )
+
+
 def _run_worker(
     ctx: AppContext,
     run: Run,
@@ -496,6 +784,7 @@ def _run_worker(
     store: RunStore | None = None,
     task: Task | None = None,
     task_store: TaskStore | None = None,
+    approvals: ApprovalStore | None = None,
 ) -> None:
     """后台线程：跑一轮 run_turn，把事实灌进 Run Store，收尾时推终态。
 
@@ -548,13 +837,19 @@ def _run_worker(
     # 固化归属（ADR 116 §3）：按 repo_root 解析项目 learned 目录；None 回落
     # 本仓全局（＝现状：未登记仓的内容固化进全局，116 触发信号挂档）
     settle_learned = resolve_learned_dir(repo_root, LEARNED_DIR) or LEARNED_DIR
+    # P1：审批消费面——request_confirm 迁到审批项（持久化、按项裁决、幂等，
+    # spec 2.1/2.2）；同参已决动作再现自动套用（见 _ApprovalFlow.auto_apply）；
+    # 执行结果回填挂在工具事件缝（_forward → flow.track）。缺省 ApprovalStore()
+    # 走数据目录真档——create_app 恒显式注入（测试隔离同款路径推导）。
+    flow = _ApprovalFlow(run, approvals or ApprovalStore(), task)
     # ADR 117 §3：write 档技能任务的「任务级首写授权」——app 层包装
     # on_confirm：写两件在已授权任务里直接放行（免停），未授权则真挂起
     # （run 进 waiting-approval），approve 后先置位 Task.authorized_write
     # 落盘再放行（同线程顺序=评审问题 8 的原子口径）。reject 不置位，
     # 下次写再停。普通确认（run_command 动态停/计划审批）零改动——
-    # 工具不在写两件集合就透传。
-    on_confirm = run.request_confirm
+    # 工具不在写两件集合就透传。（P1 起底层 request_confirm 换审批项实现，
+    # 本包装语义一字不动。）
+    on_confirm = flow.confirm
     if (
         task is not None
         and task_store is not None
@@ -568,7 +863,7 @@ def _run_worker(
             # 「批准后本任务后续写免停」（117 观察 3）。其余工具透传原 kind
             # （现状全是空串），文案零变化。签名与 run.request_confirm 同形，
             # mypy 才认这次「包装替换」不是不兼容重定义。
-            approved = run.request_confirm(
+            approved = flow.confirm(
                 tool, arguments,
                 kind=WRITE_AUTH_GUARD if tool in ("write_file", "write_note") else kind,
             )
@@ -625,6 +920,8 @@ def _run_worker(
             agent, workspace,
             binding=_task_binding(task) if task is not None else None,
         )
+        # P1 2.5 自动套用的执行面拦截（挂在沙箱重锚之后：两层各管各的替换）
+        agent = replace(agent, registry=_AutoApplyRegistry(agent.registry, flow.auto_apply))
         ledger = ledger_path(run.session_id)
         # 绑定 save：writer 因此不懂 SessionStore，测试可注入
         writer = CheckpointWriter(ledger, lambda: ctx.store.save(run.session_id, session))
@@ -636,6 +933,7 @@ def _run_worker(
 
         def _forward(type_: str, data: dict) -> None:
             _verify_track(type_, data)          # S2-4：验证登记先于外发（同一执行点同一快照）
+            flow.track(type_, data)             # P1 2.5：工具结果回填审批项（同点同快照）
             writer.on_event(type_, data)        # 先落盘再外发：客户端看见的事实必然已在盘上
             run.emit(_EVENT_MAP.get(type_, type_), data)
 
@@ -1245,6 +1543,7 @@ def _task_worker(ctx: AppContext, store: RunStore, tasks: TaskStore, task: Task)
     任务路径逐轮复用聊天路径的 _run_worker——两套执行体才是漂移温床。
     """
     threading.Thread(target=_fuse_guard, args=(store, tasks, task), daemon=True).start()
+    approvals = _approval_store_for(tasks)   # P1 审批仓（同落盘根单例，端点同源）
     text = task.next_text
     if not text:
         # 重启回落 / 异常遗留：会话已有进展，续跑代打（continue_message 对
@@ -1300,6 +1599,7 @@ def _task_worker(ctx: AppContext, store: RunStore, tasks: TaskStore, task: Task)
                 store=store,
                 task=task,
                 task_store=tasks,
+                approvals=approvals,
                 repo_root=Path(task.repo_root).expanduser().resolve() if task.repo_root else None,
                 workspace=wt,
             )
@@ -1343,6 +1643,16 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     run_log = RunLog(task_store.root / "runs")
     store.log = run_log
     bus = TaskBus()
+    # ---- P1 审批持久化（spec 2.1）：data/approvals.json ----
+    # 落盘根随 task_store 走（生产即 data/；conftest 推 TASKS_DIR 进 tmp 时整族
+    # 跟着隔离，RunLog 同款「同一把钥匙」）；单例推导见 _approval_store_for。
+    approvals = _approval_store_for(task_store)
+    # P1 2.5 启动扫描：裁决过但执行结果没回来的项标 unknown_result（「结果未知，
+    # 需核验」）——不自动执行，先进核验路径（保守方向与 checkpoint「发起过、
+    # 结果未知」档一致）。在拉起 worker 之前：恢复首轮的工具确认请求要能看到。
+    for it in approvals.all():
+        if it.status == APPROVAL_APPROVED and not it.executed and not it.result:
+            approvals.mark_unknown(it.id)
 
     def _task_view(task: Task) -> dict:
         """Task 视图：序列化 + waiting-approval 派生映射（§1：不落 Task 字段）。
@@ -1414,6 +1724,7 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     ide_lock = threading.Lock()
     app = FastAPI(title="Facta")
     app.state.task_bus = bus   # M5：总线挂 state（可观测缝——测试断言推送序列）
+    app.state.approvals = approvals   # P1：审批仓挂 state（可观测缝——测试直造审批项）
     static_dir = Path(__file__).parent / "static"
 
     def _claim_ide_context(body: CreateRunRequest) -> str:
@@ -1497,7 +1808,12 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         threading.Thread(
             target=_run_worker,
             args=(ctx, run, _claim_ide_context(body)),
-            kwargs={"mode": body.mode, "repo_root": _resolve_repo_root(body), "store": store},
+            kwargs={
+                "mode": body.mode,
+                "repo_root": _resolve_repo_root(body),
+                "store": store,
+                "approvals": approvals,
+            },
             daemon=True,
         ).start()
         return {"run_id": run.run_id, "session_id": sid}
@@ -1531,7 +1847,12 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
         threading.Thread(
             target=_run_worker,
             args=(ctx, run, _claim_ide_context(body)),
-            kwargs={"mode": body.mode, "repo_root": _resolve_repo_root(body), "store": store},
+            kwargs={
+                "mode": body.mode,
+                "repo_root": _resolve_repo_root(body),
+                "store": store,
+                "approvals": approvals,
+            },
             daemon=True,
         ).start()
         settled = run._settle_done.wait(timeout=timeout)   # 阻塞到终态 + 收官（076 同步点）
@@ -1648,15 +1969,50 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             return {"status": "cancelling"}
         raise HTTPException(409, "任务已结束，无法取消")
 
-    # L2 确认裁决（S4b）：前端弹窗的批准/拒绝落到这里，唤醒挂起的 worker
+    # L2 确认裁决（S4b）：前端弹窗的批准/拒绝落到这里，唤醒挂起的 worker。
+    # P1 起映射到该 Run 当前 pending 审批项（旧布尔载荷/响应形状零改动，旧前端
+    # 零迁移）；无 pending 维持现状 409。裁决幂等由 store.decide 收口。
     @app.post("/api/runs/{run_id}/confirm")
     def confirm(run_id: str, body: ConfirmRequest):
         run = store.get(run_id)
         if run is None:
             raise HTTPException(404, "run not found")
-        if run.resolve_confirm(body.approve):
-            return {"status": "approved" if body.approve else "rejected"}
-        raise HTTPException(409, "当前没有待确认的操作")
+        pending = approvals.pending_for(run_id=run_id)
+        if not pending:
+            raise HTTPException(409, "当前没有待确认的操作")
+        got, msg = approvals.decide(pending[0].id, body.approve)
+        if got is None:
+            raise HTTPException(409, msg)
+        return {"status": "approved" if got.approved else "rejected"}
+
+    # ---- P1 审批项面（spec 2.2/2.3/2.5）：查询 + 按项裁决（幂等/编辑版本链）----
+
+    @app.get("/api/approvals")
+    def list_approvals(task_id: str = "", run_id: str = ""):
+        """审批项查询（按 task/run 过滤，空串=不过滤）：pending 重新呈现（spec 2.5
+        「未决项重新呈现等待裁决」的可查面）+ 裁决历史与版本链可溯。创建序。"""
+        items = [
+            it for it in approvals.all()
+            if (not task_id or it.task_id == task_id) and (not run_id or it.run_id == run_id)
+        ]
+        return {"approvals": [asdict(it) for it in items]}
+
+    @app.post("/api/approvals/{approval_id}/decision")
+    def decide_approval(approval_id: str, body: ApprovalDecisionRequest):
+        """按审批项 id 裁决（spec 2.2/2.3）。幂等三防线在 store.decide：
+        重复请求 → 200 返回原裁决不重复执行；带编辑（arguments/target）→
+        200 生成新的待审版本（原项 superseded 留档、链回可溯）；已决项带
+        异参/异目标 → 409 明确拒绝（指明与原项差异，不执行不改写）。
+        编辑并入本端点的可选参数——不设独立 edit 端点（2.3 语义由 decide 覆盖）。
+        """
+        item = approvals.get(approval_id)
+        if item is None:
+            raise HTTPException(404, "审批项不存在")
+        arguments, target = _edited_params(item, body.arguments, body.target)
+        got, msg = approvals.decide(approval_id, body.approved, arguments, target)
+        if got is None:
+            raise HTTPException(409, _decision_conflict(item, body.arguments, body.target, msg))
+        return {"approval": asdict(got), "message": msg}
 
     # 会话清单（S8a）：身份=文件名，没有「active」这个特例——正在聊的那段
     # 也只是清单里的一行，靠 running 字段标出来。老布局要把 active 置顶拼进
@@ -1859,15 +2215,14 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
     def task_events(request: Request):
         """任务级 SSE（M5 承诺件 b）：快照 + 增量推送 + 断线续传，取代 20s 轮询。
 
-        HTTP 面只有「解析 Last-Event-ID + 挂流」两件事；帧语义（快照/续传
-        二选一、seq 去重、心跳）全在 task_event_stream——TestClient 传输层
-        缓冲整个响应体，无限流在它面前必挂，帧语义离线单测、HTTP 走真机。
+        HTTP 面只有「取 Last-Event-ID + 挂流」两件事；帧语义（快照/续传二选一、
+        seq 去重、心跳）全在 task_event_stream——TestClient 传输层缓冲整个
+        响应体，无限流在它面前必挂，帧语义离线单测、HTTP 走真机。
+        Last-Event-ID 原样透传给 since()（P1 2.6）：`gen:seq` 本代续传，旧 int
+        格式/未知代号/超前一律回全量快照自愈——解析真值源在 TaskBus，端点不
+        二次解读（两处解析=漂移温床）。
         """
-        raw_last = request.headers.get("last-event-id", "") or ""
-        try:
-            last = int(raw_last)
-        except ValueError:
-            last = -1
+        cursor = request.headers.get("last-event-id") or None
 
         def _snapshot() -> dict:
             return {
@@ -1885,7 +2240,7 @@ def create_app(ctx: AppContext, store: RunStore | None = None) -> FastAPI:
             }
 
         return StreamingResponse(
-            task_event_stream(bus, last, _snapshot),
+            task_event_stream(bus, cursor, _snapshot),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
