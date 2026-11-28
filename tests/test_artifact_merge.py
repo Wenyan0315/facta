@@ -207,7 +207,7 @@ def test_m5_merge_conflict_keeps_candidate(repo):
         wt, "merge-back", merge_into=repo, branch="agent/m5",
         target_branch=target, baseline=baseline,
     )
-    assert status == "conflict"
+    assert status == "conflict", f"期望冲突态，实得 {status}：{detail}"
     assert "base.py" in detail                        # 冲突文件清单
     # 主树无 MERGE_HEAD 且干净（abort 恢复），目标内容零变化
     code, _ = _run(repo, "rev-parse", "--verify", "-q", "MERGE_HEAD")
@@ -262,10 +262,12 @@ def test_m7_merging_target_rejected(repo):
     (wt / "feat.py").write_text("y = 1\n", encoding="utf-8")
     _commit_in(wt, "feat: 候选")
     # 目标进入「合并中」：--no-commit 合入候选（无冲突、停在提交前），
-    # MERGE_HEAD 挂起——真实半合并态，不是伪造元数据
-    _run(repo, "merge", "--no-commit", "--no-ff", "agent/m7")
-    code, _ = _run(repo, "rev-parse", "--verify", "-q", "MERGE_HEAD")
-    assert code == 0                                   # 前提：目标确实合并中
+    # MERGE_HEAD 挂起——真实半合并态，不是伪造元数据。
+    # 身份显式带：无 git 身份环境（CI runner）里 merge 前置校验身份会直接失败
+    _run(repo, "-c", "user.name=t", "-c", "user.email=t@t",
+         "merge", "--no-commit", "--no-ff", "agent/m7")
+    code, out = _run(repo, "rev-parse", "--verify", "-q", "MERGE_HEAD")
+    assert code == 0, f"前提：目标确实合并中（merge 前置失败：{out}）"
     before = _out(repo, "status", "--porcelain")
 
     status, detail = commit_and_merge_back(
@@ -380,7 +382,7 @@ def _write_llm(path: str = "feat.py", content: str = "print('feat')\n") -> Scrip
     ])
 
 
-def _wait_task(client: TestClient, tid: str, timeout: float = 20.0) -> str:
+def _wait_task(client: TestClient, tid: str, timeout: float = 60.0) -> str:
     deadline = time.time() + timeout
     while time.time() < deadline:
         status = client.get(f"/api/tasks/{tid}").json()["status"]

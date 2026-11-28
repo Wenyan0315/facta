@@ -353,7 +353,13 @@ def commit_and_merge_back(
             return "failed", precheck_err
 
         # ④ 合入（Spec 2 分歧二：维持 git merge 默认——ff 可行则 ff，否则 merge commit）
-        code_m, out_m = _git("merge", "--no-edit", branch, cwd=dest)
+        # merge commit 身份显式带（与上面 commit 同一坑：无 git 身份的环境里
+        # merge 建 merge commit 前置校验身份直接失败——本地全绿 CI 红。ff 合入
+        # 不建 commit 所以平时无感，目标一前进就炸）
+        code_m, out_m = _git(
+            "-c", "user.name=cortex-agent", "-c", "user.email=agent@cortex.local",
+            "merge", "--no-edit", branch, cwd=dest,
+        )
         if code_m != 0:
             # ⑤ 失败分岔：conflict（abort 恢复目标）或 failed，都保留候选
             return _merge_failed(dest, wt, branch, out_m)
